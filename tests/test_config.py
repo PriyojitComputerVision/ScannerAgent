@@ -34,3 +34,22 @@ def test_blank_values_from_env_example_fall_back_to_defaults(monkeypatch):
     assert s.langsmith_project == "pentest-agent"
     monkeypatch.setenv("GROQ_MODEL", "openai/gpt-oss-20b")
     assert Settings(_env_file=None).groq_model == "openai/gpt-oss-20b"
+
+
+def test_llm_kwargs_send_reasoning_effort_only_to_gpt_oss(monkeypatch):
+    from pentest_agent import llm
+    from pentest_agent.config import settings
+
+    monkeypatch.setattr(settings, "groq_max_tokens", 4096)
+    monkeypatch.setattr(settings, "groq_reasoning_effort", "low")
+    assert llm._model_kwargs("openai/gpt-oss-20b") == {"max_tokens": 4096, "reasoning_effort": "low"}
+    assert llm._model_kwargs("llama-3.3-70b-versatile") == {"max_tokens": 4096}
+    monkeypatch.setattr(settings, "groq_reasoning_effort", "")
+    assert llm._model_kwargs("openai/gpt-oss-20b") == {"max_tokens": 4096}
+
+
+def test_llms_default_to_zero_temperature():
+    from pentest_agent import llm
+
+    # langchain-groq maps 0 to 1e-8 (its stand-in for greedy decoding).
+    assert llm.get_llm().temperature <= 1e-6 and llm.get_judge_llm().temperature <= 1e-6
