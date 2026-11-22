@@ -222,11 +222,11 @@ def test_empty_llm_answer_is_retried_then_reported(monkeypatch):
     monkeypatch.setattr(graph, "get_llm", lambda **_: None)
     monkeypatch.setattr(graph, "invoke_with_backoff", lambda *_a, **_k: SimpleNamespace(content=next(answers)))
     f = [Finding.model_validate(x) for x in _case("static-two-findings").input_findings]
-    r = graph.generate_executive_summary("https://golden.example.test", "standard", 3, f, [])
+    r = graph.generate_executive_summary("https://golden.example.test", "standard", 3, f, [], use_cache=False)
     assert r.raw_llm_output == "Medium XSS [S1]." and not r.fallback_used
 
     monkeypatch.setattr(graph, "invoke_with_backoff", lambda *_a, **_k: SimpleNamespace(content=""))
-    r = graph.generate_executive_summary("https://golden.example.test", "standard", 3, f, [])
+    r = graph.generate_executive_summary("https://golden.example.test", "standard", 3, f, [], use_cache=False)
     assert r.fallback_used and r.fallback_reason == "LLM returned an empty answer"
 
 

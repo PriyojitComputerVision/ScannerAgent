@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pentest_agent.subagents import codegen_subagent as cg
-from pentest_agent.tools.probe_models import ProbePlan, ProbeType
+from pentest_agent.tools.probe_models import MAX_PROBES, ProbePlan, ProbeType
 
 
 def test_default_plan_has_baseline_and_observed_params():
@@ -10,7 +10,7 @@ def test_default_plan_has_baseline_and_observed_params():
     assert ProbeType.SECURITY_HEADERS in kinds and ProbeType.CORS in kinds
     reflected = {(p.path, p.query_parameter) for p in plan.probes if p.probe_type == ProbeType.REFLECTED_MARKER}
     assert reflected == {("/search", "q"), ("/p", "id")}
-    assert len(plan.probes) <= 12
+    assert len(plan.probes) <= MAX_PROBES
 
 
 def test_plan_falls_back_without_llm(monkeypatch):

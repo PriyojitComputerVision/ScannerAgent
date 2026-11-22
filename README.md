@@ -107,6 +107,49 @@ error-based SQLi signature • open redirect (never followed) • path traversal
 
 `quick` = passive only. `standard` = + active checks. `aggressive`/`auth_deep` = more targets + payload variants.
 
+## Custom probes (`tools/probe_runner.py`)
+
+The LLM (or, without one, a built-in default plan) picks up to 16 checks from a fixed list. Hand-written
+Python runs each check with GET or OPTIONS only, never follows redirects, and never runs generated code.
+
+| Probe type | What it reports |
+| --- | --- |
+| `security_headers` | missing HSTS, CSP, X-Content-Type-Options, Referrer-Policy, clickjacking protection |
+| `csp_weakness` | a CSP that allows `'unsafe-inline'` (without nonce/hash), `'unsafe-eval'`, wildcard script sources, or unrestricted `object-src` |
+| `cors` | a reflected untrusted Origin, or wildcard origin with credentials |
+| `cookie_flags` | cookies without Secure, HttpOnly or SameSite |
+| `cache_control` | responses that set cookies or answer an authenticated request without `no-store`/`private` |
+| `http_methods` | methods advertised by `OPTIONS` (informational) |
+| `server_banner` | server or framework versions in `Server`, `X-Powered-By` and similar headers |
+| `information_disclosure` | stack traces and verbose framework errors in the body |
+| `directory_listing` | auto-generated file indexes (Apache, nginx, IIS, Tomcat, Python) |
+| `mixed_content` | `http://` scripts, styles, frames (Medium) or images/media (Low) on an HTTPS page |
+| `insecure_transport` | the page answers on plain HTTP without redirecting to HTTPS (Informational for local/private hosts) |
+| `open_redirect` | a query parameter that redirects to an outside host, tested with the unresolvable `https://scopeguard.invalid/` |
+| `reflected_marker` | a harmless marker echoed back from a query parameter (informational, not proof of XSS) |
+
+`open_redirect` and `reflected_marker` need a parameter name seen during the crawl. The default plan runs
+the baseline checks on `/`, then open-redirect checks on redirect-like parameters (`next`, `url`, `return`, ...),
+directory-listing checks on up to two crawled directories, then reflection checks.
+
+## Caching (saves LLM cost and repeat requests)
+
+Identical work within `CACHE_TTL_SECONDS` (default 300, i.e. 5 minutes; `0` turns caching off) is reused
+instead of repeated (`pentest_agent/ttl_cache.py`):
+
+| What | Reused when |
+| --- | --- |
+| Whole scan (WebSocket) | same request: URL, profile, credentials, extra domains and notes (`session_id` aside). The reply arrives instantly with `"cached": true`, `cached_from_session` and `cache_age_seconds`, and points at the earlier report. Send `"force_refresh": true` to scan again. |
+| Probe check | same probe type, URL, parameter and bearer token |
+| Probe plan (LLM) | same model, prompt, target, scope, findings and crawled pages |
+| Executive summary (LLM) | same model, prompt and findings; only grounded answers are cached |
+| Run summary (LLM) | same model and transcript |
+
+Keys are SHA-256 digests, so tokens and passwords that are part of a key are never stored. Random finding
+ids are left out of keys so a repeat scan still matches. Errors and fallbacks are never cached. Caches live
+in memory in one server process and are shared by all its sessions; a restart empties them. The golden
+drift check always calls the model fresh and never uses the cache.
+
 ## HTTP 429 handling
 
 * **Scanned link**: every client that talks to the target (engine `ScopedClient`, and the agent's httpx

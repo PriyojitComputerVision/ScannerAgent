@@ -66,4 +66,13 @@ def _reset_backend_rate_limits():
     for limiter in (websocket_server.http_limiter, websocket_server.ws_session_limiter,
                     websocket_server.ws_concurrency):
         limiter.reset()
+
+
+@pytest.fixture(autouse=True)
+def _clear_ttl_caches():
+    """No cached LLM answer, probe result or scan leaks between tests."""
+    from pentest_agent import ttl_cache
+
+    ttl_cache.clear_all()
     yield
+    ttl_cache.clear_all()
