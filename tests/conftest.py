@@ -1,0 +1,69 @@
+"""Pytest bootstrap.
+
+Everything in this module's top level runs before pytest collects any test
+module, which is what lets us point `pentest_agent.config.settings` at a
+throwaway temp directory and a dummy Groq key *before* `pentest_agent.config`
+(a module-level singleton) gets imported anywhere. No test in this suite
+makes a real network call, hits a real Groq/LangSmith endpoint, or needs a
+running Docker daemon -- external interactions are monkeypatched or the
+underlying pure-logic helper is tested directly instead of the tool wrapper.
+"""
+
+from __future__ import annotations
+
+import os
+import tempfile
+from pathlib import Path
+
+_TMP_ROOT = Path(tempfile.mkdtemp(prefix="pentest-agent-test-"))
+
+os.environ.setdefault("GROQ_API_KEY", "test-key-not-a-real-credential")
+os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
+os.environ["LANGSMITH_TRACING"] = "false"
+os.environ["LANGSMITH_API_KEY"] = ""
+os.environ.setdefault("CHECKPOINT_DB_PATH", str(_TMP_ROOT / "checkpoints" / "main.sqlite"))
+os.environ.setdefault("SUBAGENT_CHECKPOINT_DB_PATH", str(_TMP_ROOT / "checkpoints" / "subagents.sqlite"))
+os.environ.setdefault("REPORTS_DIR", str(_TMP_ROOT / "reports"))
+os.environ.setdefault("SQUID_CONF_PATH", str(_TMP_ROOT / "squid" / "squid.conf"))
+os.environ.setdefault("SQUID_ACL_TARGET_FILE", str(_TMP_ROOT / "squid" / "allowed_target.acl"))
+
+# The real prompts/ folder is gitignored; tests use stub prompts so they pass on
+# any checkout. GOLDEN_LIVE=1 (live LLM judge) uses the real ./prompts instead.
+if not os.environ.get("GOLDEN_LIVE"):
+    _PROMPTS = _TMP_ROOT / "prompts"
+    _PROMPTS.mkdir()
+    for _name in ("run_summary", "executive_summary", "probe_plan_system", "golden_judge"):
+        (_PROMPTS / f"{_name}.md").write_text(f"stub {_name} prompt", encoding="utf-8")
+    (_PROMPTS / "content_injection_reminder.md").write_text(
+        "stub reminder {{start}} {{end}}", encoding="utf-8")
+    os.environ.setdefault("PROMPTS_DIR", str(_PROMPTS))
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture
+def valid_target_dict() -> dict:
+    """Minimal, authorized, schema-valid TargetInput payload."""
+    return {
+        "url": "https://example.com",
+        "session_id": "test-session-1",
+        "authorization_confirmed": True,
+        "profile": "quick",
+    }
+
+
+@pytest.fixture
+def tmp_data_root(tmp_path) -> Path:
+    return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def _reset_backend_rate_limits():
+    """Each test starts with fresh per-client backend limits (all TestClient
+    requests share the 'testclient' key)."""
+    from pentest_agent import websocket_server
+
+    for limiter in (websocket_server.http_limiter, websocket_server.ws_session_limiter,
+                    websocket_server.ws_concurrency):
+        limiter.reset()
+    yield

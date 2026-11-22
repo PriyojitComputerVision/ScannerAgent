@@ -1,0 +1,19 @@
+# Secrets: pass at runtime with --env-file .env, never bake into the image.
+.env
+*.env
+!.env.example
+
+# Local state and build artefacts
+.git
+.venv
+venv
+data
+golden/results
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.vscode
+.idea
+.claude

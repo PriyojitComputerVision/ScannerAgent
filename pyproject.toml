@@ -1,0 +1,53 @@
+[project]
+name = "pentest-agent"
+version = "0.1.0"
+description = "Autonomous, guard-railed web security scanner agent (pure-Python DAST/SAST, Docker-free sandbox) orchestrated with LangGraph + Groq. For use ONLY against targets you own or are explicitly authorized to test."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "langchain>=0.3.7",
+    "langchain-groq>=0.2.1",
+    "langgraph>=0.2.53",
+    "langgraph-checkpoint-sqlite>=2.0.1",
+    "pydantic>=2.9.2",
+    "pydantic-settings>=2.6.1",
+    "fastapi>=0.115.5",
+    "uvicorn[standard]>=0.32.0",
+    "websockets>=13.1",
+    "httpx>=0.27.2",
+    "python-docx>=1.1.2",
+    "markdown>=3.7",
+    "pyjwt>=2.9.0",
+    "tenacity>=9.0.0",
+    "langsmith>=0.1.147",
+    "python-dotenv>=1.0.1",
+    "beautifulsoup4>=4.12.3",
+    "lxml>=5.3.0",
+    "aiofiles>=24.1.0",
+    "typing-extensions>=4.12.2",
+    "aiosqlite>=0.22.1",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.3.3", "pytest-asyncio>=0.24.0", "ruff>=0.7.4"]
+
+[project.scripts]
+pentest-agent = "pentest_agent.main:run"
+scopeguard = "scopeguard.cli:main"
+golden-check = "pentest_agent.evals.golden:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+addopts = "-ra -q"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pentest_agent", "src/scopeguard"]

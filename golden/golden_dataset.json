@@ -1,0 +1,271 @@
+{
+  "version": "1.0.0",
+  "description": "Golden cases for drift detection. Data side: sandboxed scans of the built-in vulnerable target and fixed findings fixtures, compared to recorded baselines. Model side: the production executive-summary prompt, checked deterministically and by an LLM judge (score >= thresholds.min_judge_score). Re-capture baselines only after an intentional scanner change: python -m pentest_agent.evals.golden --record-baseline must_not_mention holds only phrases that are wrong in any context (substring checks cannot see negation); severity inflation and unsupported claims are scored by the judge's faithfulness.",
+  "thresholds": {
+    "min_judge_score": 7.0,
+    "judge_runs": 1
+  },
+  "cases": [
+    {
+      "id": "sim-standard",
+      "description": "Standard (active) scan of the built-in vulnerable target: all 14 planted issues must be found and the summary must lead with the high-severity ones.",
+      "kind": "simulated_scan",
+      "profile": "standard",
+      "target_url": "https://golden.example.test",
+      "pages_crawled": 1,
+      "input_findings": [],
+      "red_flags": [],
+      "baseline": {
+        "required_titles": [
+          "Reflected input without output encoding",
+          "Possible SQL injection",
+          "Open redirect",
+          "Path traversal",
+          "Exposed environment file",
+          "Directory listing enabled",
+          "CORS reflects arbitrary Origin",
+          "Password form served over plaintext HTTP",
+          "JS_EVAL",
+          "JS_INNERHTML",
+          "AWS_ACCESS_KEY",
+          "Missing Content-Security-Policy",
+          "missing HttpOnly",
+          "TRACE method enabled"
+        ],
+        "forbidden_titles": [],
+        "titles": [
+          "AWS_ACCESS_KEY: potentially unsafe JavaScript pattern",
+          "CORS reflects arbitrary Origin with credentials",
+          "Cookie 'sessionid' missing HttpOnly attribute",
+          "Cookie 'sessionid' missing SameSite attribute",
+          "Directory listing enabled",
+          "Exposed environment file (.env)",
+          "HARDCODED_SECRET: potentially unsafe JavaScript pattern",
+          "HTTP TRACE method enabled",
+          "JS_EVAL: potentially unsafe JavaScript pattern",
+          "JS_HTTP_URL: potentially unsafe JavaScript pattern",
+          "JS_INNERHTML: potentially unsafe JavaScript pattern",
+          "JS_STORAGE_TOKEN: potentially unsafe JavaScript pattern",
+          "JS_WEAK_RANDOM: potentially unsafe JavaScript pattern",
+          "Missing Content-Security-Policy header",
+          "Missing Referrer-Policy header",
+          "Missing X-Content-Type-Options header",
+          "Missing clickjacking protection (X-Frame-Options/frame-ancestors)",
+          "Open redirect",
+          "POST form without apparent anti-CSRF token",
+          "Password form served over plaintext HTTP",
+          "Path traversal (local file disclosure)",
+          "Possible SQL injection (database error on quote)",
+          "Reflected input without output encoding (possible XSS)",
+          "Risky HTTP methods advertised",
+          "Server header discloses software/version"
+        ],
+        "min_title_jaccard": 0.9,
+        "severity_counts": {
+          "high": 7,
+          "info": 2,
+          "low": 7,
+          "medium": 9
+        },
+        "severity_tolerance": 1,
+        "min_pages": 5,
+        "max_pages": 30,
+        "min_blocked_links": 1,
+        "input_sha256": null
+      },
+      "expectations": {
+        "min_citations": 3,
+        "must_cite_titles": [
+          "Possible SQL injection",
+          "Path traversal",
+          "Exposed environment file"
+        ],
+        "must_not_mention": [
+          "remote code execution",
+          "no vulnerabilities were found",
+          "fully secure"
+        ],
+        "min_words": 80,
+        "max_words": 260
+      },
+      "reference_summary": "The authorized standard-profile test of the target crawled the in-scope pages and found seven high-severity issues that need prompt remediation: a possible SQL injection on the product page, a path traversal that disclosed a local file, an exposed .env file, CORS that reflects any origin with credentials, and client-side JavaScript containing a hardcoded secret, an AWS access key and use of eval. Medium-severity issues include reflected input without output encoding (possible XSS), an open redirect, directory listing, a password form served over plain HTTP, an enabled TRACE method, a session cookie without HttpOnly, and a missing Content-Security-Policy. Lower-severity items are missing hardening headers, a POST form without an anti-CSRF token and weak randomness in JavaScript. Each statement cites its source finding. Fix the injection, traversal and exposed secrets first, rotate any leaked keys, then apply header and cookie hardening. Results come from automated checks and should be validated before disclosure."
+    },
+    {
+      "id": "sim-quick",
+      "description": "Quick (passive-only) scan of the same target: no active-attack findings may appear, and the summary must not claim injection or traversal issues.",
+      "kind": "simulated_scan",
+      "profile": "quick",
+      "target_url": "https://golden.example.test",
+      "pages_crawled": 1,
+      "input_findings": [],
+      "red_flags": [],
+      "baseline": {
+        "required_titles": [
+          "Missing Content-Security-Policy",
+          "Exposed environment file",
+          "JS_EVAL"
+        ],
+        "forbidden_titles": [
+          "Possible SQL injection",
+          "Path traversal",
+          "Open redirect",
+          "Reflected input without output encoding"
+        ],
+        "titles": [
+          "AWS_ACCESS_KEY: potentially unsafe JavaScript pattern",
+          "CORS reflects arbitrary Origin with credentials",
+          "Cookie 'sessionid' missing HttpOnly attribute",
+          "Cookie 'sessionid' missing SameSite attribute",
+          "Directory listing enabled",
+          "Exposed environment file (.env)",
+          "HARDCODED_SECRET: potentially unsafe JavaScript pattern",
+          "HTTP TRACE method enabled",
+          "JS_EVAL: potentially unsafe JavaScript pattern",
+          "JS_HTTP_URL: potentially unsafe JavaScript pattern",
+          "JS_INNERHTML: potentially unsafe JavaScript pattern",
+          "JS_STORAGE_TOKEN: potentially unsafe JavaScript pattern",
+          "JS_WEAK_RANDOM: potentially unsafe JavaScript pattern",
+          "Missing Content-Security-Policy header",
+          "Missing Referrer-Policy header",
+          "Missing X-Content-Type-Options header",
+          "Missing clickjacking protection (X-Frame-Options/frame-ancestors)",
+          "POST form without apparent anti-CSRF token",
+          "Password form served over plaintext HTTP",
+          "Risky HTTP methods advertised",
+          "Server header discloses software/version"
+        ],
+        "min_title_jaccard": 0.9,
+        "severity_counts": {
+          "high": 5,
+          "info": 2,
+          "low": 7,
+          "medium": 7
+        },
+        "severity_tolerance": 1,
+        "min_pages": 5,
+        "max_pages": 30,
+        "min_blocked_links": 1,
+        "input_sha256": null
+      },
+      "expectations": {
+        "min_citations": 2,
+        "must_cite_titles": [
+          "Exposed environment file"
+        ],
+        "must_not_mention": [
+          "remote code execution",
+          "fully secure"
+        ],
+        "min_words": 60,
+        "max_words": 260
+      },
+      "reference_summary": "This passive (quick) test examined the in-scope pages without sending attack payloads, so injection-style issues were not tested. It still found high-severity exposure: an accessible .env environment file, CORS that reflects arbitrary origins with credentials, and client-side JavaScript containing a hardcoded secret, an AWS access key and use of eval. Medium-severity issues include directory listing, a password form over plaintext HTTP, a session cookie without HttpOnly, the TRACE method enabled and a missing Content-Security-Policy, with lower-severity header hardening gaps. Each claim cites its source finding. Remove the exposed files and secrets first, then harden headers and cookies, and run a standard-profile test for active coverage."
+    },
+    {
+      "id": "static-two-findings",
+      "description": "Fixed two-finding input (no scan): the summary must stay within these facts and not inflate severity.",
+      "kind": "static_findings",
+      "profile": "standard",
+      "target_url": "https://golden.example.test",
+      "pages_crawled": 3,
+      "input_findings": [
+        {
+          "id": "g-xss-01",
+          "source": "dast_native",
+          "category": "Cross-Site Scripting",
+          "severity": "medium",
+          "title": "Reflected input without output encoding (possible XSS)",
+          "description": "The q parameter on /search is reflected into HTML without encoding '<', '\"' or '''.",
+          "affected_url": "https://golden.example.test/search?q=%3Cmarker%3E",
+          "evidence": "<marker> reflected unencoded",
+          "cwe": "CWE-79",
+          "confidence": "medium",
+          "recommendation": "HTML-encode untrusted output and add a Content-Security-Policy."
+        },
+        {
+          "id": "g-hdr-01",
+          "source": "dast_native",
+          "category": "A05:2021-Security Misconfiguration",
+          "severity": "low",
+          "title": "Missing X-Content-Type-Options header",
+          "description": "Responses do not send X-Content-Type-Options: nosniff.",
+          "affected_url": "https://golden.example.test/",
+          "cwe": "CWE-693",
+          "confidence": "high",
+          "recommendation": "Send X-Content-Type-Options: nosniff on all responses."
+        }
+      ],
+      "red_flags": [],
+      "baseline": {
+        "required_titles": [
+          "Reflected input without output encoding",
+          "Missing X-Content-Type-Options"
+        ],
+        "forbidden_titles": [],
+        "titles": [
+          "Missing X-Content-Type-Options header",
+          "Reflected input without output encoding (possible XSS)"
+        ],
+        "min_title_jaccard": 1.0,
+        "severity_counts": {
+          "low": 1,
+          "medium": 1
+        },
+        "severity_tolerance": 0,
+        "min_pages": 3,
+        "max_pages": 3,
+        "min_blocked_links": 0,
+        "input_sha256": "efa706297bac4514c8dcddd2fd5d1e7ca29a752a60e1bbc19183c02251cbddd8"
+      },
+      "expectations": {
+        "min_citations": 2,
+        "must_cite_titles": [
+          "Reflected input without output encoding",
+          "Missing X-Content-Type-Options"
+        ],
+        "must_not_mention": [
+          "remote code execution",
+          "data breach",
+          "fully secure"
+        ],
+        "min_words": 50,
+        "max_words": 220
+      },
+      "reference_summary": "An automated standard-profile test of https://golden.example.test crawled 3 in-scope pages and produced two findings, neither critical nor high. The most significant is a medium-severity reflected-input issue on the search page: the q parameter is echoed into HTML without output encoding, which may allow cross-site scripting [S1]. The second is a low-severity hardening gap: responses omit the X-Content-Type-Options header [S2]. No red flags were raised. Recommended next steps are to HTML-encode untrusted output and add a Content-Security-Policy, then send X-Content-Type-Options: nosniff. The XSS finding should be confirmed manually before disclosure."
+    },
+    {
+      "id": "static-no-findings",
+      "description": "Empty input: the summary must not invent vulnerabilities (pure hallucination probe).",
+      "kind": "static_findings",
+      "profile": "quick",
+      "target_url": "https://clean.example.test",
+      "pages_crawled": 4,
+      "input_findings": [],
+      "red_flags": [],
+      "baseline": {
+        "required_titles": [],
+        "forbidden_titles": [],
+        "titles": [],
+        "min_title_jaccard": 1.0,
+        "severity_counts": {},
+        "severity_tolerance": 0,
+        "min_pages": 4,
+        "max_pages": 4,
+        "min_blocked_links": 0,
+        "input_sha256": "82a3b68eca68e3a8147ce1547bb3a8ba917dc51783defb94bb23028881ba6d50"
+      },
+      "expectations": {
+        "min_citations": 0,
+        "must_cite_titles": [],
+        "must_not_mention": [
+          "remote code execution",
+          "[s1]",
+          "fully secure"
+        ],
+        "min_words": 30,
+        "max_words": 220
+      },
+      "reference_summary": "A passive (quick-profile) automated test of https://clean.example.test crawled 4 in-scope pages and produced no findings and no red flags. This means none of the passive checks flagged an issue; it does not prove the application is secure, because the quick profile sends no active test payloads and authenticated areas were not assessed. A standard-profile test and periodic re-testing are recommended for broader coverage."
+    }
+  ]
+}
