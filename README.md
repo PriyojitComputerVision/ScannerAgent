@@ -56,6 +56,35 @@ Reports are rendered with every target-controlled value HTML-escaped and served 
 
 validate/gate -> recon+crawl -> auth -> JS SAST -> native DAST -> custom probes -> aggregate -> report (md + html + docx)
 
+## LLM prompts (`prompts/`, not in the repository)
+
+The system prompts for every LLM step are plain-text files in a local `prompts/` folder at the repo
+root. The folder is gitignored, so a fresh clone does not include it. Each step loads its prompt with
+`pentest_agent/prompts.py` from `PROMPTS_DIR` (default `./prompts`, relative to the working directory):
+
+| File | Used by |
+| --- | --- |
+| `run_summary.md` | rolling summary of the run once the message history grows long (`graph.maybe_summarize`) |
+| `executive_summary.md` | executive summary in the report, citing `[Sn]` sources (`graph.generate_executive_summary`) |
+| `probe_plan_system.md` | custom probe plan (`subagents/codegen_subagent.generate_probe_plan`) |
+| `golden_judge.md` | LLM-as-judge in the golden-dataset drift check (`evals/golden.judge_messages`) |
+| `content_injection_reminder.md` | reminder paired with untrusted page content (`guardrails.content_injection_system_reminder`); `{{start}}` and `{{end}}` are replaced with the untrusted-content markers |
+
+If a file is missing or empty, its step uses the same deterministic fallback as when no `GROQ_API_KEY`
+is set. The scanner still runs and still writes reports, but without LLM-written text:
+
+* the executive summary is the deterministic, fully cited summary, and `fallback_reason` names the missing file;
+* the probe plan is the built-in default plan;
+* the golden check reports `NOT_EVALUATED` when the judge prompt is missing.
+
+Notes:
+
+* The tests don't read your `prompts/`. `tests/conftest.py` writes stand-in prompts to a temp folder
+  and points `PROMPTS_DIR` at it. With `GOLDEN_LIVE=1`, tests use the real `./prompts`.
+* `docker build` copies `prompts/` into the image, so the folder must exist in the build context. An
+  empty folder is fine, but the image then runs without LLM text. A built image contains your prompts,
+  so keep it private if they are.
+
 ## Source citations (anti-hallucination)
 
 Every finding becomes a numbered source `S1..Sn` (most severe first), linked to its in-scope URL and its
@@ -154,4 +183,5 @@ machine holding secrets you cannot afford to expose.
 
 `src/scopeguard/` stdlib-only engine, sandbox, citations, rate limiting, reports, simulated target, CLI.
 `src/pentest_agent/` LangGraph agent, guardrails, schemas, tools, tracing, rate limits, websocket server,
-`evals/golden.py`. `golden/golden_dataset.json`, `tests/`, `scripts/simulate_full.py`, `Dockerfile`.
+`evals/golden.py`, `prompts.py`. `golden/golden_dataset.json`, `tests/`, `scripts/simulate_full.py`, `Dockerfile`.
+`prompts/` (local only, gitignored) holds the LLM prompt texts; see [LLM prompts](#llm-prompts-prompts-not-in-the-repository).
