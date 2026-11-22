@@ -36,6 +36,14 @@ def test_allowed_domains_includes_www_variant(valid_target_dict):
     assert "www.example.com" in allowed
 
 
+def test_allowed_domains_no_www_variant_for_ip_or_localhost(valid_target_dict):
+    for url, expected in (("http://127.0.0.1:8080", {"127.0.0.1:8080"}),
+                          ("http://localhost:3000", {"localhost:3000"}),
+                          ("http://[::1]:8000", {"[::1]:8000"})):
+        target = TargetInput.model_validate({**valid_target_dict, "url": url})
+        assert allowed_domains_for(target) == expected
+
+
 def test_allowed_domains_includes_extra_domains(valid_target_dict):
     data = dict(valid_target_dict)
     data["additional_allowed_domains"] = ["cdn.example.net"]

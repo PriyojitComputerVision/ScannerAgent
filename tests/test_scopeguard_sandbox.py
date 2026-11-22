@@ -101,6 +101,14 @@ def test_full_simulated_scan_finds_expected():
     assert all(u.startswith(t.url) for u in res["crawled_pages"])
 
 
+def test_unresolvable_allowed_host_does_not_abort_scan():
+    # e.g. a "www." twin that has no DNS record: skipped, scan still runs.
+    with SimulatedTarget() as t:
+        res = run_sandboxed_scan({"target_url": t.url, "profile": "quick", "delay": 0,
+                                  "allowed_domains": [t.netloc, "no-such-host.invalid"]})
+    assert res["crawled_pages"] and all(u.startswith(t.url) for u in res["crawled_pages"])
+
+
 def test_quick_profile_sends_no_active_payloads():
     with SimulatedTarget() as t:
         res = run_sandboxed_scan(dict(target_url=t.url, allowed_domains=[t.netloc], profile="quick", delay=0))

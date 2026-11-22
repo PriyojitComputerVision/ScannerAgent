@@ -131,7 +131,15 @@ def main() -> None:
             ipaddress.ip_address(h)
             ips.add(h)
         except ValueError:
-            for info in socket.getaddrinfo(h, None):
+            try:
+                infos = socket.getaddrinfo(h, None)
+            except OSError:
+                # An allowed name that does not resolve simply stays
+                # unreachable (stricter, not looser); don't abort the scan.
+                print(f"sandbox: allowed host {h!r} does not resolve; skipping",
+                      file=sys.stderr)
+                continue
+            for info in infos:
                 ips.add(info[4][0])
 
     _pin_reachable_addresses(hosts, ports)
