@@ -141,6 +141,8 @@ def _print_message(msg: dict, raw: bool) -> None:
     kind = msg.get("type")
     if kind == "status":
         print(f"[status] {msg.get('message', '')}")
+    elif kind == "queued":
+        print(f"[queue]  #{msg.get('position')} of {msg.get('queue_length')}: {msg.get('message', '')}")
     elif kind == "phase_update":
         data = msg.get("data") or {}
         extra = []

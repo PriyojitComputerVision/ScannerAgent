@@ -70,9 +70,9 @@ def _reset_backend_rate_limits():
     requests share the 'testclient' key)."""
     from pentest_agent import llm, websocket_server
 
-    for limiter in (websocket_server.http_limiter, websocket_server.ws_session_limiter,
-                    websocket_server.ws_concurrency):
-        limiter.reset()
+    websocket_server.http_limiter.reset()
+    websocket_server.ws_queue.reset()
+    websocket_server.http_queue.reset()
     llm.reset_rate_limit_cooldown()
 
 

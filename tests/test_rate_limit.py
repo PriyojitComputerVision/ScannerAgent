@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from pentest_agent import llm, websocket_server
 from pentest_agent.http_retry import RateLimitRetryTransport
-from pentest_agent.rate_limit import ConcurrencyLimiter, SlidingWindowLimiter
+from pentest_agent.rate_limit import SlidingWindowLimiter
 from scopeguard import ratelimit
 from scopeguard.engine import ScopedClient
 
@@ -301,7 +301,7 @@ def test_rate_limit_waits_reach_the_graph_stream(monkeypatch):
 
 
 # ---------------------------------------------------------------- backend limits
-def test_sliding_window_and_concurrency_limiters():
+def test_sliding_window_limiter():
     t = [0.0]
     lim = SlidingWindowLimiter(2, window=60, clock=lambda: t[0])
     assert lim.hit("a")[0] and lim.hit("a")[0]
@@ -311,16 +311,6 @@ def test_sliding_window_and_concurrency_limiters():
     t[0] = 61
     assert lim.hit("a")[0]
     assert SlidingWindowLimiter(0).hit("x") == (True, 0)  # 0 disables
-
-    import asyncio
-
-    async def run():
-        c = ConcurrencyLimiter(1)
-        async with c.slot("ip") as first:
-            async with c.slot("ip") as second:
-                assert first and not second
-        assert c.active("ip") == 0
-    asyncio.run(run())
 
 
 def test_http_routes_return_429_with_retry_after(monkeypatch):
@@ -332,16 +322,3 @@ def test_http_routes_return_429_with_retry_after(monkeypatch):
     assert r.status_code == 429 and int(r.headers["retry-after"]) >= 1
     assert r.json()["detail"] == "Too Many Requests"
     assert c.get("/healthz").status_code == 200  # exempt
-
-
-def test_ws_sessions_rate_limited_with_4429(monkeypatch):
-    monkeypatch.setattr(websocket_server.ws_session_limiter, "limit", 1)
-    c = TestClient(websocket_server.app)
-    with c.websocket_connect("/ws") as ws:  # no session_id: rejected, but counts
-        assert ws.receive_json()["type"] == "error"
-    with c.websocket_connect("/ws?session_id=x") as ws:
-        msg = ws.receive_json()
-        assert msg["code"] == 429 and msg["retry_after"] >= 1
-        with pytest.raises(Exception) as info:
-            ws.receive_json()
-        assert getattr(info.value, "code", None) == 4429
