@@ -23,4 +23,4 @@ if [ "${AUTH_ENABLED:-true}" != "false" ] && [ ! -f "${JWT_PRIVATE_KEY_PATH:-./k
 fi
 # Inside a container the server must listen on all interfaces to be reachable via -p.
 export WS_HOST=0.0.0.0
-exec uv run pentest-agent
+exec uv run pentest-agent --no-browser --no-target

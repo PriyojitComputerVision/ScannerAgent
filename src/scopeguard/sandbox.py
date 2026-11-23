@@ -42,8 +42,13 @@ def _limits(cpu_seconds: int, mem_bytes: int):
     return apply
 
 
-def run_sandboxed_scan(scan_args: dict, wall_timeout: int = 900, memory_mb: int = 1024) -> dict:
-    """scan_args: kwargs for scopeguard.engine.run_scan. Returns the scan result dict."""
+def run_sandboxed_scan(scan_args: dict, wall_timeout: int = 900, memory_mb: int = 1024,
+                       block_private: bool = False) -> dict:
+    """scan_args: kwargs for scopeguard.engine.run_scan. Returns the scan result dict.
+
+    Cloud-metadata / link-local / multicast / reserved addresses are always kept
+    out of the worker's egress allowlist; ``block_private`` also removes
+    loopback and private ranges (scopeguard.netpolicy)."""
     sandbox_dir = tempfile.mkdtemp(prefix="scopeguard-sbx-")
     env = {"PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1",
            "PATH": os.environ.get("PATH", "")}
@@ -59,7 +64,8 @@ def run_sandboxed_scan(scan_args: dict, wall_timeout: int = 900, memory_mb: int 
     try:
         proc = subprocess.run(
             [sys.executable, "-I", "-c", boot],
-            input=json.dumps({"scan": scan_args, "sandbox_dir": sandbox_dir}),
+            input=json.dumps({"scan": scan_args, "sandbox_dir": sandbox_dir,
+                              "block_private": bool(block_private)}),
             capture_output=True, text=True, timeout=wall_timeout, cwd=sandbox_dir, env=env, **kwargs)
     except subprocess.TimeoutExpired as exc:
         raise SandboxError(f"scan exceeded wall-clock limit of {wall_timeout}s") from exc

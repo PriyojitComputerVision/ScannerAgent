@@ -54,6 +54,38 @@ python -m scopeguard.cli --serve --port 8000     # browse existing reports
 On Windows without `python` on PATH, use the uv environment: `uv run python -m scopeguard.cli ...`
 or `.venv\Scripts\python.exe -m scopeguard.cli ...`.
 
+### Browser console (one command)
+
+```bash
+uv run pentest-agent          # server + console + built-in vulnerable target, opens your browser
+uv run scopeguard-demo        # same, but always loopback-only and on a free port if 8765 is taken
+```
+
+The console is served by the agent server itself at `http://127.0.0.1:8765/`: a live view of the
+11-node pipeline, an event stream, a findings radar, severity mix and risk grade, the cited executive
+summary (each `[Sn]` jumps to its finding), attack coverage, a findings explorer and all saved
+reports with html/docx/md/json downloads. The built-in target (`127.0.0.1` only) is offered as a
+one-click demo target. Flags: `--no-browser`, `--no-target`, `--host`, `--port`.
+
+There is no login screen, and API authentication stays on:
+
+- The server prints a **one-time sign-in link** (`/#demo=<code>`, single use, valid 10 minutes, only
+  its SHA-256 is kept in memory). The page exchanges the code at `POST /ui/demo-login` for a normal
+  RS256 token pair with the `AUTH_CLIENT_ROLES` roles, then removes it from the address bar.
+- The browser keeps the pair in `sessionStorage` (per tab) and sends the access token in the
+  `Authorization` header, or in the first WebSocket message. Tokens are never put in a URL. The
+  token is renewed 5 minutes before expiry with the single-use refresh token. The page also adopts
+  `X-New-Access-Token` and `token_refreshed` pushes and retries once after refreshing on a 401.
+- Report links work through an HttpOnly, SameSite=Strict cookie set by `POST /api/report-cookie`.
+- Every UI file is served from a fixed whitelist with a strict CSP: no inline code, no third-party
+  loads, no framing. Scanned-site text is rendered as text only, never parsed as HTML.
+- `/ws` rejects browser connections from another origin (close `4403`).
+
+Reloading the page keeps the session. After a restart, open the new link the server prints.
+Replace `src/pentest_agent/webui/favicon/favicon.png` to change the tab icon and the top-left logo
+(served at `/ui/favicon.png` and `/favicon.ico`, read from disk on each request). In Docker the
+server runs with `--no-browser --no-target`.
+
 ### Full LangGraph + WebSocket agent
 
 ```bash
@@ -61,7 +93,7 @@ uv sync
 cp .env.example .env            # GROQ_API_KEY is optional; empty = deterministic offline mode
 uv run python scripts/get_token.py       # creates keys/ if needed and prints a 60-min access token
 uv run python scripts/simulate_full.py   # whole pipeline against the built-in target (auth on)
-uv run pentest-agent                      # ws://127.0.0.1:8765/ws?session_id=<id> (Bearer token required)
+uv run pentest-agent                      # console at http://127.0.0.1:8765/ + ws://127.0.0.1:8765/ws?session_id=<id>
 uv run python scripts/ws_client.py --simulate   # Postman-free client for the running server (see --help)
 uv run pytest
 uv run golden-check                       # golden-dataset drift check (see below)
@@ -513,6 +545,46 @@ redirects automatically, and enforces a request budget and size caps. `tests/tes
 proves the escapes are blocked. (Windows: rlimits unavailable; all other layers apply.)
 This is strong process-level containment, not a VM/kernel boundary. Do not scan hostile targets with it on a
 machine holding secrets you cannot afford to expose.
+
+## Network policy: no metadata, no DNS rebinding (`src/scopeguard/netpolicy.py`)
+
+Some addresses are never reached by a scan:
+
+- link-local / cloud metadata (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, `100.100.100.200`,
+  `192.0.0.192`, `metadata.google.internal`, …);
+- `0.0.0.0/8` and `::`, multicast, reserved and broadcast addresses;
+- IPv6 forms that hide one of those (IPv4-mapped, NAT64, 6to4, Teredo) are unwrapped and refused too.
+
+`BLOCK_PRIVATE_TARGETS=true` also refuses loopback and private ranges (`127/8`, `10/8`, `172.16/12`,
+`192.168/16`, `100.64/10`, `fc00::/7`, `localhost`). It defaults to `false` so local dev apps and the demo
+target can be scanned. The policy is enforced in four places:
+
+| Layer | What happens |
+| --- | --- |
+| Browser console | An obviously blocked URL (e.g. `http://169.254.169.254/`, `http://0xA9FEA9FE/`) disables Launch with the reason. |
+| Pre-scan guardrail | The target and every extra allowed host are resolved. If any address is blocked, the scan is refused (`validate → blocked`, shown as REFUSED); an unresolvable target is refused too. |
+| Every agent-side connection (`http_retry.PinnedNetworkBackend`) | The host is resolved and every address checked, then the socket opens to exactly the checked IP (TLS still verifies the real host name). A DNS answer that changes mid-scan (DNS rebinding) is refused before any socket is opened. Environment proxies are ignored. |
+| Sandbox worker | Blocked addresses never enter the egress allowlist and are never probed; a blocked target ends the scan with an error. |
+
+`scopeguard.cli --url` applies the same check (exit code `5`) and reads `BLOCK_PRIVATE_TARGETS` from the
+environment.
+
+## Scans never download files (`src/scopeguard/contentpolicy.py`)
+
+- **No file links are crawled.** Links to executables, installers, archives, disk images, office/PDF
+  documents, media, fonts and wasm are never requested by the crawlers. Fixed security probes such as
+  `/backup.zip` still send their single request but only use the status and headers.
+- **Attachments and binaries are discarded unread.** This covers `Content-Disposition: attachment`, binary
+  media types and unsupported compression (`br`, `zstd`): the connection is closed without reading the body.
+  The response keeps its status and headers plus `x-scopeguard-body-dropped: <reason>`.
+- **Unknown types are sniffed.** At most 64 KB is read; a body with NUL bytes or a file signature
+  (MZ/ELF/ZIP/PDF/…) is discarded. Text bodies are capped at 2 MB in memory, and gzip/deflate is decoded
+  with a hard output cap, so a compression bomb cannot expand.
+- **Nothing from the target is saved as a file.** The one exception is the sandboxed code check, which stages
+  the *text* of in-scope HTML pages and JavaScript under fixed names (`pages/0001.html`, `scripts/0001.js`)
+  in a private temp folder. That folder is mounted read-only into a `--network none` container and deleted
+  when the check ends. Reports quote short evidence snippets as text.
+- **Refused downloads are reported.** The report's attack coverage lists them as "File downloads refused".
 
 ## Layout
 

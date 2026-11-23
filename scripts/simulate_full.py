@@ -69,7 +69,7 @@ def main() -> int:
            "AUTH_CLIENT_ID": "sim-client", "AUTH_CLIENT_SECRET": secret, "AUTH_CLIENT_ROLES": "scanner"}
     subprocess.run([sys.executable, "-m", "pentest_agent.api_auth", "keys"], env=env, cwd=ROOT,
                    check=True, stdout=subprocess.DEVNULL)
-    server = subprocess.Popen([sys.executable, "-m", "pentest_agent.main"], env=env, cwd=ROOT)
+    server = subprocess.Popen([sys.executable, "-m", "pentest_agent.main", "--no-browser", "--no-target"], env=env, cwd=ROOT)
     tm = TokenManager(f"http://127.0.0.1:{WS_PORT}", "sim-client", secret)
     try:
         with SimulatedTarget() as t:

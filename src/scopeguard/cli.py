@@ -8,12 +8,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import socket
 import sys
 import time
 import urllib.parse as up
 from pathlib import Path
 
+from scopeguard import netpolicy
 from scopeguard.report import DOWNLOADABLE, download_name, render_index, write_reports
 from scopeguard.sandbox import SandboxError, run_sandboxed_scan
 from scopeguard.simulated_target import SimulatedTarget
@@ -156,6 +158,16 @@ def main(argv=None) -> int:
         if p.scheme not in ("http", "https") or not p.hostname:
             ap.error("--url must be http(s)://host[:port]")
         port = p.port or (443 if p.scheme == "https" else 80)
+        block_private = os.environ.get("BLOCK_PRIVATE_TARGETS", "").strip().lower() in ("1", "true", "yes")
+        for host in dict.fromkeys([p.hostname, *(up.urlparse("//" + d).hostname for d in a.allow)]):
+            if not host:
+                continue
+            try:
+                netpolicy.check_host(host, block_private=block_private)
+            except netpolicy.BlockedAddress as exc:
+                print(f"Refusing to scan {host}: {exc}. Scans never reach cloud metadata, "
+                      "link-local, multicast or reserved addresses.")
+                return 5
         if not _reachable(p.hostname, port):
             print(f"Target not reachable: nothing is accepting connections on {p.hostname}:{port}.\n"
                   "Start your application first (or check the URL/port), then re-run.")
@@ -163,7 +175,7 @@ def main(argv=None) -> int:
         scan = dict(target_url=a.url, allowed_domains=[p.netloc, *a.allow], profile=a.profile,
                     bearer=a.bearer)
         try:
-            res = run_sandboxed_scan(scan, wall_timeout=a.timeout)
+            res = run_sandboxed_scan(scan, wall_timeout=a.timeout, block_private=block_private)
         except SandboxError as e:
             print("SANDBOX ERROR:", e)
             return 2

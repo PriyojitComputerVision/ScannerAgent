@@ -65,6 +65,27 @@ def tmp_data_root(tmp_path) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def _offline_dns(monkeypatch):
+    """The network policy resolves host names (scopeguard.netpolicy.resolve).
+    Tests make no real DNS lookups: localhost is 127.0.0.1, names under the
+    reserved .invalid TLD do not resolve, and any other name resolves to a
+    public documentation-style address, unless a test patches ``resolve``."""
+    import socket
+
+    from scopeguard import netpolicy
+
+    def fake_resolve(host, port=None):
+        name = str(host).lower().rstrip(".")
+        if name == "localhost":
+            return ["127.0.0.1"]
+        if name.endswith(".invalid"):
+            raise socket.gaierror(f"no DNS in tests: {host}")
+        return ["93.184.215.14"]
+
+    monkeypatch.setattr(netpolicy, "resolve", fake_resolve)
+
+
+@pytest.fixture(autouse=True)
 def _no_docker_sweep(monkeypatch):
     """The server's startup sweep for leftover sandbox containers must not
     call a real Docker daemon from tests."""
