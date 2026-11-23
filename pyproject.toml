@@ -3,6 +3,9 @@ name = "pentest-agent"
 version = "0.1.0"
 description = "Autonomous, guard-railed web security scanner agent (pure-Python DAST/SAST, Docker-free sandbox) orchestrated with LangGraph + Groq. For use ONLY against targets you own or are explicitly authorized to test."
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Priyojit Chakraborty" }]
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "langchain>=0.3.7",
@@ -27,6 +30,8 @@ dependencies = [
     "typing-extensions>=4.12.2",
     "aiosqlite>=0.22.1",
     "pycryptodome>=3.20",
+    "mcp>=2.3",
+    "a2a-sdk[http-server]>=1.3.1",
 ]
 
 [dependency-groups]
@@ -39,6 +44,7 @@ golden-check = "pentest_agent.evals.golden:main"
 pentest-auth = "pentest_agent.api_auth:main"
 scopeguard-demo = "pentest_agent.demo:main"
 pentest-audit = "scopeguard.audit:main"
+scopeguard-mcp = "pentest_agent.mcp_server.server:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

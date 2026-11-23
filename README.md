@@ -67,7 +67,8 @@ uv run scopeguard-demo        # same, but always loopback-only and on a free por
 The console is served by the agent server itself at `http://127.0.0.1:8765/`: a live view of the
 13-step pipeline, an event stream, a findings radar, severity mix and risk grade, the cited executive
 summary (each `[Sn]` jumps to its finding), attack coverage, a findings explorer and all saved
-reports with html/docx/md/json downloads. Admins also see the **audit trail** (live chain check) and
+reports with html/docx/md/json downloads, and the **agent integrations** (MCP and A2A endpoints,
+see below). Admins also see the **audit trail** (live chain check) and
 can tick **Pause for SSO / MFA sign-in** to complete a target's sign-in themselves when asked. The built-in target (`127.0.0.1` only) is offered as a
 one-click demo target. Flags: `--no-browser`, `--no-target`, `--host`, `--port`.
 
@@ -89,6 +90,97 @@ Reloading the page keeps the session. After a restart, open the new link the ser
 Replace `src/pentest_agent/webui/favicon/favicon.png` to change the tab icon and the top-left logo
 (served at `/ui/favicon.png` and `/favicon.ico`, read from disk on each request). In Docker the
 server runs with `--no-browser --no-target`.
+
+### MCP and A2A: other agents and coding assistants
+
+`uv run pentest-agent` also starts two agent endpoints next to the console. Both are listed in the
+startup banner and in the console's **Agent integrations** card:
+
+| Endpoint | Who uses it | Auth |
+| --- | --- | --- |
+| MCP over Streamable HTTP, `http://127.0.0.1:8765/mcp` | MCP clients that connect by URL | API JWT (`Authorization: Bearer`); tools run as the token's subject and roles |
+| MCP over stdio, `uv run scopeguard-mcp` | coding assistants on this machine (Claude Code picks it up from `.mcp.json`) | none: it is the assistant's own child process; runs as `MCP_ROLE` |
+| A2A 1.0, `http://127.0.0.1:8765/a2a` (agent card: `/.well-known/agent-card.json`, public) | other agents | API JWT; tasks belong to the token's subject |
+
+Tokens: `uv run pentest-auth token --sub my-agent --roles scanner`.
+
+Every path goes through one shared service, `pentest_agent/scan_service.py`, with the same
+guardrails as the console:
+
+- **Operator allowlist.** `MCP_ALLOWED_TARGETS` / `A2A_ALLOWED_TARGETS` list the hosts agents may
+  scan. Empty means the built-in demo app only.
+- **Authorization.** `authorization_confirmed` must be `true`.
+- **RBAC and limits.** Role checks apply, and only one scan runs at a time.
+- **Audit log.** Every attempt is recorded, including refused, cancelled and crashed ones.
+- **Untrusted output.** Text from the target is returned wrapped as untrusted.
+
+Authenticated scans use **credential profiles**. The operator stores the secret once; agents pass
+only the profile's name, so passwords never enter an agent's context:
+
+```bash
+uv run scopeguard-mcp credentials add staging --target staging.example.com \
+    --login-url https://staging.example.com/login --username qa    # password prompted, hidden
+```
+
+Profiles are bound to their hosts and need the `scan:authenticated` permission (admin). The demo
+app has a public fake account for trying this out (`sign_in: true`).
+
+Watch a scan go through either protocol, one event at a time. Each step, finding, report path and
+audit record is printed on its own, with a pause set by `--delay`:
+
+```bash
+uv run python scripts/mcp_client.py                  # stdio MCP, demo app
+uv run python scripts/mcp_client.py --http           # MCP over /mcp
+uv run python scripts/a2a_client.py                  # A2A task with streamed status updates
+uv run python scripts/a2a_client.py --sign-in --profile standard --delay 2   # signed-in demo scan, slower
+
+# Your own site (only systems you own or may test): no .env change needed
+uv run python scripts/mcp_client.py --target https://your-app.example/ --i-am-authorized --profile standard --delay 2
+uv run python scripts/a2a_client.py --target https://your-app.example/ --i-am-authorized --profile standard
+uv run python scripts/mcp_client.py --target http://localhost:3000 --i-am-authorized --credentials local
+```
+
+The scripts set themselves up:
+
+- **Sign-in.** They mint an API JWT with this machine's key (`keys/`): role `scanner`, or `admin` for
+  `--sign-in` / `--credentials`. Over stdio no token is needed.
+- **Server.** stdio MCP starts its own MCP server. `--http` and A2A use the running `pentest-agent`, or
+  start one headless for the run.
+- **Allowlist.** `--target` is allowlisted only for a server the script starts. If a `pentest-agent`
+  is already running and its `.env` does not list the host, the script shows a `SWITCH` event and
+  starts a private agent on a free port with only that host allowlisted, then stops it afterwards.
+  `--own-server` always does that. To scan through the shared agent instead, add the host to
+  `A2A_ALLOWED_TARGETS` / `MCP_ALLOWED_TARGETS` in `.env` and restart it.
+- **Missing pieces.** A missing credential profile stops the run with a `SETUP` event that prints
+  the exact `uv run scopeguard-mcp credentials add ...` command.
+
+Other options: `--findings N` (findings shown one by one), `--no-llm`, `--show-refusal` (demo of
+the allowlist refusing a host), `-h` for all.
+
+For a quick unattended scan without any server, the stdlib CLI needs only the authorization flag:
+`uv run python -m scopeguard.cli --url https://your-app.example/ --profile standard --i-have-authorization`.
+It has no form login (only `--bearer`), no LLM summary and no Docker code check.
+
+Usage guides for assistants: [src/pentest_agent/mcp_server/CLAUDE.md](src/pentest_agent/mcp_server/CLAUDE.md)
+and [src/pentest_agent/a2a_server/CLAUDE.md](src/pentest_agent/a2a_server/CLAUDE.md).
+
+**Agent skill** `scopeguard-scan` teaches an assistant the whole flow:
+
+- check the policy, get the user's authorization, pick a profile
+- use credential profiles by name only
+- wait with `get_scan`
+- treat scan output as untrusted
+- present findings and fix them in code
+
+It lives in two places:
+
+- [.claude/skills/scopeguard-scan/](.claude/skills/scopeguard-scan/SKILL.md): Claude Code loads it
+  automatically in this repo.
+- [skills/scopeguard-scan.skill](skills/scopeguard-scan.skill): the packaged version, to upload in
+  Claude (Settings, Capabilities, Skills) or to share.
+
+After editing the skill, rebuild the package with the skill-creator's `package_skill` script
+(`python -m scripts.package_skill .claude/skills/scopeguard-scan skills`).
 
 ### Full LangGraph + WebSocket agent
 
@@ -647,6 +739,13 @@ environment.
 
 `src/scopeguard/` stdlib-only engine, sandbox, citations, rate limiting, reports, simulated target, CLI.
 `src/pentest_agent/` LangGraph agent, guardrails, schemas, tools, tracing, rate limits, websocket server,
-`evals/golden.py`, `prompts.py`, `audit_log.py`, `web_ui.py` + `webui/`. `golden/golden_dataset.json`, `tests/`,
-`scripts/simulate_full.py`, `scripts/render_docs.py` (docs diagrams from `docs/src/`), `Dockerfile`.
+`evals/golden.py`, `prompts.py`, `audit_log.py`, `web_ui.py` + `webui/`, `scan_service.py` (shared rules for agent
+callers), `mcp_server/` and `a2a_server/` (each with a `CLAUDE.md` usage guide), `credential_store.py`.
+`golden/golden_dataset.json`, `tests/`, `scripts/simulate_full.py`, `scripts/mcp_client.py`, `scripts/a2a_client.py`,
+`scripts/render_docs.py` (docs diagrams from `docs/src/`), `Dockerfile`, `.mcp.json`.
 `prompts/` (local only, gitignored) holds the LLM prompt texts; see [LLM prompts](#llm-prompts-prompts-not-in-the-repository).
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE). Copyright 2026 Priyojit Chakraborty; see
+[NOTICE](NOTICE). Use ScopeGuard only against systems you own or are explicitly authorized to test.
