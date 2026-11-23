@@ -98,6 +98,18 @@ def test_falls_back_to_process_sandbox_and_says_why(planted, monkeypatch):
     assert any("process sandbox" in f for f in sc.red_flags_from_result(r))
 
 
+def test_docker_disabled_on_purpose_raises_no_red_flag(planted, monkeypatch):
+    def _no_docker_probe(image):
+        raise AssertionError("docker_status must not be called when Docker is disabled")
+
+    monkeypatch.setattr(container, "docker_status", _no_docker_probe)
+    r = container.run_codecheck(source_dir=str(planted / "backend"), site_dir=None, allowed_hosts=[],
+                                use_docker=False)
+    assert r["sandbox"]["kind"] == "process" and r["sandbox"].get("docker_disabled") is True
+    assert "fallback_reason" not in r["sandbox"]
+    assert not any("process sandbox" in f for f in sc.red_flags_from_result(r))
+
+
 @needs_docker
 def test_docker_sandbox_runs_with_no_network(planted):
     r = container.run_in_docker(source_dir=str(planted / "backend"), site_dir=str(planted / "site"),
@@ -171,7 +183,7 @@ def test_end_to_end_against_local_site(planted, monkeypatch):
     flags = " | ".join(update["red_flags"])
     assert "third-party.example.invalid" in flags                       # link to another host flagged
     assert "legacy.example.invalid" in flags                           # fetch() to another host flagged
-    assert "process sandbox" in flags                                  # Docker off -> flagged
+    assert "process sandbox" not in flags                              # Docker off on purpose -> no flag
     assert any(f["source"] == "sandbox_source" for f in update["findings"])
 
 

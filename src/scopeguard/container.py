@@ -154,8 +154,13 @@ def run_in_process(*, source_dir: str | None, site_dir: str | None, allowed_host
 def run_codecheck(*, source_dir: str | None, site_dir: str | None, allowed_hosts: list[str],
                   use_docker: bool = True, image: str = DEFAULT_IMAGE, timeout: int = 180,
                   memory_mb: int = 512, extra_args: list[str] | None = None) -> dict:
-    """Docker first; process sandbox when Docker is off/unavailable (reason recorded)."""
-    reason = "disabled by configuration"
+    """Docker first; process sandbox when Docker is off or unavailable.
+
+    ``sandbox.fallback_reason`` (which callers turn into a red flag) is set only when
+    Docker was wanted but could not be used. Turning Docker off on purpose is recorded
+    as ``sandbox.docker_disabled`` instead.
+    """
+    reason = ""
     if use_docker:
         ok, reason = docker_status(image)
         if ok:
@@ -163,7 +168,10 @@ def run_codecheck(*, source_dir: str | None, site_dir: str | None, allowed_hosts
                                  image=image, timeout=timeout, memory_mb=memory_mb, extra_args=extra_args)
     out = run_in_process(source_dir=source_dir, site_dir=site_dir, allowed_hosts=allowed_hosts,
                          timeout=timeout, extra_args=extra_args)
-    out["sandbox"]["fallback_reason"] = f"Docker sandbox unavailable: {reason}"
+    if use_docker:
+        out["sandbox"]["fallback_reason"] = f"Docker sandbox unavailable: {reason}"
+    else:
+        out["sandbox"]["docker_disabled"] = True
     return out
 
 
