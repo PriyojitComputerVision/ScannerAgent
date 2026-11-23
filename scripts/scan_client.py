@@ -13,7 +13,7 @@ async def main():
             m = json.loads(raw)
             print(m["type"], m.get("node", ""), m.get("data", {}).get("phase", ""))
             if m["type"] == "complete":
-                print(m["report_md_path"]); break
+                print(m["report_url"]); break
             if m["type"] == "error":
                 print(m); break
 

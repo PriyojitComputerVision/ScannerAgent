@@ -17,9 +17,29 @@ import html
 import re
 import urllib.parse as up
 
-# [S1]  [S1, S3]  [S1][S2]  [S1; S2]  (case-insensitive "s")
-CITATION_RE = re.compile(r"\[\s*([Ss]\d+(?:\s*[,;]\s*[Ss]\d+)*)\s*\]")
+# [S1]  [S1, S3]  [S1][S2]  [S1; S2]  and ranges [S2-S5] / [S2-5] (case-insensitive "s").
+# Range dashes include the Unicode hyphens/dashes LLMs emit (U+2010..U+2015, U+2212).
+_DASH = r"\-" + "‐‑‒–—―−"
+_ITEM = rf"[Ss]\d+(?:\s*[{_DASH}]\s*[Ss]?\d+)?"
+CITATION_RE = re.compile(rf"\[\s*({_ITEM}(?:\s*[,;]\s*{_ITEM})*)\s*\]")
 _ID_RE = re.compile(r"[Ss](\d+)")
+_RANGE_RE = re.compile(rf"[Ss](\d+)(?:\s*[{_DASH}]\s*[Ss]?(\d+))?")
+_MAX_RANGE = 200  # a longer "range" is a typo, not a citation list
+
+
+def citation_ids(group: str) -> list[str]:
+    """Ids inside one citation marker, ranges expanded: ``"S1, S3-S5"`` ->
+    ``["S1", "S3", "S4", "S5"]``. Order is kept, duplicates dropped."""
+    out: list[str] = []
+    for a, b in _RANGE_RE.findall(group or ""):
+        lo = int(a)
+        hi = int(b) if b else lo
+        nums = range(lo, hi + 1) if lo <= hi <= lo + _MAX_RANGE else (lo, int(b) if b else lo)
+        for n in nums:
+            sid = f"S{n}"
+            if sid not in out:
+                out.append(sid)
+    return out
 _CWE_RE = re.compile(r"^\s*(?:CWE[-_ ]?)?(\d{1,5})\s*$", re.IGNORECASE)
 _URL_RE = re.compile(r"https?://[^\s<>\"'`)\]*]+", re.IGNORECASE)
 _SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
@@ -119,8 +139,7 @@ def sanitize(text: str, sources: dict[str, dict],
 
     def fix(m: re.Match) -> str:
         keep = []
-        for n in _ID_RE.findall(m.group(1)):
-            sid = f"S{int(n)}"
+        for sid in citation_ids(m.group(1)):
             if sid in sources:
                 if sid not in keep:
                     keep.append(sid)
@@ -171,7 +190,7 @@ def to_markdown(text: str, sources: dict[str, dict], anchor_prefix: str | None =
     Unknown ids are dropped.
     """
     def rep(m: re.Match) -> str:
-        ids = [f"S{int(n)}" for n in _ID_RE.findall(m.group(1))]
+        ids = citation_ids(m.group(1))
         links = [f"[{sid}]({_link_target(sources[sid], anchor_prefix)})" for sid in ids if sid in sources]
         return f"[{', '.join(links)}]" if links else ""
     return CITATION_RE.sub(rep, text or "")
@@ -180,7 +199,7 @@ def to_markdown(text: str, sources: dict[str, dict], anchor_prefix: str | None =
 def to_html(text: str, sources: dict[str, dict], anchor_prefix: str = "src-") -> str:
     """HTML-escape ``text`` and replace ``[Sn]`` markers with anchor links."""
     def rep(m: re.Match) -> str:
-        ids = [f"S{int(n)}" for n in _ID_RE.findall(m.group(1))]
+        ids = citation_ids(m.group(1))
         links = [f'<a class="cite" href="#{anchor_prefix}{sid}">{sid}</a>' for sid in ids if sid in sources]
         return f"[{', '.join(links)}]" if links else ""
     escaped = html.escape(text or "", quote=False)  # [S1] survives escaping unchanged

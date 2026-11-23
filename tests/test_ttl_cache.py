@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -112,7 +111,11 @@ def _start(ws, session_extra=None):
 
 
 def test_same_scan_request_within_ttl_is_served_instantly(monkeypatch, tmp_path):
-    report = tmp_path / "report.md"
+    from pentest_agent.config import settings
+
+    monkeypatch.setattr(settings, "reports_dir", str(tmp_path))
+    (tmp_path / "scan-a").mkdir()
+    report = tmp_path / "scan-a" / "report.md"
     report.write_text("# report", encoding="utf-8")
     runs = []
 
@@ -140,4 +143,7 @@ def test_same_scan_request_within_ttl_is_served_instantly(monkeypatch, tmp_path)
     assert second["session_id"] == "scan-b" and second["report_md"] == "# report"
     assert not third.get("cached") and not fourth.get("cached")
     assert runs == ["scan-a", "scan-c", "scan-d"]
-    assert Path(second["report_md_path"]) == report
+    assert second["report_url"] == "http://testserver/reports/scan-a/"
+    assert second["report_md_url"] == "http://testserver/reports/scan-a/report.md"
+    assert "report_docx_url" not in second  # only files that exist get a URL
+    assert not any(k.endswith("_path") for k in second)  # no server file paths leak

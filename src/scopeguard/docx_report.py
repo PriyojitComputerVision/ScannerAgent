@@ -340,7 +340,7 @@ class _Builder:
                 r = paragraph.add_run(_clean(text[pos:m.start()]))
                 if size:
                     r.font.size = self.Pt(size)
-            ids = [f"S{int(n)}" for n in re.findall(r"[Ss](\d+)", m.group(1))]
+            ids = citations.citation_ids(m.group(1))
             ids = [i for i in ids if i in sources]
             if ids:
                 paragraph.add_run("[")

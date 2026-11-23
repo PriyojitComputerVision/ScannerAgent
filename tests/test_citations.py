@@ -222,3 +222,14 @@ def test_cli_index_lists_reports(tmp_path):
     (tmp_path / "empty").mkdir()
     page = render_index(tmp_path)
     assert 'href="live-1/report.html"' in page and "empty" not in page
+
+
+def test_citation_ranges_are_expanded():
+    """LLMs write ranges such as [S2‑S5] (U+2011 hyphen); they must count as citations,
+    otherwise a well-cited answer is thrown away as 'no valid source citations'."""
+    srcs = {f"S{i}": {"id": f"S{i}", "url": None, "cwe_url": None} for i in range(1, 8)}
+    text, used, invalid = citations.sanitize(
+        "A [S1, S2\u2011S4]. B [S5\u2013S6]. C [S7-9]. D [S1-S5000].", srcs)
+    assert text == "A [S1, S2, S3, S4]. B [S5, S6]. C [S7]. D [S1]."
+    assert used == [f"S{i}" for i in range(1, 8)] and invalid == ["S8", "S9", "S5000"]
+    assert citations.citation_ids("S3-S1") == ["S3", "S1"]  # reversed: endpoints only

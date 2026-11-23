@@ -9,6 +9,9 @@
 venv
 data
 golden/results
+logs
+*.log
+*.log.[0-9]*
 **/__pycache__
 **/*.py[cod]
 .pytest_cache

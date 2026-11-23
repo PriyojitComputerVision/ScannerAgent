@@ -24,6 +24,7 @@ os.environ["LANGSMITH_API_KEY"] = ""
 os.environ.setdefault("CHECKPOINT_DB_PATH", str(_TMP_ROOT / "checkpoints" / "main.sqlite"))
 os.environ.setdefault("SUBAGENT_CHECKPOINT_DB_PATH", str(_TMP_ROOT / "checkpoints" / "subagents.sqlite"))
 os.environ.setdefault("REPORTS_DIR", str(_TMP_ROOT / "reports"))
+os.environ.setdefault("LOG_FILE", str(_TMP_ROOT / "logs" / "pentest-agent.log"))
 os.environ.setdefault("SQUID_CONF_PATH", str(_TMP_ROOT / "squid" / "squid.conf"))
 os.environ.setdefault("SQUID_ACL_TARGET_FILE", str(_TMP_ROOT / "squid" / "allowed_target.acl"))
 

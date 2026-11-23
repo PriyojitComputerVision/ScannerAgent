@@ -60,7 +60,12 @@ Thumbs.db
 .langsmith/
 
 # --- Logs ---
+# Warnings/errors file (LOG_FILE, default data/logs/pentest-agent.log) and its
+# rotated backups (pentest-agent.log.1 ... .5).
 *.log
+*.log.[0-9]*
+logs/
+data/logs/
 data/
 
 # --- Golden-dataset drift reports (python -m pentest_agent.evals.golden) ---

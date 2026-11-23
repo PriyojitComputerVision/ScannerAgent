@@ -64,7 +64,7 @@ def main() -> int:
             print(f"[sim] target {t.url}; waiting for agent on :{WS_PORT} ...")
             _wait_healthy()
             result = asyncio.run(_run(t.url))
-        print("\nREPORT:", result.get("report_md_path"), "|", result.get("report_docx_path"))
+        print("\nREPORT:", result.get("report_url"), "|", result.get("report_docx_url"))
         md = result.get("report_md", "")
         ok = all(k in md for k in ("SQL injection", "Open redirect", "Path traversal"))
         print("SIMULATION PASSED" if ok else "SIMULATION FAILED: expected findings missing in report")

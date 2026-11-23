@@ -38,7 +38,7 @@ uv run golden-check                       # golden-dataset drift check (see belo
 
 Client message: `{"url": "...", "profile": "quick|standard|aggressive|auth_deep", "authorization_confirmed": true}`
 (`{"resume": true}` with the same `session_id` resumes from the SQLite checkpoint.)
-The final `complete` message includes `report_url`, e.g. `/reports/<session_id>/`.
+The final `complete` message includes absolute report URLs: `report_url` (HTML view, e.g. `http://127.0.0.1:8765/reports/<session_id>/`) and `report_md_url`, `report_json_url`, `report_docx_url` (downloads). Server file paths are never sent. Warnings and errors are also written to `LOG_FILE` (default `data/logs/pentest-agent.log`).
 
 ### Report viewer
 
