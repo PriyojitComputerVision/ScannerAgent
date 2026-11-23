@@ -193,6 +193,29 @@ def test_llm_gives_up_past_wait_budget_then_cools_down(monkeypatch):
     assert llm.cooldown_remaining() == 0
 
 
+def test_llm_budget_with_real_clock_waits_once_and_logs_only_real_waits(monkeypatch, caplog):
+    """Groq's usual Retry-After: 60 with the default 120s budget: one wait, then
+    give up. Only the wait that really happens is logged."""
+    import tenacity
+
+    clock = [1000.0]
+    monkeypatch.setattr(tenacity.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(llm.settings, "llm_rate_limit_max_wait_seconds", 120)
+    slept = []
+
+    def fake_sleep(seconds):
+        slept.append(seconds)
+        clock[0] += seconds
+
+    throttled, calls = _rate_limited_llm("60")
+    with caplog.at_level("WARNING", logger="pentest_agent.llm"), pytest.raises(llm.LLMRateLimited):
+        llm.invoke_with_backoff.retry_with(sleep=fake_sleep)(throttled, [])
+    assert len(calls) == 2 and slept == [pytest.approx(60.25)]
+    waits = [r.getMessage() for r in caplog.records if "waiting" in r.getMessage()]
+    assert waits == ["Groq call failed (HTTP 429); waiting 60.2s before retry 2/6"]
+    assert any("still rate limited after 60s" in r.getMessage() for r in caplog.records)
+
+
 def test_llm_waits_within_budget_and_caps_attempts(monkeypatch):
     monkeypatch.setattr(llm.settings, "llm_rate_limit_max_wait_seconds", 120)
     slept = []
