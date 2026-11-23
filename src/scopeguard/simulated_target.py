@@ -20,6 +20,11 @@ var token = Math.random();
 fetch("http://legacy.example.invalid/api");
 """
 
+# Public, fake demo account (the demo app is loopback-only and holds no real data).
+DEMO_USERNAME = "demo"
+DEMO_PASSWORD = "demo-password"
+DEMO_SESSION = "demo-session-0001"
+
 PAGE = """<!doctype html><html><head><title>SimShop</title>
 <script src="/app.js"></script><script>console.log("inline");</script></head><body>
 <h1>SimShop (simulated target)</h1>
@@ -63,7 +68,8 @@ class Handler(BaseHTTPRequestHandler):
         q = dict(up.parse_qsl(u.query))
         p = u.path
         if p == "/":
-            self._send(200, PAGE, extra={"Set-Cookie": "sessionid=abc123; Path=/"})
+            page = PAGE.replace("</body>", "<a href='/account'>My account</a></body>") if self._signed_in() else PAGE
+            self._send(200, page, extra={"Set-Cookie": "sessionid=abc123; Path=/"})
         elif p == "/app.js":
             self._send(200, APP_JS, "application/javascript")
         elif p == "/search":  # reflected XSS, no encoding
@@ -97,8 +103,36 @@ class Handler(BaseHTTPRequestHandler):
             self._send(200, '{"ok": true}', "application/json", extra)
         elif p == "/robots.txt":
             self._send(200, "User-agent: *\nDisallow: /admin\n", "text/plain")
+        elif p == "/account":  # only for a signed-in demo session
+            if not self._signed_in():
+                self._send(302, "", extra={"Location": "/login"})
+            else:
+                self._send(200, "<html><body><h2>Account of demo</h2>"
+                                "<a href='/account/profile?name=demo'>Profile</a></body></html>")
+        elif p == "/account/profile":  # reflected XSS, reachable only when signed in
+            if not self._signed_in():
+                self._send(302, "", extra={"Location": "/login"})
+            else:
+                self._send(200, f"<html><body><h2>Profile of {q.get('name', '')}</h2></body></html>")
         else:
             self._send(404, "<html><body>Not found</body></html>")
+
+    def _signed_in(self) -> bool:
+        cookies = self.headers.get("Cookie", "")
+        return any(c.strip() == f"demo_session={DEMO_SESSION}" for c in cookies.split(";"))
+
+    def do_POST(self):
+        """Demo sign-in with the public, fake DEMO_USERNAME / DEMO_PASSWORD."""
+        if up.urlparse(self.path).path != "/login":
+            self._send(404, "<html><body>Not found</body></html>")
+            return
+        length = min(int(self.headers.get("Content-Length") or 0), 10_000)
+        form = dict(up.parse_qsl(self.rfile.read(length).decode("utf-8", "replace")))
+        if form.get("user") == DEMO_USERNAME and form.get("pw") == DEMO_PASSWORD:
+            self._send(302, "", extra={"Location": "/account",
+                                       "Set-Cookie": f"demo_session={DEMO_SESSION}; Path=/; HttpOnly"})
+        else:
+            self.do_GET()  # wrong credentials: the login form comes back
 
 
 class SimulatedTarget:

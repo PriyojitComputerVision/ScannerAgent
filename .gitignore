@@ -8,6 +8,9 @@ prompts/
 
 # --- Local-only assistant guide (not shared) ---
 CLAUDE.md
+# ...except the MCP and A2A usage guides, which assistants and agents need to use those servers
+!src/pentest_agent/mcp_server/CLAUDE.md
+!src/pentest_agent/a2a_server/CLAUDE.md
 
 # --- Python ---
 __pycache__/

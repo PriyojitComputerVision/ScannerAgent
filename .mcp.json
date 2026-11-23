@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "scopeguard": {
+      "type": "stdio",
+      "command": "uv",
+      "args": ["run", "scopeguard-mcp"]
+    }
+  }
+}

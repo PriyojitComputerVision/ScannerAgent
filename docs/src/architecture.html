@@ -18,11 +18,11 @@
   .box span { display: block; color: var(--muted); font-size: 12.5px; }
   .label { font: 600 11.5px var(--mono); letter-spacing: 2px; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; }
   .row { display: grid; gap: 12px; }
-  .clients { grid-template-columns: 1.3fr 1fr 1fr; margin-bottom: 10px; }
+  .clients { grid-template-columns: 1.3fr 1fr 1fr 1.2fr; margin-bottom: 10px; }
   .arrow { color: var(--muted); font-size: 12px; text-align: center; margin: 2px 0 8px; }
   .panel { background: var(--panel); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
-  .server { grid-template-columns: repeat(4, 1fr); }
-  .wide { grid-column: span 4; }
+  .server { grid-template-columns: repeat(5, 1fr); }
+  .wide { grid-column: span 5; }
   .main { display: grid; grid-template-columns: 1fr 300px; gap: 16px; align-items: start; }
   .pipe { display: grid; grid-template-columns: 190px 1fr 132px; gap: 8px 10px; align-items: stretch; }
   .node { border: 2px solid var(--ink); border-radius: 6px; background: #fff; padding: 7px 11px; position: relative; }
@@ -58,7 +58,7 @@
 </head>
 <body>
   <h1>ScopeGuard architecture</h1>
-  <p class="sub">A browser console or any WebSocket client starts a scan; the FastAPI server queues it and runs the 13-step LangGraph pipeline. Every route ends in a tamper-evident audit record.</p>
+  <p class="sub">A browser console, any WebSocket client, or another agent over MCP / A2A starts a scan; the FastAPI server queues it and runs the 13-step LangGraph pipeline. Every route ends in a tamper-evident audit record.</p>
   <div class="legend">
     <span><i class="tag web">target</i> sends in-scope requests to the website</span>
     <span><i class="tag llm">LLM</i> calls Groq (optional, offline fallback)</span>
@@ -71,6 +71,7 @@
     <div class="box"><b>Browser console · uv run pentest-agent</b><span>one-time sign-in link → RS256 JWT in sessionStorage; strict CSP, no inline code</span></div>
     <div class="box"><b>WebSocket client</b><span>scripts/ws_client.py · Postman · any WS client</span></div>
     <div class="box"><b>Operator (human in the loop)</b><span>signs in to SSO / enters the MFA code when a scan pauses</span></div>
+    <div class="box"><b>Coding assistants · other agents</b><span>MCP (stdio via .mcp.json, or HTTP) · A2A 1.0; credentials by profile name only</span></div>
   </div>
   <div class="arrow">JWT + scan request ↓ &nbsp; · &nbsp; ↑ queued · phase_update · input_required · complete + report URLs &nbsp; · &nbsp; auth_response ↓</div>
 
@@ -81,6 +82,7 @@
       <div class="box"><span class="t mono">/ws?session_id=…</span><span>verify JWT · same-origin only · strict input · RBAC · cache · sign-in pauses</span></div>
       <div class="box"><span class="t mono">/ · /ui/* · /api/*</span><span>whitelisted console files; /api/info, /api/reports, /api/audit (audit:read)</span></div>
       <div class="box"><span class="t mono">/reports/…</span><span>no-script CSP viewer; HttpOnly cookie, never a token in the URL</span></div>
+      <div class="box"><span class="t mono">/mcp · /a2a</span><span>agent endpoints (scan_service.py): operator allowlist · JWT principal · task owner · untrusted output</span></div>
       <div class="box wide"><b>Admission queues · admission.py</b><span>1 scan and 1 HTTP call at a time (server-wide), 50 more wait in order, then 429; queued clients get their position every 5 s. Requests rejected before the graph are still audited.</span></div>
     </div>
   </div>
