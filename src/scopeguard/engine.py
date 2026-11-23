@@ -20,7 +20,7 @@ import uuid
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 
-from scopeguard import ratelimit
+from scopeguard import contentpolicy, ratelimit
 from scopeguard.textsafe import strip_hyperlinks
 
 # --------------------------------------------------------------------------
@@ -211,6 +211,7 @@ class Response:
     set_cookies: list = field(default_factory=list)
     body: str = ""
     error: str | None = None
+    dropped: str = ""  # why the body was discarded unread (file/attachment/binary), if it was
 
     @property
     def ctype(self) -> str:
@@ -238,6 +239,8 @@ class ScopedClient:
         self._sleep = sleep
         self.rate_limit = ratelimit.RateLimitStats()
         self.log: list[tuple[str, str, int]] = []
+        # Responses whose body was discarded unread (contentpolicy): (url, reason).
+        self.dropped: list[tuple[str, str]] = []
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
 
     def in_scope(self, url: str) -> bool:
@@ -299,9 +302,22 @@ class ScopedClient:
             self.log.append((method, url, 0))
             return Response(url=url, error=f"{type(e).__name__}: {e}"[:200])
 
+        dropped = ""
         try:
-            raw = resp_obj.read(self.max_bytes + 1)[: self.max_bytes] if method != "HEAD" else b""
             h = resp_obj.headers
+            raw = b""
+            if method != "HEAD":
+                # Never download files: attachments and binary types are not read at
+                # all; unknown types are sniffed (small prefix) and dropped if binary.
+                mode, why = contentpolicy.body_policy(h.get("Content-Type"), h.get("Content-Disposition"),
+                                                      h.get("Content-Encoding"))
+                if mode == "drop":
+                    dropped = why
+                else:
+                    limit = min(self.max_bytes, contentpolicy.SNIFF_BYTES) if mode == "sniff" else self.max_bytes
+                    raw = resp_obj.read(limit + 1)[:limit]
+                    if contentpolicy.looks_binary(raw):
+                        raw, dropped = b"", f"binary body ({why or 'file signature'})"
             headers_lc = {k.lower(): v for k, v in h.items()}
             cookies = h.get_all("Set-Cookie") or []
             status = getattr(resp_obj, "status", None) or resp_obj.getcode()
@@ -313,7 +329,10 @@ class ScopedClient:
         finally:
             resp_obj.close()
         self.log.append((method, url, status))
-        return Response(url=url, status=status, headers=headers_lc, set_cookies=cookies, body=body)
+        if dropped:
+            self.dropped.append((url, dropped))
+        return Response(url=url, status=status, headers=headers_lc, set_cookies=cookies, body=body,
+                        dropped=dropped)
 
     def get(self, url, headers=None):
         return self.request("GET", url, headers)
@@ -498,8 +517,8 @@ class Scanner:
             if not self.client.in_scope(url):
                 self._record_external(url)
                 continue
-            if up.urlparse(url).path.lower().endswith(STATIC_EXT):
-                continue
+            if up.urlparse(url).path.lower().endswith(STATIC_EXT) or contentpolicy.is_file_link(url):
+                continue  # never request links to files (downloads, media, archives, ...)
             try:
                 resp = self.client.get(url)
             except BudgetExceeded as e:
@@ -1180,6 +1199,10 @@ class Scanner:
         flag = self.client.rate_limit.red_flag()
         if flag:
             self.red_flags.append(flag)
+        if self.client.dropped:
+            self._cov("File downloads refused (body discarded unread)", tested=len(self.client.dropped))
+            for url, why in self.client.dropped[:10]:
+                self._cov("File downloads refused (body discarded unread)", note=f"{url}: {why}")
         return {
             "findings": self.f.all(),
             "crawled_pages": [p.url for p in self.pages],

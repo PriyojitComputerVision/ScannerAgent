@@ -4,6 +4,9 @@ Installs, BEFORE any scan code runs:
   * a permanent audit hook (cannot be removed) that blocks subprocess/exec/fork,
     writes outside the sandbox dir, and any socket/DNS activity to hosts or
     ports outside the scan allowlist;
+  * a network policy (scopeguard.netpolicy): resolved addresses that are cloud
+    metadata / link-local / multicast / reserved (or private, when the parent
+    sets "block_private") never enter that allowlist, and are never probed;
   * (POSIX) CPU / memory / file-size / fd / process rlimits set by the parent.
 Input: JSON on stdin.  Output: one JSON object on stdout.
 """
@@ -15,6 +18,8 @@ import os
 import socket
 import sys
 import urllib.parse as up
+
+from scopeguard import netpolicy
 
 
 def _install_audit_hook(allowed_hosts: set[str], allowed_ips: set[str], allowed_ports: set[int],
@@ -57,7 +62,8 @@ def _install_audit_hook(allowed_hosts: set[str], allowed_ips: set[str], allowed_
     sys.addaudithook(hook)
 
 
-def _pin_reachable_addresses(hosts: set[str], ports: set[int], probe_timeout: float = 1.0) -> None:
+def _pin_reachable_addresses(hosts: set[str], ports: set[int], allowed_ips: set[str],
+                             probe_timeout: float = 1.0) -> None:
     """Make name resolution return only addresses that actually accept connections.
 
     On Windows "localhost" resolves to ::1 before 127.0.0.1; a dev server bound
@@ -79,6 +85,8 @@ def _pin_reachable_addresses(hosts: set[str], ports: set[int], probe_timeout: fl
             except OSError:
                 continue
             for fam, stype, proto, _, addr in infos:
+                if addr[0] not in allowed_ips:  # never probe a blocked address
+                    continue
                 try:
                     with socket.socket(fam, stype, proto) as s:
                         s.settimeout(probe_timeout)
@@ -110,6 +118,7 @@ def main() -> None:
     cfg = json.load(sys.stdin)
     scan = cfg["scan"]
     sandbox_dir = cfg["sandbox_dir"]
+    block_private = bool(cfg.get("block_private", False))
 
     hosts, ports = set(), set()
     for d in scan["allowed_domains"]:
@@ -126,23 +135,38 @@ def main() -> None:
         ports.update({80, 443})
 
     ips: set[str] = set()
+    blocked: dict[str, list[str]] = {}
     for h in hosts:  # resolve once, before the lock engages
+        if h in netpolicy.BLOCKED_HOSTNAMES:
+            blocked[h] = [f"{h} is a cloud metadata host name"]
+            continue
         try:
             ipaddress.ip_address(h)
-            ips.add(h)
+            resolved = {h}
         except ValueError:
             try:
-                infos = socket.getaddrinfo(h, None)
+                resolved = {info[4][0] for info in socket.getaddrinfo(h, None)}
             except OSError:
                 # An allowed name that does not resolve simply stays
                 # unreachable (stricter, not looser); don't abort the scan.
                 print(f"sandbox: allowed host {h!r} does not resolve; skipping",
                       file=sys.stderr)
                 continue
-            for info in infos:
-                ips.add(info[4][0])
+        ok, reasons = netpolicy.allowed_ips(resolved, block_private=block_private)
+        if reasons:  # one blocked address taints the whole name (rebinding / mixed answers)
+            blocked[h] = reasons
+            continue
+        ips |= ok
+    target_host = (t.hostname or "").lower()
+    if target_host in blocked:
+        sys.stdout.write(json.dumps({"ok": False, "error": (
+            f"network policy: target {target_host} refused ({'; '.join(blocked[target_host])})")}))
+        return
+    for h, reasons in blocked.items():
+        print(f"sandbox: allowed host {h!r} refused by network policy: {'; '.join(reasons)}",
+              file=sys.stderr)
 
-    _pin_reachable_addresses(hosts, ports)
+    _pin_reachable_addresses(hosts, ports, ips)
 
     # Import everything the scan needs BEFORE the audit hook locks the process
     # down (later imports would be blocked). Do not let a linter prune these.
@@ -153,7 +177,7 @@ def main() -> None:
     import ssl  # noqa: F401
     import urllib.request  # noqa: F401
 
-    from scopeguard import engine, ratelimit, textsafe  # noqa: F401
+    from scopeguard import contentpolicy, engine, ratelimit, textsafe  # noqa: F401
 
     os.chdir(sandbox_dir)
     _install_audit_hook(hosts, ips, ports, sandbox_dir)

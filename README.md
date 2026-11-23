@@ -546,6 +546,46 @@ proves the escapes are blocked. (Windows: rlimits unavailable; all other layers 
 This is strong process-level containment, not a VM/kernel boundary. Do not scan hostile targets with it on a
 machine holding secrets you cannot afford to expose.
 
+## Network policy: no metadata, no DNS rebinding (`src/scopeguard/netpolicy.py`)
+
+Some addresses are never reached by a scan:
+
+- link-local / cloud metadata (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, `100.100.100.200`,
+  `192.0.0.192`, `metadata.google.internal`, …);
+- `0.0.0.0/8` and `::`, multicast, reserved and broadcast addresses;
+- IPv6 forms that hide one of those (IPv4-mapped, NAT64, 6to4, Teredo) are unwrapped and refused too.
+
+`BLOCK_PRIVATE_TARGETS=true` also refuses loopback and private ranges (`127/8`, `10/8`, `172.16/12`,
+`192.168/16`, `100.64/10`, `fc00::/7`, `localhost`). It defaults to `false` so local dev apps and the demo
+target can be scanned. The policy is enforced in four places:
+
+| Layer | What happens |
+| --- | --- |
+| Browser console | An obviously blocked URL (e.g. `http://169.254.169.254/`, `http://0xA9FEA9FE/`) disables Launch with the reason. |
+| Pre-scan guardrail | The target and every extra allowed host are resolved. If any address is blocked, the scan is refused (`validate → blocked`, shown as REFUSED); an unresolvable target is refused too. |
+| Every agent-side connection (`http_retry.PinnedNetworkBackend`) | The host is resolved and every address checked, then the socket opens to exactly the checked IP (TLS still verifies the real host name). A DNS answer that changes mid-scan (DNS rebinding) is refused before any socket is opened. Environment proxies are ignored. |
+| Sandbox worker | Blocked addresses never enter the egress allowlist and are never probed; a blocked target ends the scan with an error. |
+
+`scopeguard.cli --url` applies the same check (exit code `5`) and reads `BLOCK_PRIVATE_TARGETS` from the
+environment.
+
+## Scans never download files (`src/scopeguard/contentpolicy.py`)
+
+- **No file links are crawled.** Links to executables, installers, archives, disk images, office/PDF
+  documents, media, fonts and wasm are never requested by the crawlers. Fixed security probes such as
+  `/backup.zip` still send their single request but only use the status and headers.
+- **Attachments and binaries are discarded unread.** This covers `Content-Disposition: attachment`, binary
+  media types and unsupported compression (`br`, `zstd`): the connection is closed without reading the body.
+  The response keeps its status and headers plus `x-scopeguard-body-dropped: <reason>`.
+- **Unknown types are sniffed.** At most 64 KB is read; a body with NUL bytes or a file signature
+  (MZ/ELF/ZIP/PDF/…) is discarded. Text bodies are capped at 2 MB in memory, and gzip/deflate is decoded
+  with a hard output cap, so a compression bomb cannot expand.
+- **Nothing from the target is saved as a file.** The one exception is the sandboxed code check, which stages
+  the *text* of in-scope HTML pages and JavaScript under fixed names (`pages/0001.html`, `scripts/0001.js`)
+  in a private temp folder. That folder is mounted read-only into a `--network none` container and deleted
+  when the check ends. Reports quote short evidence snippets as text.
+- **Refused downloads are reported.** The report's attack coverage lists them as "File downloads refused".
+
 ## Layout
 
 `src/scopeguard/` stdlib-only engine, sandbox, citations, rate limiting, reports, simulated target, CLI.
