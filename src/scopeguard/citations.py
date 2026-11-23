@@ -119,9 +119,26 @@ def source_for_finding(sources: dict[str, dict], finding) -> str | None:
 
 
 def sources_prompt_block(sources: dict[str, dict], limit: int = 60) -> str:
-    """Plain-text source list to put in an LLM prompt."""
+    """Plain-text source list to put in an LLM prompt, grouped under one heading
+    per severity (sources are already most-severe first).
+
+    The headings stop the model from filing similar-looking findings (e.g. the
+    JS_* patterns, which span high to low) under one severity.
+    """
+    counts: dict[str, int] = {}
+    for s in sources.values():
+        counts[s["severity"]] = counts.get(s["severity"], 0) + 1
     lines = []
+    current = None
     for sid, s in list(sources.items())[:limit]:
+        if s["severity"] != current:
+            current = s["severity"]
+            n = counts[current]
+            label = "INFORMATIONAL" if current == "info" else current.upper()
+            if lines:
+                lines.append("")
+            lines.append(f"{label} severity ({n} finding{'s' if n != 1 else ''}; cite these only "
+                         f"as {label.lower()}):")
         extra = ", ".join(x for x in (s["cwe"], s["url"]) if x)
         lines.append(f"[{sid}] {s['severity'].upper()}: {s['title']}" + (f" ({extra})" if extra else ""))
     if len(sources) > limit:
