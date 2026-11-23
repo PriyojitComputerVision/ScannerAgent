@@ -68,11 +68,12 @@ def tmp_data_root(tmp_path) -> Path:
 def _reset_backend_rate_limits():
     """Each test starts with fresh per-client backend limits (all TestClient
     requests share the 'testclient' key)."""
-    from pentest_agent import websocket_server
+    from pentest_agent import llm, websocket_server
 
     for limiter in (websocket_server.http_limiter, websocket_server.ws_session_limiter,
                     websocket_server.ws_concurrency):
         limiter.reset()
+    llm.reset_rate_limit_cooldown()
 
 
 @pytest.fixture(autouse=True)

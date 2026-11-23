@@ -162,6 +162,121 @@ def test_invoke_with_backoff_retries_on_429():
     assert len(attempts) == 3
 
 
+def _rate_limited_llm(retry_after: str):
+    calls = []
+
+    class Throttled:
+        def invoke(self, messages):
+            calls.append(1)
+            e = Exception("Error code: 429 rate limit")
+            e.status_code = 429
+            e.response = SimpleNamespace(status_code=429, headers={"retry-after": retry_after})
+            raise e
+
+    return Throttled(), calls
+
+
+def test_llm_gives_up_past_wait_budget_then_cools_down(monkeypatch):
+    monkeypatch.setattr(llm.settings, "llm_rate_limit_max_wait_seconds", 10)
+    slept = []
+    invoke = llm.invoke_with_backoff.retry_with(sleep=slept.append)
+    throttled, calls = _rate_limited_llm("30")  # one wait alone would exceed the budget
+    with pytest.raises(llm.LLMRateLimited):
+        invoke(throttled, [])
+    assert len(calls) == 1 and slept == []
+    assert 25 < llm.cooldown_remaining() <= 30
+    # During the cooldown, calls fail fast without contacting the provider.
+    with pytest.raises(llm.LLMRateLimited):
+        invoke(throttled, [])
+    assert len(calls) == 1
+    llm.reset_rate_limit_cooldown()
+    assert llm.cooldown_remaining() == 0
+
+
+def test_llm_waits_within_budget_and_caps_attempts(monkeypatch):
+    monkeypatch.setattr(llm.settings, "llm_rate_limit_max_wait_seconds", 120)
+    slept = []
+    throttled, calls = _rate_limited_llm("1")
+    with pytest.raises(llm.LLMRateLimited):
+        llm.invoke_with_backoff.retry_with(sleep=slept.append)(throttled, [])
+    assert len(calls) == llm.MAX_ATTEMPTS and len(slept) == llm.MAX_ATTEMPTS - 1
+
+
+def test_llm_non_rate_limit_errors_are_reraised_unchanged(monkeypatch):
+    class Broken:
+        def invoke(self, messages):
+            e = Exception("upstream 503")
+            e.status_code = 503
+            raise e
+
+    with pytest.raises(Exception, match="upstream 503") as info:
+        llm.invoke_with_backoff.retry_with(sleep=lambda s: None)(Broken(), [])
+    assert not isinstance(info.value, llm.LLMRateLimited) and llm.cooldown_remaining() == 0
+
+
+def test_patient_mode_ignores_budget_and_cooldown(monkeypatch):
+    monkeypatch.setattr(llm.settings, "llm_rate_limit_max_wait_seconds", 0)
+    monkeypatch.setattr(llm, "_cooldown_until", llm.time.monotonic() + 999)
+    attempts = []
+
+    class Recovers:
+        def invoke(self, messages):
+            attempts.append(1)
+            if len(attempts) < 3:
+                e = Exception("429 rate limit")
+                e.status_code = 429
+                e.response = SimpleNamespace(status_code=429, headers={"retry-after": "50"})
+                raise e
+            return "ok"
+
+    with llm.patient_rate_limits():
+        assert llm.invoke_with_backoff.retry_with(sleep=lambda s: None)(Recovers(), []) == "ok"
+    assert len(attempts) == 3
+
+
+def test_rate_limit_waits_reach_the_graph_stream(monkeypatch):
+    """Status events are written from inside a node (through a tool, like the
+    codegen step) and arrive on the "custom" stream the WebSocket forwards."""
+    from typing import TypedDict
+
+    from langchain_core.tools import tool
+    from langgraph.graph import END, START, StateGraph
+
+    monkeypatch.setattr(llm.settings, "llm_rate_limit_max_wait_seconds", 100)
+    throttled, _ = _rate_limited_llm("60")
+    invoke = llm.invoke_with_backoff.retry_with(sleep=lambda s: None)
+
+    @tool
+    def ask_llm(question: str) -> str:
+        """Ask the throttled LLM."""
+        try:
+            return invoke(throttled, [question])
+        except llm.LLMRateLimited:
+            return "fallback"
+
+    class S(TypedDict):
+        answer: str
+
+    g = StateGraph(S)
+    g.add_node("n", lambda s: {"answer": ask_llm.invoke({"question": "q"})})
+    g.add_edge(START, "n")
+    g.add_edge("n", END)
+    app = g.compile()
+
+    async def collect():
+        return [e async for e in app.astream({"answer": ""}, stream_mode=["updates", "custom"])]
+
+    import asyncio
+
+    events = asyncio.run(collect())
+    custom = [c for m, c in events if m == "custom"]
+    # The fake sleep takes no time, so the budget never runs out: every attempt is used.
+    assert [c["event"] for c in custom] == (["llm_rate_limit_wait"] * (llm.MAX_ATTEMPTS - 1)
+                                            + ["llm_rate_limit_gave_up"])
+    assert custom[0]["wait_seconds"] == pytest.approx(60.2, abs=0.1)
+    assert ("updates", {"n": {"answer": "fallback"}}) in events
+
+
 # ---------------------------------------------------------------- backend limits
 def test_sliding_window_and_concurrency_limiters():
     t = [0.0]

@@ -33,6 +33,7 @@ cp .env.example .env            # GROQ_API_KEY is optional; empty = deterministi
 uv run python scripts/get_token.py       # creates keys/ if needed and prints a 60-min access token
 uv run python scripts/simulate_full.py   # whole pipeline against the built-in target (auth on)
 uv run pentest-agent                      # ws://127.0.0.1:8765/ws?session_id=<id> (Bearer token required)
+uv run python scripts/ws_client.py --simulate   # Postman-free client for the running server (see --help)
 uv run pytest
 uv run golden-check                       # golden-dataset drift check (see below)
 ```
