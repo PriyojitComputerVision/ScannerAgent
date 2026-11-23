@@ -36,8 +36,8 @@ COPY src ./src
 COPY tests ./tests
 COPY scripts ./scripts
 COPY golden/golden_dataset.json ./golden/golden_dataset.json
-# prompts/ is gitignored but must exist in the build context (an empty folder is
-# fine: LLM steps then fall back to their deterministic output).
+# prompts/ is part of the repo (if the files are empty, the
+# LLM steps fall back to their deterministic output).
 COPY prompts ./prompts
 COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 

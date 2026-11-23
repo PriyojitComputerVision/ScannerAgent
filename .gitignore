@@ -3,9 +3,6 @@
 *.env
 !.env.example
 
-# --- LLM prompt texts (kept private; loaded via pentest_agent/prompts.py) ---
-prompts/
-
 # --- Local-only assistant guide (not shared) ---
 CLAUDE.md
 # ...except the MCP and A2A usage guides, which assistants and agents need to use those servers

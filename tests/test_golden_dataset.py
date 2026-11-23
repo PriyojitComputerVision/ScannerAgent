@@ -45,8 +45,10 @@ def test_dataset_file_is_valid_and_covers_both_kinds():
     assert DATASET.thresholds.min_judge_score >= 7.0
     kinds = {c.kind for c in DATASET.cases}
     assert kinds == {"simulated_scan", "static_findings"}
+    assert DATASET.thresholds.judge_runs >= 3, "a single judge call is too noisy to decide drift"
     for c in DATASET.cases:
         assert c.reference_summary.strip()
+        assert golden.reference_is_current(c), f"{c.id}: review the reference, then --approve-references"
         if c.kind == "static_findings":
             assert c.baseline.input_sha256 == golden.fingerprint(c), f"{c.id}: stale fingerprint"
         else:
@@ -116,6 +118,81 @@ def test_hallucinated_or_ungrounded_summary_fails(bad_text, failed_check):
                              summarize=_summarizer(bad_text))
     assert failed_check in {c.name for c in r.model_checks if not c.passed}
     assert not r.model_ok
+
+
+@pytest.mark.parametrize("bad_text,failed_check,detail", [
+    # valid ids, wrong severity: S2 is low, cited in a sentence about medium findings
+    (GOOD_TWO.replace("cross-site scripting [S1]", "cross-site scripting [S1, S2]"),
+     "severity_consistent_citations", "S2 is low"),
+    (GOOD_TWO.replace("none critical or high", "one critical and two medium"),
+     "severity_numbers_grounded", "'two medium' but SOURCES have 1 medium"),
+    (GOOD_TWO.replace("none critical or high", "no medium findings"),
+     "severity_numbers_grounded", "'no medium'"),
+])
+def test_wrong_severity_claims_fail_deterministically(bad_text, failed_check, detail):
+    case = _case("static-two-findings")
+    r = golden.evaluate_case(case, DATASET.thresholds, use_llm=True, judge=_good_judge(),
+                             summarize=_summarizer(bad_text))
+    failed = {c.name: c.detail for c in r.model_checks if not c.passed}
+    assert failed_check in failed and detail in failed[failed_check], failed
+    assert not r.model_ok
+
+
+def test_severity_checks_allow_subsets_and_mixed_sentences():
+    sources = {"S1": {"severity": "high"}, "S2": {"severity": "high"}, "S3": {"severity": "low"},
+               "S4": {"severity": "info"}}
+    text = ("The scan found two high-severity issues, one of them in two high places [S1]. Fix the high "
+            "issue [S2] before the low one [S3]. Lower-severity items include a header gap [S4]. "
+            "Nothing else was cited [S3].")
+    assert golden.severity_mismatches(text, sources) == []
+    assert golden.severity_number_errors(text, sources) == []
+
+
+def test_stale_reference_is_not_evaluated_not_model_drift():
+    case = _case("static-two-findings").model_copy(deep=True)
+    case.reference_summary += " Edited without review."  # stamp no longer matches
+    calls = []
+    r = golden.evaluate_case(case, DATASET.thresholds, use_llm=True,
+                             judge=lambda m: calls.append(m) or _good_judge()(m),
+                             summarize=_summarizer(GOOD_TWO))
+    assert not calls and not r.model_evaluated and "approve-references" in r.model_error
+    assert golden.classify([r])[0] is golden.Verdict.NOT_EVALUATED
+
+
+def test_approve_references_stamps_dataset(tmp_path):
+    p = tmp_path / "ds.json"
+    raw = json.loads(golden.DEFAULT_DATASET.read_text(encoding="utf-8"))
+    raw["cases"][0]["reference_summary"] += " Edited."
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    assert not golden.reference_is_current(golden.load_dataset(p).cases[0])
+    golden.approve_references(p)
+    assert all(golden.reference_is_current(c) for c in golden.load_dataset(p).cases)
+
+
+def test_judge_median_ignores_one_outlier_run():
+    scores = iter([2.0, 9.0, 8.0])
+
+    def judge(messages):
+        s = next(scores)
+        return golden.JudgeVerdict(faithfulness=s, coverage=s, citation_accuracy=s, clarity=s, overall=s,
+                                   rationale=f"run {s}")
+    case = _case("static-two-findings")
+    r = golden.evaluate_case(case, golden.Thresholds(min_judge_score=7, judge_runs=3), use_llm=True,
+                             judge=judge, summarize=_summarizer(GOOD_TWO))
+    assert r.judge_scores == [2.0, 9.0, 8.0] and r.judge_score == 8.0 and r.judge_passed
+    assert r.judge.rationale == "run 8.0"
+
+
+def test_judge_sees_every_source_and_severity_counts():
+    findings = [{"title": f"Missing header {i}", "severity": "low",
+                 "affected_url": "https://golden.example.test/"} for i in range(70)]
+    sources = citations.build_sources(findings)
+    summary = SummaryResult(text="x", sources=sources, raw_llm_output="x [S70]", used_citations=["S70"],
+                            invalid_citations=[], llm_used=True, fallback_used=False)
+    data = {"target_url": "https://golden.example.test", "pages_crawled": 1, "red_flags": []}
+    msg = golden.judge_messages(_case("static-two-findings"), data, summary)[-1].content
+    assert "[S70]" in msg and "more lower-severity sources not shown" not in msg
+    assert "Findings: 70 in total (critical 0, high 0, medium 0, low 70, info 0)" in msg
 
 
 def test_judge_score_below_threshold_is_model_drift():

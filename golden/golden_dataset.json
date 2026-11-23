@@ -3,7 +3,7 @@
   "description": "Golden cases for drift detection. Data side: sandboxed scans of the built-in vulnerable target and fixed findings fixtures, compared to recorded baselines. Model side: the production executive-summary prompt, checked deterministically and by an LLM judge (score >= thresholds.min_judge_score). Re-capture baselines only after an intentional scanner change: python -m pentest_agent.evals.golden --record-baseline must_not_mention holds only phrases that are wrong in any context (substring checks cannot see negation); severity inflation and unsupported claims are scored by the judge's faithfulness.",
   "thresholds": {
     "min_judge_score": 7.0,
-    "judge_runs": 1
+    "judge_runs": 3
   },
   "cases": [
     {
@@ -79,7 +79,8 @@
         "min_pages": 5,
         "max_pages": 30,
         "min_blocked_links": 1,
-        "input_sha256": null
+        "input_sha256": null,
+        "reference_sha256": "75e97106a6dfa719c4e3730bb1e8c1b0cddc26efc90d5465f8151a47d3be0d6e"
       },
       "expectations": {
         "min_citations": 3,
@@ -96,7 +97,7 @@
         "min_words": 80,
         "max_words": 260
       },
-      "reference_summary": "The authorized standard-profile test of the target crawled the in-scope pages and found seven high-severity issues that need prompt remediation: a possible SQL injection on the product page, a path traversal that disclosed a local file, an exposed .env file, CORS that reflects any origin with credentials, and client-side JavaScript containing a hardcoded secret, an AWS access key and use of eval. Medium-severity issues include reflected input without output encoding (possible XSS), an open redirect, directory listing, a password form served over plain HTTP, an enabled TRACE method, a session cookie without HttpOnly, and a missing Content-Security-Policy. Lower-severity items are missing hardening headers, a POST form without an anti-CSRF token and weak randomness in JavaScript. Each statement cites its source finding. Fix the injection, traversal and exposed secrets first, rotate any leaked keys, then apply header and cookie hardening. Results come from automated checks and should be validated before disclosure."
+      "reference_summary": "The authorized standard-profile test crawled the in-scope pages and produced 33 findings: 11 high, 9 medium, 7 low and 6 informational. The high-severity issues need prompt remediation: a possible SQL injection on the product page, a path traversal that disclosed a local file, CRLF injection into a response header, an exposed .env file, four CORS misconfigurations that trust untrusted origins (arbitrary, null, prefix and suffix matches) with credentials, and client-side JavaScript containing a hardcoded secret, an AWS access key and use of eval. Medium-severity issues include reflected input without output encoding (possible XSS), an open redirect, directory listing, a password form served over plain HTTP, an enabled TRACE method, a session cookie without HttpOnly, a missing Content-Security-Policy, and JavaScript that writes to innerHTML and keeps tokens in web storage. Lower-severity items are missing hardening headers, a cookie without SameSite, a POST form without an anti-CSRF token, risky HTTP methods, and weak randomness and plain-HTTP URLs in JavaScript. Each statement cites its source finding under its own severity. Fix the injection, traversal, CORS and exposed secrets first, rotate any leaked keys, then re-test; results come from automated checks and should be validated before disclosure."
     },
     {
       "id": "sim-quick",
@@ -160,7 +161,8 @@
         "min_pages": 5,
         "max_pages": 30,
         "min_blocked_links": 1,
-        "input_sha256": null
+        "input_sha256": null,
+        "reference_sha256": "7c9d34a839ab0c166f3edb5a86337649aa0a9aa23555eadbd8f1c627b42dd302"
       },
       "expectations": {
         "min_citations": 2,
@@ -174,7 +176,7 @@
         "min_words": 60,
         "max_words": 260
       },
-      "reference_summary": "This passive (quick) test examined the in-scope pages without sending attack payloads, so injection-style issues were not tested. It still found high-severity exposure: an accessible .env environment file, CORS that reflects arbitrary origins with credentials, and client-side JavaScript containing a hardcoded secret, an AWS access key and use of eval. Medium-severity issues include directory listing, a password form over plaintext HTTP, a session cookie without HttpOnly, the TRACE method enabled and a missing Content-Security-Policy, with lower-severity header hardening gaps. Each claim cites its source finding. Remove the exposed files and secrets first, then harden headers and cookies, and run a standard-profile test for active coverage."
+      "reference_summary": "This passive (quick) test examined the in-scope pages without sending attack payloads, so injection-style issues were not tested. It produced 28 findings: 8 high, 7 medium, 7 low and 6 informational. The high-severity exposure is an accessible .env environment file, four CORS misconfigurations that trust untrusted origins (arbitrary, null, prefix and suffix matches) with credentials, and client-side JavaScript containing a hardcoded secret, an AWS access key and use of eval. Medium-severity issues include directory listing, a password form over plaintext HTTP, a session cookie without HttpOnly, the TRACE method enabled, a missing Content-Security-Policy, and JavaScript that writes to innerHTML and keeps tokens in web storage. Lower-severity items are header and cookie hardening gaps, a POST form without an anti-CSRF token, risky HTTP methods, and weak randomness and plain-HTTP URLs in JavaScript. Each claim cites its source finding under its own severity. Remove the exposed file and secrets and fix CORS first, then harden headers and cookies, and run a standard-profile test for active coverage."
     },
     {
       "id": "static-two-findings",
@@ -230,7 +232,8 @@
         "min_pages": 3,
         "max_pages": 3,
         "min_blocked_links": 0,
-        "input_sha256": "efa706297bac4514c8dcddd2fd5d1e7ca29a752a60e1bbc19183c02251cbddd8"
+        "input_sha256": "efa706297bac4514c8dcddd2fd5d1e7ca29a752a60e1bbc19183c02251cbddd8",
+        "reference_sha256": "8d184999bb8abdaf306bc4f9fb15ae11a09e5d49e146dd041183c1bab32bd276"
       },
       "expectations": {
         "min_citations": 2,
@@ -267,7 +270,8 @@
         "min_pages": 4,
         "max_pages": 4,
         "min_blocked_links": 0,
-        "input_sha256": "82a3b68eca68e3a8147ce1547bb3a8ba917dc51783defb94bb23028881ba6d50"
+        "input_sha256": "82a3b68eca68e3a8147ce1547bb3a8ba917dc51783defb94bb23028881ba6d50",
+        "reference_sha256": "74aa1ce1ba6de5077f9a5424faeb91abf056bac4274b453eab3434e238ec4f7f"
       },
       "expectations": {
         "min_citations": 0,
