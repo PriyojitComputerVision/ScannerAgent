@@ -216,8 +216,8 @@ def _main(argv, ctx: dict) -> int:
         with SimulatedTarget() as t:
             print(f"[sim] vulnerable target on {t.url} (loopback only)")
             ctx["target"] = t.url
-            scan = dict(target_url=t.url, allowed_domains=[t.netloc], profile=a.profile,
-                        delay=0.0, bearer=None)
+            scan = {"target_url": t.url, "allowed_domains": [t.netloc], "profile": a.profile,
+                        "delay": 0.0, "bearer": None}
             try:
                 res = run_sandboxed_scan(scan, wall_timeout=a.timeout)
             except SandboxError as e:
@@ -253,8 +253,8 @@ def _main(argv, ctx: dict) -> int:
                   "Start your application first (or check the URL/port), then re-run.")
             ctx["reason"] = f"target not reachable on {p.hostname}:{port}"
             return 4
-        scan = dict(target_url=a.url, allowed_domains=[p.netloc, *a.allow], profile=a.profile,
-                    bearer=a.bearer)
+        scan = {"target_url": a.url, "allowed_domains": [p.netloc, *a.allow], "profile": a.profile,
+                    "bearer": a.bearer}
         try:
             res = run_sandboxed_scan(scan, wall_timeout=a.timeout, block_private=block_private)
         except SandboxError as e:

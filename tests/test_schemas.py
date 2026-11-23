@@ -5,8 +5,8 @@ from pydantic import ValidationError
 
 from pentest_agent.schemas import (
     AuthCredentials,
-    Finding,
     FinalReport,
+    Finding,
     OwaspCategory,
     ScanProfile,
     Severity,

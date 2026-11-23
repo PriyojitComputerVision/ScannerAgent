@@ -109,7 +109,7 @@ def _repeat_header(row) -> None:
 
 
 def _keep_row_together(row) -> None:
-    OxmlElement, qn = _ox()
+    OxmlElement, _qn = _ox()
     tr_pr = row._tr.get_or_add_trPr()
     tr_pr.append(OxmlElement("w:cantSplit"))
 
@@ -470,11 +470,12 @@ def build_docx(path: str | Path, *, title: str, target: str, meta: list[tuple[st
         cid = citations.cwe_id(cwe)
         cwe_cell = ((lambda p, c=cwe, i=cid: b.link_or_text(p, citations.cwe_url(c), f"CWE-{i}", size=9))
                     if cid else "n/a")
+        affected_url = _val(f, "affected_url")
         b.detail_grid(
             [("Category", _val(f, "category") or "n/a"), ("CWE", cwe_cell),
              ("Confidence", str(_val(f, "confidence") or "n/a").capitalize()),
              ("Detected by", _val(f, "source") or "n/a")],
-            wide=("Affected URL", lambda p, u=_val(f, "affected_url"): b.link_or_text(p, u, size=8.5, mono=True)),
+            wide=("Affected URL", lambda p, u=affected_url: b.link_or_text(p, u, size=8.5, mono=True)),
         )
 
         desc = _val(f, "description")

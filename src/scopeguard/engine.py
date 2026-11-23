@@ -181,10 +181,10 @@ JS_RECOMMENDATIONS = {
 }
 
 PROFILES = {
-    "quick":      dict(max_pages=15, active=False, max_targets=0,   variants=False, max_requests=150, uploads=False),
-    "standard":   dict(max_pages=40, active=True,  max_targets=40,  variants=False, max_requests=500, uploads=False),
-    "aggressive": dict(max_pages=80, active=True,  max_targets=120, variants=True,  max_requests=1500, uploads=True),
-    "auth_deep":  dict(max_pages=80, active=True,  max_targets=120, variants=True,  max_requests=1500, uploads=True),
+    "quick":      {"max_pages": 15, "active": False, "max_targets": 0,   "variants": False, "max_requests": 150, "uploads": False},
+    "standard":   {"max_pages": 40, "active": True,  "max_targets": 40,  "variants": False, "max_requests": 500, "uploads": False},
+    "aggressive": {"max_pages": 80, "active": True,  "max_targets": 120, "variants": True,  "max_requests": 1500, "uploads": True},
+    "auth_deep":  {"max_pages": 80, "active": True,  "max_targets": 120, "variants": True,  "max_requests": 1500, "uploads": True},
 }
 
 
@@ -554,7 +554,7 @@ class Scanner:
                 p = _PageParser()
                 try:
                     p.feed(resp.body)
-                except Exception:  # malformed html must never crash a scan
+                except Exception:  # noqa: BLE001, S110 - malformed html must never crash a scan
                     pass
                 page.scripts = [_norm(up.urljoin(url, s)) for s in p.script_src]
                 page.inline_scripts = p.inline_scripts
@@ -641,7 +641,7 @@ class Scanner:
                            url=pg.url, evidence=re.sub(r"\s+", " ", mi.group(0))[:200], cwe="CWE-1427",
                            confidence="medium",
                            recommendation="Investigate the source of this text (user content or a compromised page).")
-            if re.search(r"<title>\s*Index of /", r.body, re.I) or "Parent Directory" in r.body:
+            if re.search(r"<title>\s*Index of /", r.body, re.IGNORECASE) or "Parent Directory" in r.body:
                 self.f.add(source="dast_native", category=A05, severity="medium",
                            title="Directory listing enabled",
                            description="The server returns an automatic directory index.", url=pg.url,
@@ -717,11 +717,11 @@ class Scanner:
         host = up.urlparse(self.origin).hostname or ""
         bypass = {"null": ("CORS trusts the 'null' origin", "Sandboxed iframes and local files send Origin: null."),
                   f"https://{host}.{TEST_HOST}": ("CORS origin check bypass (prefix match)",
-                                                  "The Origin check accepts any domain that starts with the "
-                                                  "target host."),
+                                                  ("The Origin check accepts any domain that starts with the "
+                                                  "target host.")),
                   f"https://{TEST_HOST.split('.')[0]}{host}": ("CORS origin check bypass (suffix match)",
-                                                               "The Origin check accepts any domain that ends "
-                                                               "with the target host.")}
+                                                               ("The Origin check accepts any domain that ends "
+                                                               "with the target host."))}
         cands = [root] + [p.url for p in self.pages if "/api" in p.url or p.url in self.endpoints][:6]
         for u in dict.fromkeys(cands):
             for origin, (title, why) in bypass.items():

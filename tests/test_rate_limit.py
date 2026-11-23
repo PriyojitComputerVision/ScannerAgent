@@ -5,6 +5,7 @@ import datetime as dt
 import http.server
 import threading
 from types import SimpleNamespace
+from typing import ClassVar
 
 import httpx
 import pytest
@@ -19,7 +20,7 @@ from scopeguard.engine import ScopedClient
 
 # ---------------------------------------------------------------- Retry-After parsing
 def test_parse_retry_after_forms_and_cap():
-    now = dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)
+    now = dt.datetime(2026, 1, 1, tzinfo=dt.UTC)
     assert ratelimit.parse_retry_after("5") == 5.0
     assert ratelimit.parse_retry_after("9999", cap=30) == 30.0
     assert ratelimit.parse_retry_after("-3") == 0.0
@@ -34,9 +35,9 @@ def test_parse_retry_after_forms_and_cap():
 
 # ---------------------------------------------------------------- target link: engine client
 class _Throttling(http.server.BaseHTTPRequestHandler):
-    plan: list = []
+    plan: ClassVar[list] = []
 
-    def do_GET(self):  # noqa: N802
+    def do_GET(self):
         status, headers = (self.plan.pop(0) if self.plan else (200, {}))
         self.send_response(status)
         for k, v in headers.items():

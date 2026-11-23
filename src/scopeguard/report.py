@@ -102,8 +102,8 @@ def render_html(*, title: str, meta: list[tuple[str, str]], summary: str | None,
                     if citations.cwe_id(cwe) else _e(cwe or "n/a"))
         b += ['<div class="finding">',
               f'<h3><span class="sev {_e(sev)}">{_e(sev)}</span> {_e(_val(f, "title"))}{ref}</h3>',
-              f'<div class="small">Category: {_e(_val(f, "category"))} · CWE: {cwe_html} · '
-              f'Confidence: {_e(_val(f, "confidence"))} · Source: {_e(_val(f, "source"))}</div>',
+              (f'<div class="small">Category: {_e(_val(f, "category"))} · CWE: {cwe_html} · '
+              f'Confidence: {_e(_val(f, "confidence"))} · Source: {_e(_val(f, "source"))}</div>'),
               f'<div class="small">URL: {_link(_val(f, "affected_url"))}</div>',
               f"<p>{_e(_val(f, 'description'))}</p>"]
         if _val(f, "evidence"):
@@ -136,10 +136,10 @@ def render_markdown(target: str, result: dict, mode: str, sources: dict[str, dic
     summary = citations.deterministic_summary(target, sources, len(result["crawled_pages"]),
                                               len(result["red_flags"]))
     L = [f"# Security Scan Report: {target}", "",
-         f"- **Generated:** {dt.datetime.now(dt.timezone.utc).isoformat(timespec='seconds')}",
+         f"- **Generated:** {dt.datetime.now(dt.UTC).isoformat(timespec='seconds')}",
          f"- **Mode:** {mode}  |  **Profile:** {result['profile']}",
-         f"- **Pages crawled:** {len(result['crawled_pages'])}  |  **Requests:** {result['requests_made']}"
-         f"  |  **Duration:** {result['duration_seconds']}s",
+         (f"- **Pages crawled:** {len(result['crawled_pages'])}  |  **Requests:** {result['requests_made']}"
+         f"  |  **Duration:** {result['duration_seconds']}s"),
          f"- **Out-of-scope links blocked (never fetched):** {len(result['external_links_blocked'])}",
          "", "## Summary", "", citations.to_markdown(summary, sources),
          "", "## Findings by severity", "", "| Severity | Count |", "|---|---|"]
@@ -156,8 +156,8 @@ def render_markdown(target: str, result: dict, mode: str, sources: dict[str, dic
         sid = citations.source_for_finding(sources, x)
         ref = f" [{sid}](#src-{sid})" if sid else ""
         L += [f"### [{x['severity'].upper()}] {x['title']}{ref}", "",
-              f"- **Category:** {x['category']}  |  **CWE:** {x.get('cwe') or 'n/a'}  |  "
-              f"**Confidence:** {x['confidence']}  |  **Source:** {x['source']}",
+              (f"- **Category:** {x['category']}  |  **CWE:** {x.get('cwe') or 'n/a'}  |  "
+              f"**Confidence:** {x['confidence']}  |  **Source:** {x['source']}"),
               f"- **URL:** {x.get('affected_url') or 'n/a'}", "", x["description"], ""]
         if x.get("evidence"):
             L += ["```", x["evidence"], "```", ""]
@@ -176,7 +176,7 @@ def write_reports(out_dir: str, target: str, result: dict, mode: str) -> dict:
     paths = {"md": d / "report.md", "json": d / "report.json", "html": d / "report.html"}
     paths["md"].write_text(md, encoding="utf-8")
     paths["json"].write_text(json.dumps({**result, "sources": sources}, indent=2), encoding="utf-8")
-    meta = [("Generated", dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")),
+    meta = [("Generated", dt.datetime.now(dt.UTC).isoformat(timespec="seconds")),
             ("Mode / profile", f"{mode} / {result['profile']}"),
             ("Pages crawled", str(len(result["crawled_pages"]))),
             ("Requests", str(result["requests_made"])),

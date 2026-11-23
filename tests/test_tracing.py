@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from typing import ClassVar
 
 import pytest
 
@@ -58,7 +59,7 @@ def test_uploaded_runs_are_redacted_and_nested(monkeypatch):
     class _Resp:
         status_code = 200
         text = "{}"
-        headers: dict = {}
+        headers: ClassVar[dict] = {}
 
         def raise_for_status(self):
             pass

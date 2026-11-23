@@ -8,9 +8,9 @@ from pathlib import Path
 SRC = str(Path(__file__).resolve().parent.parent / "src")
 sys.path.insert(0, SRC)
 
-from scopeguard.engine import ScopedClient, ScopeViolation  # noqa: E402
-from scopeguard.sandbox import run_sandboxed_scan  # noqa: E402
-from scopeguard.simulated_target import SimulatedTarget  # noqa: E402
+from scopeguard.engine import ScopedClient, ScopeViolation
+from scopeguard.sandbox import run_sandboxed_scan
+from scopeguard.simulated_target import SimulatedTarget
 
 
 def _escape_attempt(code: str, allowed: str = "127.0.0.1:9") -> str:
@@ -24,7 +24,7 @@ def _escape_attempt(code: str, allowed: str = "127.0.0.1:9") -> str:
         os.chdir(d)
         _install_audit_hook({{"127.0.0.1"}}, {{"127.0.0.1"}}, {{9}}, d)
     """) + textwrap.dedent(code)
-    p = subprocess.run([sys.executable, "-c", boot], capture_output=True, text=True, timeout=30)
+    p = subprocess.run([sys.executable, "-c", boot], capture_output=True, text=True, timeout=30, check=False)
     return p.stdout + p.stderr
 
 
@@ -87,13 +87,13 @@ def test_env_secrets_not_inherited(monkeypatch=None):
     import os
     os.environ["GROQ_API_KEY"] = "SECRET-SHOULD-NOT-LEAK"
     with SimulatedTarget() as t:
-        res = run_sandboxed_scan(dict(target_url=t.url, allowed_domains=[t.netloc], profile="quick", delay=0))
+        res = run_sandboxed_scan({"target_url": t.url, "allowed_domains": [t.netloc], "profile": "quick", "delay": 0})
     assert "SECRET-SHOULD-NOT-LEAK" not in json.dumps(res)
 
 
 def test_full_simulated_scan_finds_expected():
     with SimulatedTarget() as t:
-        res = run_sandboxed_scan(dict(target_url=t.url, allowed_domains=[t.netloc], profile="standard", delay=0))
+        res = run_sandboxed_scan({"target_url": t.url, "allowed_domains": [t.netloc], "profile": "standard", "delay": 0})
     titles = " | ".join(f["title"] for f in res["findings"])
     for expected in ("Possible SQL injection", "Open redirect", "Path traversal", "Reflected input", "JS_EVAL"):
         assert expected in titles
@@ -111,7 +111,7 @@ def test_unresolvable_allowed_host_does_not_abort_scan():
 
 def test_quick_profile_sends_no_active_payloads():
     with SimulatedTarget() as t:
-        res = run_sandboxed_scan(dict(target_url=t.url, allowed_domains=[t.netloc], profile="quick", delay=0))
+        res = run_sandboxed_scan({"target_url": t.url, "allowed_domains": [t.netloc], "profile": "quick", "delay": 0})
     assert not any(f["title"].startswith(("Possible SQL", "Path traversal", "Open redirect")) for f in res["findings"])
 
 

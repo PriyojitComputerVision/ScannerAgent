@@ -48,7 +48,7 @@ if not os.environ.get("GOLDEN_LIVE"):
         "stub reminder {{start}} {{end}}", encoding="utf-8")
     os.environ.setdefault("PROMPTS_DIR", str(_PROMPTS))
 
-import pytest  # noqa: E402
+import pytest
 
 
 @pytest.fixture
