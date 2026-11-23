@@ -148,6 +148,18 @@ def test_severity_checks_allow_subsets_and_mixed_sentences():
     assert golden.severity_number_errors(text, sources) == []
 
 
+def test_severity_check_splits_markdown_paragraphs():
+    sources = {"S1": {"severity": "high"}, "S16": {"severity": "medium"}, "S22": {"severity": "low"},
+               "S29": {"severity": "info"}}
+    # The format of a real gpt-oss answer: markdown paragraphs, non-breaking hyphens.
+    text = ("The scan identified 1 high‑severity finding, 1 medium, 1 low and 1 informational item.  \n\n"
+            "**High‑severity findings (1)** include JavaScript patterns [S1, S16].  \n\n"
+            "**Medium‑severity findings (1)** include a form without a token [S22]  \n"
+            "- **Low‑severity findings** cover header omissions [S29]")
+    wrong = golden.severity_mismatches(text, sources)
+    assert [w.split()[0] for w in wrong] == ["S16", "S22", "S29"], wrong
+
+
 def test_stale_reference_is_not_evaluated_not_model_drift():
     case = _case("static-two-findings").model_copy(deep=True)
     case.reference_summary += " Edited without review."  # stamp no longer matches
