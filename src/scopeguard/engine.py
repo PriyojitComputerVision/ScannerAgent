@@ -35,10 +35,72 @@ XSS = "Cross-Site Scripting"
 OTHER = "Other"
 
 ALLOWED_METHODS = {"GET", "HEAD", "OPTIONS", "TRACE"}
+# POST is permitted only through ScopedClient.post_multipart (upload testing),
+# never through request(); the upload probe is gated by profile + settings + RBAC.
+UPLOAD_METHODS = ALLOWED_METHODS | {"POST"}
 USER_AGENT = "ScopeGuard-Agent/1.0 (authorized security assessment)"
 STATIC_EXT = (".css", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff",
               ".woff2", ".ttf", ".pdf", ".zip", ".mp4", ".mp3", ".webp")
 TEST_ORIGIN = "https://scopeguard.invalid"
+TEST_HOST = "scopeguard.invalid"
+# API documentation / consoles that should not be public in production.
+API_DOC_PATHS = ["/docs", "/redoc", "/swagger", "/swagger-ui", "/swagger-ui.html", "/swagger-ui/index.html",
+                 "/api-docs", "/api/docs", "/openapi.json", "/swagger.json", "/v2/api-docs", "/v3/api-docs",
+                 "/graphql", "/graphiql", "/api/graphql"]
+API_DOC_SIGNATURE = re.compile(
+    r"(?i)swagger|openapi|redoc|graphiql|graphql playground|\"paths\"\s*:|\"__schema\"|api documentation")
+# Backend endpoints referenced in HTML/JS (paths or absolute URLs).
+ENDPOINT_RX = re.compile(
+    r"""["'`]((?:https?://[^"'`\s<>]+?)?/(?:api|v\d+|graphql|rest|ajax|auth|oauth|internal|admin|backend|"""
+    r"""services?|rpc|json|ws)(?:[/?][^"'`\s<>]*)?)["'`]""", re.IGNORECASE)
+SSTI_PAYLOAD = "sg{{7*7}}sg${7*7}sg<%= 7*7 %>sg#{7*7}sg"
+SSTI_HIT = re.compile(r"sg49sg")
+CRLF_HEADER = "x-sg-injected"
+SQL_SLEEP = 4  # seconds, time-based checks (aggressive/auth_deep only)
+SQL_TIME_PAYLOADS = ["' AND SLEEP({n})-- -", "' AND 1=(SELECT 1 FROM PG_SLEEP({n}))--",
+                     "'; WAITFOR DELAY '0:0:{n}'--", " AND SLEEP({n})"]
+CMD_TIME_PAYLOADS = [";sleep {n}", "|sleep {n}", "$(sleep {n})"]
+URL_PARAMS = {"url", "link", "href", "src", "redirect", "next", "return", "returnurl", "goto", "target",
+              "dest", "destination", "continue", "callback"}
+
+# File-upload testing. Every payload is a small, INERT marker file. The "scripts"
+# only echo a unique marker string if a misconfigured server were to execute them;
+# they contain no shell, no real executable, and do nothing on their own. Used to
+# check whether an upload control rejects dangerous/disguised files, never to plant
+# a working webshell. {m} is replaced with a per-run random marker.
+UPLOAD_PROBES = [
+    # name, content, content-type sent, server-executable extension?
+    ("scopeguard-{m}.txt", "scopeguard upload test {m}", "text/plain", False),
+    ("scopeguard-{m}.php", "<?php echo 'scopeguard-exec-{m}'; ?>", "image/jpeg", True),
+    ("scopeguard-{m}.phtml", "<?php echo 'scopeguard-exec-{m}'; ?>", "image/png", True),
+    ("scopeguard-{m}.jsp", "<% out.print(\"scopeguard-exec-{m}\"); %>", "image/jpeg", True),
+    ("scopeguard-{m}.asp", "<% Response.Write(\"scopeguard-exec-{m}\") %>", "image/jpeg", True),
+    ("scopeguard-{m}.svg", "<svg xmlns='http://www.w3.org/2000/svg'><!-- scopeguard-{m} --></svg>", "image/svg+xml", True),
+    ("scopeguard-{m}.html", "<!-- scopeguard-{m} -->", "image/jpeg", True),
+    ("scopeguard-{m}.jpg.php", "<?php echo 'scopeguard-exec-{m}'; ?>", "image/jpeg", True),   # double extension
+    ("scopeguard-{m}.pHp", "<?php echo 'scopeguard-exec-{m}'; ?>", "image/jpeg", True),       # case bypass
+    ("scopeguard-{m}.php%00.jpg", "<?php echo 'scopeguard-exec-{m}'; ?>", "image/jpeg", True),  # null-byte trick
+    ("scopeguard-{m}.exe", "MZ scopeguard inert marker {m} (not a real executable)", "application/octet-stream", False),
+]
+# A benign, highly compressible oversized file to probe the size limit.
+UPLOAD_OVERSIZE_MB = 6
+EXEC_MARKER = "scopeguard-exec-"
+
+
+# Prompt-injection and LLM jailbreak phrases embedded in page content.
+PROMPT_INJECTION_RX = re.compile(
+    r"(?is)(?:ignore\s+(?:all\s+|any\s+)?(?:the\s+)?(?:previous|prior|above|earlier|system)\s+"
+    r"(?:instructions?|prompts?|messages?|rules?)"
+    r"|disregard\s+(?:all\s+)?(?:previous|prior|your)\s+(?:instructions?|guidelines?|rules?)"
+    r"|forget\s+(?:all\s+|everything\s+)?(?:you(?:'re| are| were)|your\s+(?:instructions?|rules?))"
+    r"|you\s+are\s+now\s+(?:in\s+)?(?:an?\s+)?(?:dan|do\s+anything\s+now|developer\s+mode|"
+    r"jailbr|unrestricted|unfiltered|evil|god\s*mode)"
+    r"|(?:enable|enter|activate)\s+(?:dan|developer|god|jailbreak|debug|admin)\s*mode"
+    r"|(?:reveal|print|repeat|show|leak|output)\s+(?:me\s+)?(?:your\s+)?(?:system\s+prompt|initial\s+"
+    r"instructions?|api\s*key|secret|credentials?)"
+    r"|pretend\s+(?:to\s+be|you\s+are)\s+(?:an?\s+)?(?:unrestricted|different|evil|dan)"
+    r"|(?:as|now)\s+an?\s+ai\b[^.]{0,40}\b(?:without|no)\s+(?:restrictions?|limits?|filters?|guidelines?)"
+    r"|do\s+not\s+(?:follow|obey|apply)\s+(?:your\s+)?(?:safety\s+)?(?:rules?|guidelines?|policy))")
 
 SQL_ERRORS = [
     "you have an error in your sql syntax", "sqlstate[", "unclosed quotation mark",
@@ -114,10 +176,10 @@ JS_RECOMMENDATIONS = {
 }
 
 PROFILES = {
-    "quick":      dict(max_pages=15, active=False, max_targets=0,   variants=False, max_requests=150),
-    "standard":   dict(max_pages=40, active=True,  max_targets=40,  variants=False, max_requests=500),
-    "aggressive": dict(max_pages=80, active=True,  max_targets=120, variants=True,  max_requests=1500),
-    "auth_deep":  dict(max_pages=80, active=True,  max_targets=120, variants=True,  max_requests=1500),
+    "quick":      dict(max_pages=15, active=False, max_targets=0,   variants=False, max_requests=150, uploads=False),
+    "standard":   dict(max_pages=40, active=True,  max_targets=40,  variants=False, max_requests=500, uploads=False),
+    "aggressive": dict(max_pages=80, active=True,  max_targets=120, variants=True,  max_requests=1500, uploads=True),
+    "auth_deep":  dict(max_pages=80, active=True,  max_targets=120, variants=True,  max_requests=1500, uploads=True),
 }
 
 
@@ -252,6 +314,50 @@ class ScopedClient:
     def get(self, url, headers=None):
         return self.request("GET", url, headers)
 
+    def post_multipart(self, url: str, fields: dict, file_field: str, filename: str,
+                       content: bytes, content_type: str) -> Response:
+        """Scoped multipart/form-data POST, used ONLY by the upload probe.
+
+        Enforces scope and the request budget exactly like GET; POST is allowed
+        here but nowhere else (request() keeps the GET/HEAD/OPTIONS/TRACE allowlist)."""
+        if not self.in_scope(url):
+            raise ScopeViolation(f"out of scope: {url}")
+        if self.count >= self.max_requests:
+            raise BudgetExceeded(f"request budget {self.max_requests} exhausted")
+        self.count += 1
+        if self.delay:
+            time.sleep(self.delay)
+        boundary = "----scopeguard" + uuid.uuid4().hex
+        parts = []
+        for k, v in (fields or {}).items():
+            parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode())
+        safe_name = filename.replace('"', "").replace("\r", "").replace("\n", "")
+        parts.append((f'--{boundary}\r\nContent-Disposition: form-data; name="{file_field}"; '
+                      f'filename="{safe_name}"\r\nContent-Type: {content_type}\r\n\r\n').encode())
+        body = b"".join(parts) + content + f"\r\n--{boundary}--\r\n".encode()
+        hdrs = {"User-Agent": USER_AGENT, "Content-Type": f"multipart/form-data; boundary={boundary}"}
+        if self.bearer and "\n" not in self.bearer and "\r" not in self.bearer:
+            hdrs["Authorization"] = f"Bearer {self.bearer}"
+        req = urllib.request.Request(url, data=body, method="POST", headers=hdrs)
+        resp_obj = None
+        try:
+            resp_obj = self._opener.open(req, timeout=self.timeout)
+        except urllib.error.HTTPError as e:
+            resp_obj = e
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            self.log.append(("POST", url, 0))
+            return Response(url=url, error=f"{type(e).__name__}: {e}"[:200])
+        try:
+            raw = resp_obj.read(self.max_bytes + 1)[: self.max_bytes]
+            h = resp_obj.headers
+            status = getattr(resp_obj, "status", None) or resp_obj.getcode()
+            body_text = raw.decode(h.get_content_charset() or "utf-8", errors="replace")
+        finally:
+            resp_obj.close()
+        self.log.append(("POST", url, status))
+        return Response(url=url, status=status, headers={k.lower(): v for k, v in h.items()},
+                        set_cookies=h.get_all("Set-Cookie") or [], body=body_text)
+
 
 # --------------------------------------------------------------------------
 # HTML parsing / spider
@@ -342,7 +448,7 @@ class Findings:
 # --------------------------------------------------------------------------
 class Scanner:
     def __init__(self, target_url, allowed_domains, profile="standard", bearer=None,
-                 delay=0.05, max_pages=None, max_requests=None):
+                 delay=0.05, max_pages=None, max_requests=None, upload_active=False):
         self.cfg = dict(PROFILES.get(profile, PROFILES["standard"]))
         if max_pages:
             self.cfg["max_pages"] = max_pages
@@ -357,6 +463,21 @@ class Scanner:
         self.blocked: set[str] = set()
         self.red_flags: list[str] = []
         self.origin = "{0.scheme}://{0.netloc}".format(up.urlparse(target_url))
+        self.upload_active = bool(upload_active)
+        self.coverage: dict[str, dict] = {}   # attack/check -> tested, findings, notes
+        self.endpoints: dict[str, str] = {}   # backend endpoints found in HTML/JS -> where
+
+    def _cov(self, check: str, tested: int = 0, found: int = 0, note: str | None = None) -> None:
+        c = self.coverage.setdefault(check, {"tested": 0, "findings": 0, "notes": []})
+        c["tested"] += tested
+        c["findings"] += found
+        if note and len(c["notes"]) < 25:
+            c["notes"].append(note)
+
+    def _timed_get(self, url):
+        t = time.monotonic()
+        r = self._safe(self.client.get, url)
+        return r, time.monotonic() - t
 
     # ---- crawl -----------------------------------------------------------
     def _record_external(self, url: str):
@@ -426,6 +547,12 @@ class Scanner:
             "x-content-type-options": ("Missing X-Content-Type-Options header", "low",
                                        "Set X-Content-Type-Options: nosniff."),
             "referrer-policy": ("Missing Referrer-Policy header", "info", "Set a Referrer-Policy."),
+            "cross-origin-opener-policy": ("Missing Cross-Origin-Opener-Policy header", "info",
+                                           "Set Cross-Origin-Opener-Policy: same-origin."),
+            "cross-origin-resource-policy": ("Missing Cross-Origin-Resource-Policy header", "info",
+                                             "Set Cross-Origin-Resource-Policy: same-origin (or same-site)."),
+            "permissions-policy": ("Missing Permissions-Policy header", "info",
+                                   "Set a Permissions-Policy that disables unused browser features."),
         }
         if self.origin.startswith("https"):
             required["strict-transport-security"] = (
@@ -441,6 +568,14 @@ class Scanner:
                             "content-security-policy", ""):
                         continue
                     missing.setdefault(h, []).append(pg.url)
+            csp = r.headers.get("content-security-policy", "")
+            weak = [w for w in ("'unsafe-inline'", "'unsafe-eval'") if w in csp]
+            if csp and (weak or re.search(r"(?:script-src|default-src)[^;]*\s\*(?:\s|;|$)", csp)):
+                self.f.add(source="dast_native", category=A05, severity="low",
+                           title="Weak Content-Security-Policy",
+                           description="The CSP allows " + (", ".join(weak) or "any script source (*)") + ".",
+                           url=pg.url, evidence=csp[:300], cwe="CWE-693", confidence="high",
+                           recommendation="Remove unsafe-inline/unsafe-eval and wildcards; use nonces or hashes.")
             if not server_seen and r.headers.get("server"):
                 server_seen = True
                 self.f.add(source="recon", category=A05, severity="info",
@@ -459,6 +594,15 @@ class Scanner:
                                evidence=m.group(0)[:200], cwe="CWE-209", confidence="medium",
                                recommendation="Return generic errors; keep diagnostics in server logs.")
                     break
+            mi = PROMPT_INJECTION_RX.search(r.body)
+            if mi:
+                self.f.add(source="dast_native", category=OTHER, severity="medium",
+                           title="Page content attempts prompt injection / jailbreak",
+                           description="The page contains text written to hijack an AI agent or scanner "
+                                       "(prompt injection / jailbreak). It was treated as data and not followed.",
+                           url=pg.url, evidence=re.sub(r"\s+", " ", mi.group(0))[:200], cwe="CWE-1427",
+                           confidence="medium",
+                           recommendation="Investigate the source of this text (user content or a compromised page).")
             if re.search(r"<title>\s*Index of /", r.body, re.I) or "Parent Directory" in r.body:
                 self.f.add(source="dast_native", category=A05, severity="medium",
                            title="Directory listing enabled",
@@ -482,6 +626,8 @@ class Scanner:
                                    url=pg.url, evidence=f"action={form['action'] or '(self)'}",
                                    cwe="CWE-352", confidence="low",
                                    recommendation="Add per-session anti-CSRF tokens / SameSite cookies.")
+        self._cov("Security & cross-origin policy headers", tested=len(required) * max(1, len(self.pages)),
+                  found=len(missing), note="missing: " + (", ".join(sorted(missing)) or "none"))
         for h, urls in missing.items():
             title, sev, rec = required[h]
             self.f.add(source="dast_native", category=A05, severity=sev, title=title,
@@ -528,14 +674,50 @@ class Scanner:
                        title="HTTP TRACE method enabled", description="Server echoes TRACE requests.",
                        url=root, cwe="CWE-693", confidence="high",
                        recommendation="Disable TRACE.")
-        # CORS on root + api-looking pages
-        cands = [root] + [p.url for p in self.pages if "/api" in p.url][:4]
+        self._cov("HTTP methods / TRACE", tested=2)
+        # CORS on root + api-looking pages: arbitrary, null and prefix/suffix-bypass origins, preflight
+        host = up.urlparse(self.origin).hostname or ""
+        bypass = {"null": ("CORS trusts the 'null' origin", "Sandboxed iframes and local files send Origin: null."),
+                  f"https://{host}.{TEST_HOST}": ("CORS origin check bypass (prefix match)",
+                                                  "The Origin check accepts any domain that starts with the "
+                                                  "target host."),
+                  f"https://{TEST_HOST.split('.')[0]}{host}": ("CORS origin check bypass (suffix match)",
+                                                               "The Origin check accepts any domain that ends "
+                                                               "with the target host.")}
+        cands = [root] + [p.url for p in self.pages if "/api" in p.url or p.url in self.endpoints][:6]
         for u in dict.fromkeys(cands):
+            for origin, (title, why) in bypass.items():
+                c = self._safe(self.client.get, u, {"Origin": origin})
+                self._cov("CORS (null / prefix / suffix origins)", tested=1)
+                if c and c.headers.get("access-control-allow-origin", "") == origin:
+                    cred = c.headers.get("access-control-allow-credentials", "").lower() == "true"
+                    self._cov("CORS (null / prefix / suffix origins)", found=1, note=f"{title} at {u}")
+                    self.f.add(source="dast_native", category=A05, severity="high" if cred else "medium",
+                               title=title + (" with credentials" if cred else ""), description=why, url=u,
+                               evidence=f"Origin: {origin} -> ACAO: {origin}; ACAC: {cred}", cwe="CWE-942",
+                               confidence="high", recommendation="Compare the full Origin against an exact allowlist.")
+            pre = self._safe(self.client.request, "OPTIONS", u, {
+                "Origin": TEST_ORIGIN, "Access-Control-Request-Method": "DELETE",
+                "Access-Control-Request-Headers": "authorization"})
+            self._cov("CORS preflight", tested=1)
+            if pre and pre.headers.get("access-control-allow-origin", "") in (TEST_ORIGIN, "*") and \
+                    "DELETE" in pre.headers.get("access-control-allow-methods", "").upper():
+                self._cov("CORS preflight", found=1, note=f"DELETE allowed for any origin at {u}")
+                self.f.add(source="dast_native", category=A05, severity="medium",
+                           title="CORS preflight allows untrusted origins to send DELETE",
+                           description="A preflight from an untrusted origin was approved for DELETE.",
+                           url=u, evidence=f"ACAM: {pre.headers.get('access-control-allow-methods', '')}",
+                           cwe="CWE-942", confidence="medium",
+                           recommendation="Only approve preflights from trusted origins and needed methods.")
             c = self._safe(self.client.get, u, {"Origin": TEST_ORIGIN})
+            self._cov("CORS (arbitrary origin)", tested=1)
             if not c:
                 continue
             ao = c.headers.get("access-control-allow-origin", "")
             cred = c.headers.get("access-control-allow-credentials", "").lower() == "true"
+            if ao in (TEST_ORIGIN, "*"):
+                self._cov("CORS (arbitrary origin)", found=1 if ao == TEST_ORIGIN or cred else 0,
+                          note=f"ACAO {ao} at {u}")
             if ao == TEST_ORIGIN:
                 self.f.add(source="dast_native", category=A05, severity="high" if cred else "medium",
                            title="CORS reflects arbitrary Origin" + (" with credentials" if cred else ""),
@@ -548,17 +730,47 @@ class Scanner:
                            description="Invalid/misconfigured CORS policy.", url=u,
                            evidence="ACAO: *; ACAC: true", cwe="CWE-942", confidence="medium",
                            recommendation="Use an explicit origin allowlist.")
+        # Host header injection via X-Forwarded-Host (request still goes to the target)
+        hh = self._safe(self.client.get, root, {"X-Forwarded-Host": TEST_HOST})
+        self._cov("Host header injection", tested=1)
+        if hh and (TEST_HOST in hh.headers.get("location", "") or TEST_HOST in hh.body[:20000]):
+            self._cov("Host header injection", found=1, note="X-Forwarded-Host reflected")
+            self.f.add(source="dast_native", category=A05, severity="medium",
+                       title="Host header injection (X-Forwarded-Host reflected)",
+                       description="The response builds URLs from X-Forwarded-Host; this enables password-reset "
+                                   "poisoning and cache poisoning.", url=root,
+                       evidence=f"X-Forwarded-Host: {TEST_HOST} reflected", cwe="CWE-644", confidence="medium",
+                       recommendation="Build absolute URLs from a configured host, not request headers.")
         # sensitive paths, with soft-404 protection
         junk = self._safe(self.client.get, f"{self.origin}/sg-{uuid.uuid4().hex[:10]}")
         junk_body = junk.body if junk else None
         junk_ok = bool(junk and junk.status == 200)
+        # API documentation (/docs, swagger, openapi, graphql consoles): accessible or not
+        for path in API_DOC_PATHS:
+            r = self._safe(self.client.get, self.origin + path)
+            self._cov("API docs exposure (/docs, swagger, openapi, graphql)", tested=1)
+            status = r.status if r else "no response"
+            exposed = bool(r and r.status == 200 and not (junk_ok and r.body == junk_body)
+                           and API_DOC_SIGNATURE.search(r.body[:20000]))
+            self._cov("API docs exposure (/docs, swagger, openapi, graphql)", found=int(exposed),
+                      note=f"{path}: {status}{' (EXPOSED)' if exposed else ' (not accessible)' if status != 200 else ' (no API docs content)'}")
+            if exposed:
+                self.f.add(source="dast_native", category=A05, severity="medium",
+                           title=f"API documentation exposed ({path})",
+                           description=f"{path} is publicly accessible and serves API documentation or a "
+                                       "query console, which maps every endpoint for an attacker.",
+                           url=self.origin + path, evidence=f"GET {path} -> {r.status}", cwe="CWE-200",
+                           confidence="high", recommendation="Disable API docs in production or put them "
+                                                             "behind authentication.")
         for path, sig, sev, title, cwe in SENSITIVE_PATHS:
             r = self._safe(self.client.get, self.origin + path)
+            self._cov("Sensitive files (.env, .git, backups)", tested=1)
             if not r or r.status != 200:
                 continue
             if junk_ok and r.body == junk_body:
                 continue
             if re.search(sig, r.body[:5000]):
+                self._cov("Sensitive files (.env, .git, backups)", found=1, note=path)
                 self.f.add(source="dast_native", category=A05, severity=sev, title=title,
                            description=f"{path} is publicly retrievable and matches a sensitive-content signature.",
                            url=self.origin + path, evidence=re.sub(r"=.*", "=<redacted>", r.body[:80]),
@@ -597,14 +809,70 @@ class Scanner:
         q[name] = value
         return base + "?" + up.urlencode(q)
 
+    @staticmethod
+    def _in_script(body: str, marker: str) -> bool:
+        i = body.find(marker)
+        return i >= 0 and body.rfind("<script", 0, i) > body.rfind("</script", 0, i)
+
+    def _sqli_boolean(self, base, params, name, base_r) -> bool:
+        v = params.get(name) or "1"
+        pairs = [(v + "' AND '1'='1", v + "' AND '1'='2")]
+        if v.isdigit():
+            pairs.append((v + " AND 1=1", v + " AND 1=2"))
+        for true_v, false_v in pairs:
+            t = self._safe(self.client.get, self._inject(base, params, name, true_v))
+            f = self._safe(self.client.get, self._inject(base, params, name, false_v))
+            self._cov("SQL injection (boolean-based)", tested=1)
+            if not (t and f and base_r) or t.status != base_r.status:
+                continue
+            lb, lt, lf = len(base_r.body), len(t.body), len(f.body)
+            same_as_base = abs(lt - lb) <= max(50, 0.03 * lb) + len(true_v)
+            differs = f.status != t.status or abs(lt - lf) > max(50, 0.10 * max(lt, 1))
+            if same_as_base and differs:
+                t2 = self._safe(self.client.get, self._inject(base, params, name, true_v))
+                if t2 and abs(len(t2.body) - lt) <= 10:
+                    self._cov("SQL injection (boolean-based)", found=1, note=f"param {name} at {base}")
+                    self.f.add(source="dast_native", category=A03, severity="high",
+                               title="Possible SQL injection (boolean-based)",
+                               description=f"'{name}': a true condition returns the normal page and a false "
+                                           "one changes it, so the value reaches a SQL query.",
+                               url=base, evidence=f"param={name}; true={lt}B false={lf}B ({f.status})",
+                               cwe="CWE-89", confidence="medium",
+                               recommendation="Use parameterized queries.")
+                    return True
+        return False
+
+    def _time_based(self, base, params, name, payloads, check, title, cwe, rec) -> bool:
+        v = params.get(name) or "1"
+        _, t0 = self._timed_get(self._inject(base, params, name, v))
+        for tpl in payloads:
+            slow, t1 = self._timed_get(self._inject(base, params, name, v + tpl.format(n=SQL_SLEEP)))
+            self._cov(check, tested=1)
+            if not slow or t1 < t0 + SQL_SLEEP - 0.5:
+                continue
+            _, t_zero = self._timed_get(self._inject(base, params, name, v + tpl.format(n=0)))
+            _, t_again = self._timed_get(self._inject(base, params, name, v + tpl.format(n=SQL_SLEEP)))
+            if t_zero < t0 + 1.5 and t_again >= t0 + SQL_SLEEP - 0.5:
+                self._cov(check, found=1, note=f"param {name} at {base}: +{t1 - t0:.1f}s")
+                self.f.add(source="dast_native", category=A03, severity="high", title=title,
+                           description=f"'{name}': a {SQL_SLEEP}s delay payload delayed the response twice, "
+                                       "and the 0s version did not.", url=base,
+                           evidence=f"param={name}; baseline {t0:.1f}s, delayed {t1:.1f}s/{t_again:.1f}s",
+                           cwe=cwe, confidence="medium", recommendation=rec)
+                return True
+        return False
+
     def active(self):
         targets = self._targets()
         xss_payload = f"sg{uuid.uuid4().hex[:6]}\"'<zq>"
+        timed_left = 15 if self.cfg["variants"] else 0  # time-based checks are slow: cap them
         for base, params, name in targets:
             lname = name.lower()
             # reflected XSS (unencoded reflection of dangerous chars)
             r = self._safe(self.client.get, self._inject(base, params, name, xss_payload))
+            self._cov("Cross-site scripting (reflected)", tested=1)
             if r and r.is_html and xss_payload in r.body:
+                self._cov("Cross-site scripting (reflected)", found=1, note=f"param {name} at {base}")
                 self.f.add(source="dast_native", category=XSS, severity="medium",
                            title="Reflected input without output encoding (possible XSS)",
                            description=f"Parameter '{name}' is reflected with <, \" and ' unencoded. "
@@ -612,24 +880,85 @@ class Scanner:
                            url=self._inject(base, params, name, "<marker>"),
                            evidence=f"param={name}", cwe="CWE-79", confidence="medium",
                            recommendation="Context-aware output encoding and a strict CSP.")
+            # XSS inside a <script> block (quote breaks out of a JS string)
+            js_marker = f"sg{uuid.uuid4().hex[:6]}';sgq//"
+            r = self._safe(self.client.get, self._inject(base, params, name, js_marker))
+            self._cov("Cross-site scripting (script context)", tested=1)
+            if r and r.is_html and self._in_script(r.body, js_marker):
+                self._cov("Cross-site scripting (script context)", found=1, note=f"param {name} at {base}")
+                self.f.add(source="dast_native", category=XSS, severity="high",
+                           title="Reflected input inside a <script> block (possible XSS)",
+                           description=f"'{name}' is written into JavaScript with the quote unescaped.",
+                           url=base, evidence=f"param={name}", cwe="CWE-79", confidence="medium",
+                           recommendation="Encode for the JavaScript context or pass data via JSON.")
+            # javascript: URL injected into a link/src attribute
+            if lname in URL_PARAMS:
+                js_url = f"javascript:sg{uuid.uuid4().hex[:6]}()"
+                r = self._safe(self.client.get, self._inject(base, params, name, js_url))
+                self._cov("Cross-site scripting (javascript: URL)", tested=1)
+                if r and r.is_html and re.search(r"(?:href|src|action)\s*=\s*[\"']?" + re.escape(js_url), r.body):
+                    self._cov("Cross-site scripting (javascript: URL)", found=1, note=f"param {name} at {base}")
+                    self.f.add(source="dast_native", category=XSS, severity="medium",
+                               title="javascript: URL accepted in a link (possible XSS)",
+                               description=f"'{name}' is placed in an href/src without a scheme check.",
+                               url=base, evidence=f"param={name}", cwe="CWE-79", confidence="medium",
+                               recommendation="Allow only http(s) URLs in links.")
+            # server-side template injection
+            r = self._safe(self.client.get, self._inject(base, params, name, SSTI_PAYLOAD))
+            self._cov("Server-side template injection", tested=1)
+            if r and SSTI_HIT.search(r.body) and SSTI_PAYLOAD not in r.body:
+                self._cov("Server-side template injection", found=1, note=f"param {name} at {base}")
+                self.f.add(source="dast_native", category=A03, severity="high",
+                           title="Server-side template injection",
+                           description=f"'{name}': the expression 7*7 was evaluated to 49 by a template engine.",
+                           url=base, evidence=f"param={name}; 7*7 -> 49", cwe="CWE-1336", confidence="high",
+                           recommendation="Never build templates from user input; pass it as data.")
+            # CRLF / response header injection
+            r = self._safe(self.client.get, self._inject(base, params, name, f"sg\r\n{CRLF_HEADER}: sg1"))
+            self._cov("CRLF / header injection", tested=1)
+            if r and CRLF_HEADER in r.headers:
+                self._cov("CRLF / header injection", found=1, note=f"param {name} at {base}")
+                self.f.add(source="dast_native", category=A03, severity="high",
+                           title="CRLF injection (response header injection)",
+                           description=f"'{name}' can add response headers (cookies, redirects, cache poisoning).",
+                           url=base, evidence=f"param={name}; injected header {CRLF_HEADER} returned",
+                           cwe="CWE-113", confidence="high",
+                           recommendation="Strip CR/LF from values written to headers.")
             # error-based SQLi
             base_r = self._safe(self.client.get, self._inject(base, params, name, params.get(name) or "1"))
             r = self._safe(self.client.get, self._inject(base, params, name,
                                                          (params.get(name) or "1") + "'"))
+            self._cov("SQL injection (error-based)", tested=1)
+            sqli_found = False
             if r and base_r:
                 hit = next((s for s in SQL_ERRORS if s in r.body.lower() and s not in base_r.body.lower()), None)
                 if hit:
+                    sqli_found = True
+                    self._cov("SQL injection (error-based)", found=1, note=f"param {name} at {base}")
                     self.f.add(source="dast_native", category=A03, severity="high",
                                title="Possible SQL injection (database error on quote)",
                                description=f"A single quote in '{name}' produced a database error message.",
                                url=base, evidence=f"param={name}; signature='{hit}'", cwe="CWE-89",
                                confidence="medium",
                                recommendation="Use parameterized queries; suppress DB errors.")
+            if not sqli_found:
+                sqli_found = self._sqli_boolean(base, params, name, base_r)
+            if timed_left > 0:
+                timed_left -= 1
+                if not sqli_found:
+                    self._time_based(base, params, name, SQL_TIME_PAYLOADS, "SQL injection (time-based)",
+                                     "Possible SQL injection (time-based)", "CWE-89",
+                                     "Use parameterized queries.")
+                self._time_based(base, params, name, CMD_TIME_PAYLOADS, "OS command injection (time-based)",
+                                 "Possible OS command injection (time-based)", "CWE-78",
+                                 "Never pass input to a shell; use argument lists.")
             # open redirect
             if lname in REDIRECT_PARAMS:
                 r = self._safe(self.client.get, self._inject(base, params, name, TEST_ORIGIN + "/x"))
+                self._cov("Open redirect", tested=1)
                 if r and 300 <= r.status < 400 and up.urlparse(
                         r.headers.get("location", "")).hostname == "scopeguard.invalid":
+                    self._cov("Open redirect", found=1, note=f"param {name} at {base}")
                     self.f.add(source="dast_native", category=A01, severity="medium",
                                title="Open redirect", description=f"'{name}' controls the redirect target "
                                "without validation (redirect was not followed).",
@@ -643,7 +972,9 @@ class Scanner:
                     payloads += ["..%2f..%2f..%2f..%2f..%2fetc%2fpasswd", "....//....//....//....//etc/passwd"]
                 for pl in payloads:
                     r = self._safe(self.client.get, base + "?" + up.urlencode({**params, name: pl}, safe="%/."))
+                    self._cov("Path traversal", tested=1)
                     if r and re.search(r"root:[x*]:0:0:", r.body):
+                        self._cov("Path traversal", found=1, note=f"param {name} at {base}")
                         self.f.add(source="dast_native", category=A01, severity="high",
                                    title="Path traversal (local file disclosure)",
                                    description=f"'{name}' allowed reading a file outside the intended directory.",
@@ -668,6 +999,11 @@ class Scanner:
                 if r and r.status == 200:
                     assets += 1
                     blobs.append((src, r.body))
+            for url, code in blobs + [(pg.url, pg.resp.body)]:
+                for m in ENDPOINT_RX.finditer(code):
+                    absu = _norm(up.urljoin(pg.url, m.group(1)))
+                    if absu.startswith(("http://", "https://")):
+                        self.endpoints.setdefault(absu, url.split(" ")[0])
             for url, code in blobs:
                 for n, line in enumerate(code.splitlines(), 1):
                     for rid, rx, sev, cat, desc, cwe in JS_RULES:
@@ -682,6 +1018,145 @@ class Scanner:
                                        recommendation=JS_RECOMMENDATIONS.get(
                                            rid, "Review this pattern and remediate if it handles untrusted data."))
 
+    def _upload_forms(self):
+        """Forms with a file input: (action_url, file_field, other_fields, accept, max_declared)."""
+        out = []
+        for pg in self.pages:
+            for form in pg.forms:
+                file_inputs = [i for i in form["inputs"] if i.get("type") == "file"]
+                if not file_inputs:
+                    continue
+                action = form.get("action_abs") or pg.url
+                if not self.client.in_scope(action):
+                    self._record_external(action)
+                    continue
+                fields = {i["name"]: (i["value"] or "1") for i in form["inputs"]
+                          if i.get("name") and i["type"] not in ("file", "submit", "button", "image")}
+                accept = next((i.get("accept", "") for i in file_inputs if i.get("accept")), "")
+                max_declared = None
+                for i in form["inputs"]:
+                    if i.get("name", "").upper() == "MAX_FILE_SIZE" and (i.get("value") or "").isdigit():
+                        max_declared = int(i["value"])
+                out.append((action, file_inputs[0].get("name") or "file", fields, accept, max_declared))
+        return out
+
+    def upload_tests(self, enable_active: bool):
+        """Report upload controls (accepted types, declared max size) and, when
+        active uploads are enabled, try benign disguised files and note the result."""
+        forms = self._upload_forms()
+        if not forms:
+            return
+        marker_root = uuid.uuid4().hex[:8]
+        for action, file_field, fields, accept, max_declared in forms:
+            self._cov("File upload controls", tested=1)
+            self.f.add(source="dast_native", category=A05, severity="info",
+                       title="File upload detected",
+                       description="A file-upload input was found. Accepted types: "
+                                   + (accept or "not restricted client-side") + "; declared max size: "
+                                   + (f"{max_declared} bytes" if max_declared else "not declared client-side") + ".",
+                       url=action, evidence=f"field={file_field}; accept={accept or '*'}", cwe="CWE-434",
+                       confidence="high", recommendation="Validate type and size on the server; store uploads "
+                                                         "outside the web root and never execute them.")
+            if not enable_active:
+                continue
+            accepted, executed, size_note = [], [], ""
+            for name_tpl, content_tpl, ctype, executable in UPLOAD_PROBES:
+                m = f"{marker_root}{uuid.uuid4().hex[:4]}"
+                name, content = name_tpl.format(m=m), content_tpl.format(m=m).encode()
+                self._cov("File upload bypass", tested=1)
+                r = self._safe(self.client.post_multipart, action, fields, file_field, name, content, ctype)
+                if not r or r.error or r.status >= 400:
+                    continue
+                accepted.append(name.split(".", 1)[-1])
+                # If the response (or the stored file) echoes the exec marker, it ran.
+                if EXEC_MARKER + m in r.body:
+                    executed.append(name)
+                    continue
+                # Where might the file be served from? A path in the response (or
+                # Location) that names the file, plus a few common upload folders.
+                cands = [c for c in re.findall(r"[/\w.\-]*" + re.escape(name), r.body)]
+                loc = r.headers.get("location", "")
+                if loc:
+                    cands.append(loc)
+                cands += [d + name for d in ("", "uploads/", "upload/", "files/", "file/", "media/",
+                                             "images/", "img/", "static/", "tmp/", "data/")]
+                tried = set()
+                for cand in cands:
+                    g_url = up.urljoin(action, cand)
+                    if g_url in tried or not self.client.in_scope(g_url):
+                        continue
+                    tried.add(g_url)
+                    g = self._safe(self.client.get, g_url)
+                    if g and EXEC_MARKER + m in g.body:
+                        executed.append(name)
+                        break
+            # size limit probe (benign, compressible)
+            big = self._safe(self.client.post_multipart, action, fields, file_field,
+                             f"scopeguard-{marker_root}-big.txt", b"A" * (UPLOAD_OVERSIZE_MB * 1024 * 1024),
+                             "text/plain")
+            if big and not big.error:
+                size_note = (f"a {UPLOAD_OVERSIZE_MB} MB file was " +
+                             ("rejected" if big.status >= 400 else f"accepted (HTTP {big.status})") +
+                             (f"; client declares max {max_declared} bytes" if max_declared else ""))
+                self._cov("File upload size limit", tested=1, note=size_note)
+            dangerous = [e for e in accepted if e.lower() not in ("txt",)]
+            if executed:
+                self._cov("File upload bypass", found=1, note=f"executed: {', '.join(executed)}")
+                self.f.add(source="dast_native", category=A03, severity="critical",
+                           title="Unrestricted file upload leads to code execution",
+                           description="An uploaded file with a server-executable extension was executed; the "
+                                       "benign marker it printed was returned. A real attacker could upload a web shell.",
+                           url=action, evidence="executed: " + ", ".join(executed[:5]), cwe="CWE-434",
+                           confidence="high", recommendation="Reject executable extensions, validate content, store "
+                                                            "uploads outside the web root, and serve them non-executable.")
+            elif dangerous:
+                self._cov("File upload bypass", found=1, note=f"accepted: {', '.join(dangerous)}")
+                self.f.add(source="dast_native", category=A05, severity="high",
+                           title="File upload accepts dangerous/disguised file types",
+                           description="The server accepted uploads with dangerous or disguised extensions "
+                                       "(" + ", ".join(sorted(set(dangerous))[:8]) + "). Execution was not confirmed, "
+                                       "but client-side type checks are being bypassed.",
+                           url=action, evidence="accepted extensions: " + ", ".join(sorted(set(dangerous))[:8]),
+                           cwe="CWE-434", confidence="medium",
+                           recommendation="Enforce a server-side allowlist of extensions and content types.")
+            if big and not big.error and big.status < 400 and (not max_declared or UPLOAD_OVERSIZE_MB * 1024 * 1024 > (max_declared or 0)):
+                self.f.add(source="dast_native", category=A05, severity="low",
+                           title="File upload has no effective size limit",
+                           description=f"A {UPLOAD_OVERSIZE_MB} MB upload was accepted (HTTP {big.status}); large "
+                                       "uploads enable denial of service.", url=action, evidence=size_note,
+                           cwe="CWE-400", confidence="medium",
+                           recommendation="Enforce a server-side maximum upload size.")
+
+    def probe_endpoints(self, limit: int = 40):
+        """GET in-scope backend endpoints found in HTML/JS (others recorded, never fetched).
+        Endpoints with query parameters join the active attack targets."""
+        crawled = {p.url for p in self.pages}
+        notes = []
+        for url in list(self.endpoints)[:200]:
+            if not self.client.in_scope(url):
+                self._record_external(url)
+                notes.append(f"{url} (other host, not fetched)")
+                continue
+            if url in crawled or limit <= 0:
+                continue
+            limit -= 1
+            r = self._safe(self.client.get, url)
+            self._cov("Backend endpoint discovery", tested=1)
+            if not r:
+                continue
+            notes.append(f"{up.urlparse(url).path or '/'}{'?' + up.urlparse(url).query if up.urlparse(url).query else ''}: {r.status}")
+            if r.status < 400:
+                self.pages.append(Page(url=url, resp=r))
+                crawled.add(url)
+        if self.endpoints:
+            self._cov("Backend endpoint discovery", found=0, note=f"{len(self.endpoints)} endpoint(s) referenced")
+            self.f.add(source="recon", category=OTHER, severity="info",
+                       title="Backend/API endpoints referenced by the frontend",
+                       description=f"{len(self.endpoints)} backend endpoint(s) are referenced in HTML/JS. In-scope "
+                                   "ones were requested and tested; others were not fetched.",
+                       url=self.origin + "/", evidence="; ".join(notes[:20]), cwe="CWE-200", confidence="high",
+                       recommendation="Make sure every listed endpoint enforces authentication and authorization.")
+
     # ---- orchestration ---------------------------------------------------
     def run(self) -> dict:
         t0 = time.time()
@@ -690,9 +1165,14 @@ class Scanner:
             self.red_flags.append("Crawl reached no pages; target unreachable or fully out of scope.")
         self.passive()
         self.sast()
+        self.probe_endpoints()
         self.http_checks()
         if self.cfg["active"]:
             self.active()
+        if self.cfg.get("uploads") and self.upload_active:
+            self.upload_tests(enable_active=True)
+        else:
+            self.upload_tests(enable_active=False)
         flag = self.client.rate_limit.red_flag()
         if flag:
             self.red_flags.append(flag)
@@ -706,13 +1186,16 @@ class Scanner:
             "login_form_detected": any(
                 any(i["type"] == "password" for i in f["inputs"]) for p in self.pages for f in p.forms),
             "duration_seconds": round(time.time() - t0, 2),
+            "attack_summary": self.coverage,
+            "endpoints": sorted(self.endpoints),
             "profile": self.profile,
         }
 
 
 def run_scan(target_url, allowed_domains, profile="standard", bearer=None, delay=0.05,
-             max_pages=None, max_requests=None) -> dict:
-    return Scanner(target_url, allowed_domains, profile, bearer, delay, max_pages, max_requests).run()
+             max_pages=None, max_requests=None, upload_active=False) -> dict:
+    return Scanner(target_url, allowed_domains, profile, bearer, delay, max_pages, max_requests,
+                   upload_active=upload_active).run()
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -226,6 +226,23 @@ def sources_markdown(sources: dict[str, dict]) -> list[str]:
     return lines
 
 
+def attack_coverage_markdown(summary: dict | None) -> list[str]:
+    """Markdown lines summarising which attacks/checks were run and what they found.
+    ``summary`` is engine ``attack_summary`` ({check: {tested, findings, notes}})."""
+    if not summary:
+        return []
+    lines = ["## Attack coverage", "",
+             "What the scanner tested and what it found (0 findings = tested, nothing detected).", "",
+             "| Check / attack | Tests run | Findings | Notes |", "|---|---|---|---|"]
+    for name in sorted(summary):
+        c = summary[name] or {}
+        notes = "; ".join((c.get("notes") or [])[:4])
+        if len(c.get("notes") or []) > 4:
+            notes += f" (+{len(c['notes']) - 4} more)"
+        lines.append(f"| {name} | {c.get('tested', 0)} | {c.get('findings', 0)} | {notes[:300]} |")
+    return lines + [""]
+
+
 def deterministic_summary(target: str, sources: dict[str, dict], pages: int, red_flags: int,
                           top: int = 5) -> str:
     """Fact-only summary that cites its sources (used when no LLM is available,

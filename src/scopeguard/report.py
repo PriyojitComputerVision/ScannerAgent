@@ -144,6 +144,11 @@ def render_markdown(target: str, result: dict, mode: str, sources: dict[str, dic
          "", "## Summary", "", citations.to_markdown(summary, sources),
          "", "## Findings by severity", "", "| Severity | Count |", "|---|---|"]
     L += [f"| {s.upper()} | {counts[s]} |" for s in ORDER]
+    cov = citations.attack_coverage_markdown(result.get("attack_summary"))
+    if cov:
+        L += ["", *cov]
+    if result.get("endpoints"):
+        L += ["## Backend/API endpoints referenced", ""] + [f"- {e}" for e in result["endpoints"][:50]] + [""]
     if result["red_flags"]:
         L += ["", "## Red flags", ""] + [f"- {x}" for x in result["red_flags"]]
     L += ["", "## Detailed findings", ""]

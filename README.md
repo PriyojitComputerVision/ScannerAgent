@@ -139,6 +139,58 @@ Anchors and markdown links keep only their text; URLs and `href`/`src`/`action`
 values become `[link removed]`. A finding's `affected_url` and the validated
 source links in reports are scan metadata and stay.
 
+## Sandbox code & content check, discovery, and attack coverage
+
+Between the JS SAST and the live DAST, the agent runs a **sandbox check** of backend
+source code and the website content it fetched from the target:
+
+* It runs `scopeguard.codecheck` in a **Docker container** with `--network none`, a
+  read-only filesystem, dropped capabilities and a non-root user; the analyzer also
+  installs an audit hook, so any attempt to reach the network, run a process, or
+  write/read outside the inputs is **blocked and reported as a red flag**. If Docker
+  or the image is missing it falls back to the in-process sandbox and flags that.
+  Pull the image once: `python -m scopeguard.container --setup`.
+* **Website content** is fetched by the agent from the **target only** (scope-checked,
+  no redirects followed); links, redirects and `fetch()`/script `src` to other hosts
+  are listed and flagged, never downloaded. Page text that tries to steer an AI agent
+  (prompt injection / jailbreak) is detected and flagged.
+* **Backend source** (optional `source_path` in the request, admin `scan:source` only;
+  constrained to `CODECHECK_SOURCE_ROOTS`) is scanned read-only for injection, SSRF,
+  hardcoded secrets (masked), unsafe deserialization, weak crypto, disabled TLS
+  verification, `none`-alg JWTs, wildcard CORS and more.
+
+**Discovery** (recon): `robots.txt`, `sitemap.xml`/`sitemap_index.xml`, `security.txt`,
+`crossdomain.xml`, `clientaccesspolicy.xml`, `openid-configuration` and other
+well-known files are fetched on every in-scope origin. In-scope paths they reveal
+(including robots.txt Disallow entries and sitemap URLs) seed the crawl; other hosts
+they name are flagged and never visited. Sensitive robots paths, wildcard cross-domain
+policies and expired/missing security.txt become findings.
+
+**Attack coverage** (DAST): the live scan now also tests CORS bypasses (null / prefix /
+suffix origin, preflight), reflected / script-context / `javascript:`-URL XSS,
+error- / boolean- / time-based SQL injection, time-based OS command injection,
+server-side template injection, CRLF/header injection, host-header injection, open
+redirect, path traversal, weak CSP, extra cross-origin headers, **API docs exposure**
+(`/docs`, `/redoc`, swagger, openapi, graphql consoles — reported accessible or not),
+and **backend/API endpoints** referenced by the frontend (in-scope ones are requested
+and tested, others only listed). Every report ends with an **Attack coverage** table:
+for each check, how many tests ran, how many findings, and short notes — so a check
+that found nothing is still recorded as having run.
+
+**File upload testing** (aggressive/auth_deep profile + admin `scan:upload`, settable
+with `ENABLE_UPLOAD_TESTS`): upload forms are always reported (accepted types, declared
+max size). When active, the scanner POSTs **benign, inert marker files** under disguised
+and dangerous names (`.php`, `.phtml`, `.jsp`, `.svg`, double extensions like
+`x.jpg.php`, case/null-byte tricks, a renamed `.exe`, and an oversized file) to detected
+same-origin upload endpoints, then checks whether they were accepted, stored or executed.
+The payloads contain no shells and no real executables — only a unique marker string an
+executing server would echo back — so the control is tested without planting a webshell.
+Confirmed execution is reported CRITICAL (CWE-434).
+
+**Safety stop**: every agent node (and the sub-agents) may run at most
+`AGENT_MAX_ITERATIONS` times per scan (default 5); past that the step is skipped with a
+red flag and the run moves on, and a LangGraph `recursion_limit` backstops the whole run.
+
 ## Pipeline
 
 validate/gate -> recon+crawl -> auth -> JS SAST -> native DAST -> custom probes -> aggregate -> report (md + html + docx)

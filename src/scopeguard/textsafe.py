@@ -38,9 +38,22 @@ def strip_hyperlinks(text: str | None) -> str | None:
         return text
     out = _ANCHOR.sub(lambda m: m.group(1), text)
     out = _MD_LINK.sub(lambda m: m.group(1), out)
-    out = _LINK_ATTR.sub(lambda m: f'{m.group(1)}="{LINK_REMOVED}"', out)
+    out = _LINK_ATTR.sub(_replace_attr, out)
     out = _URL.sub(_replace_url, out)
     return out
+
+
+# A value is a link if it has a scheme, is absolute/relative-to-root, or starts with www.
+_LINKY_VALUE = re.compile(r"^\s*(?:[a-z][a-z0-9+.-]*:|/|\./|\.\./|www\.)", re.IGNORECASE)
+
+
+def _replace_attr(m: re.Match) -> str:
+    """Blank link-like attribute values only, so code such as ``data = pickle.loads(x)``
+    or ``src = path`` is left alone."""
+    value = m.group(2).strip("\"'")
+    if not _LINKY_VALUE.match(value):
+        return m.group(0)
+    return f'{m.group(1)}="{LINK_REMOVED}"'
 
 
 def _replace_url(m: re.Match) -> str:
