@@ -330,7 +330,7 @@ def test_agent_validate_node_enforces_rbac():
 
 
 def test_agent_codegen_node_skips_without_probe_permission():
-    cmd = graph.codegen_probes_node(_state(["viewer"]))
+    cmd = graph.plan_probes_node(_state(["viewer"]))
     assert cmd.update["phase"] == "codegen_probes_skipped" and cmd.goto == "aggregate"
     assert "scan:probes" in cmd.update["red_flags"][0]
 

@@ -96,7 +96,11 @@ def _run_aggregate(monkeypatch, llm_text):
     monkeypatch.setattr(graph, "llm_available", lambda: True)
     monkeypatch.setattr(graph, "get_llm", lambda **_: None)
     monkeypatch.setattr(graph, "invoke_with_backoff", lambda *_a, **_k: SimpleNamespace(content=llm_text))
-    cmd = graph.aggregate_node(_aggregate_state())
+    state = _aggregate_state()
+    aggregated = graph.aggregate_node(state)              # deterministic, no LLM
+    assert aggregated.goto == "summarize"
+    cmd = graph.summarize_node({**state, **aggregated.update})  # LLM summary step
+    assert cmd.goto == "report"
     return FinalReport.model_validate_json(cmd.update["_final_report_json"])
 
 

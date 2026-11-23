@@ -74,9 +74,10 @@ def test_healthz():
     with TestClient(app) as client:
         resp = client.get("/healthz")
         assert resp.status_code == 200
-        idle = {"active": 0, "max_active": 2, "waiting": 0, "max_queue": 50}
+        ws_idle = {"active": 0, "max_active": 1, "waiting": 0, "max_queue": 50}
+        http_idle = {"active": 0, "max_active": 1, "waiting": 0, "max_queue": 50}
         assert resp.json() == {"status": "ok", "graph_initialized": True, "langsmith_tracing": False,
-                               "queues": {"websocket": idle, "http": idle}}
+                               "queues": {"websocket": ws_idle, "http": http_idle}}
 
 
 def _reports_dir(tmp_path, monkeypatch):

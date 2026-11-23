@@ -139,6 +139,8 @@ JS_RULES = [
      "innerHTML/outerHTML assignment can cause DOM XSS with untrusted data.", "CWE-79"),
     ("JS_DOCUMENT_WRITE", re.compile(r"\bdocument\.write(?:ln)?\s*\("), "medium", XSS,
      "document.write() can create HTML injection.", "CWE-79"),
+    ("JS_INSERT_ADJACENT_HTML", re.compile(r"\.insertAdjacentHTML\s*\("), "medium", XSS,
+     "insertAdjacentHTML() parses its input as HTML.", "CWE-79"),
     ("JS_POSTMESSAGE_WILDCARD", re.compile(r"""\.postMessage\s*\([^;\n]*,\s*['"]\*['"]"""),
      "medium", A01, "postMessage with wildcard target origin.", "CWE-346"),
     ("JS_WEAK_RANDOM", re.compile(r"\bMath\.random\s*\("), "low", A02,
@@ -164,6 +166,8 @@ JS_RECOMMENDATIONS = {
     "JS_INNERHTML": "Use textContent/innerText for text, or sanitize HTML (e.g. DOMPurify) before "
                     "assigning innerHTML; keep a strict Content-Security-Policy.",
     "JS_DOCUMENT_WRITE": "Replace document.write with DOM APIs (createElement/textContent).",
+    "JS_INSERT_ADJACENT_HTML": "Sanitize untrusted HTML first, or build nodes with createElement and "
+                               "textContent instead of insertAdjacentHTML.",
     "JS_POSTMESSAGE_WILDCARD": "Pass the exact target origin to postMessage instead of '*', and verify "
                                "event.origin in message listeners.",
     "JS_WEAK_RANDOM": "Use crypto.getRandomValues()/crypto.randomUUID() for anything security-relevant.",

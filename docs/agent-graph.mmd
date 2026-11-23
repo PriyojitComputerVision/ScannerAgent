@@ -1,0 +1,45 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	validate(validate)
+	recon(recon)
+	auth(auth)
+	sandbox_check(sandbox_check)
+	dast(dast)
+	plan_probes(plan_probes)
+	run_probes(run_probes)
+	aggregate(aggregate)
+	summarize(summarize)
+	report(report)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> validate;
+	aggregate -.-> __end__;
+	aggregate -.-> summarize;
+	auth -.-> aggregate;
+	auth -.-> sandbox_check;
+	auth -.-> sast\3arun_sast;
+	dast -.-> aggregate;
+	dast -.-> plan_probes;
+	plan_probes -.-> aggregate;
+	plan_probes -.-> run_probes;
+	recon -.-> aggregate;
+	recon -.-> auth;
+	report -.-> __end__;
+	run_probes -.-> aggregate;
+	sandbox_check -.-> aggregate;
+	sandbox_check -.-> dast;
+	sast\3arun_sast --> sandbox_check;
+	summarize -.-> report;
+	validate -.-> __end__;
+	validate -.-> aggregate;
+	validate -.-> recon;
+	subgraph sast
+	sast\3arun_sast(run_sast)
+	end
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

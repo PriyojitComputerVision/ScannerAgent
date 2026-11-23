@@ -65,6 +65,15 @@ def tmp_data_root(tmp_path) -> Path:
 
 
 @pytest.fixture(autouse=True)
+def _no_docker_sweep(monkeypatch):
+    """The server's startup sweep for leftover sandbox containers must not
+    call a real Docker daemon from tests."""
+    from scopeguard import container
+
+    monkeypatch.setattr(container, "remove_leftover_containers", lambda *a, **k: [])
+
+
+@pytest.fixture(autouse=True)
 def _reset_backend_rate_limits():
     """Each test starts with fresh per-client backend limits (all TestClient
     requests share the 'testclient' key)."""

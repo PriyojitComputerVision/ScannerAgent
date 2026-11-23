@@ -13,6 +13,9 @@ from pentest_agent import graph, rbac
 from pentest_agent.config import settings
 from pentest_agent.tools import sandbox_check as sc
 from scopeguard import container
+
+# The real sweep, captured before conftest stubs it per test.
+_REAL_SWEEP = container.remove_leftover_containers
 from scopeguard.simulated_target import SimulatedTarget
 
 DOCKER_OK, DOCKER_WHY = container.docker_status(settings.codecheck_image)
@@ -235,3 +238,83 @@ def test_iteration_cap_stops_a_node_and_flags_it(monkeypatch):
     assert graph.with_iteration_limit("report", node)(_state(node_runs={"report": 5})).goto == graph.END
     assert graph._add_counts({"dast": 2}, {"dast": 1, "sast": 1}) == {"dast": 3, "sast": 1}
     assert graph.recursion_limit() == 5 * len(graph.NODE_NAMES) + 5
+
+
+# ---------------------------------------------------------------- container naming + cleanup
+class _FakeDocker:
+    """Records docker CLI calls; `run` behaviour is configurable."""
+
+    def __init__(self, run_effect=None, listed=""):
+        self.calls, self.run_effect, self.listed = [], run_effect, listed
+
+    def __call__(self, cmd, **kw):
+        self.calls.append(cmd)
+        verb = cmd[1]
+        if verb == "run" and self.run_effect is not None:
+            raise self.run_effect
+        if verb == "ps":
+            return subprocess.CompletedProcess(cmd, 0, stdout=self.listed, stderr="")
+        out = '{"ok": true, "findings": [], "violations": [], "stats": {}}' if verb == "run" else ""
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+    def verbs(self):
+        return [c[1] for c in self.calls]
+
+
+def test_container_is_named_after_the_session_id():
+    assert container.container_name("ws-1795422976") == "scopeguard-ws-1795422976"
+    for unusable in (None, "", "../x", "a b", "a..b"):
+        assert container.container_name(unusable).startswith("scopeguard-adhoc-")
+    cmd = container.docker_command(name="scopeguard-s1", image="img", source_dir=None, site_dir=None,
+                                   allowed_hosts=[], session_id="s1")
+    assert cmd[cmd.index("--name") + 1] == "scopeguard-s1" and "--rm" in cmd
+    labels = [cmd[i + 1] for i, x in enumerate(cmd) if x == "--label"]
+    assert container.CONTAINER_LABEL in labels and "scopeguard.session=s1" in labels
+
+
+def test_finished_container_is_left_to_docker_rm(monkeypatch):
+    fake = _FakeDocker()
+    monkeypatch.setattr(container, "_docker", lambda: "docker")
+    monkeypatch.setattr(container.subprocess, "run", fake)
+    r = container.run_in_docker(source_dir=None, site_dir=None, allowed_hosts=[], session_id="s2")
+    assert r["sandbox"]["container"] == "scopeguard-s2" and r["sandbox"]["removed_after_run"] is True
+    assert fake.verbs() == ["ps", "run"]  # stale-name check, then the --rm run; nothing left to remove
+
+
+@pytest.mark.parametrize("effect", [subprocess.TimeoutExpired("docker", 1), KeyboardInterrupt(), OSError("boom")])
+def test_container_is_force_removed_on_any_early_exit(monkeypatch, effect):
+    fake = _FakeDocker(run_effect=effect, listed="abc123\n")
+    monkeypatch.setattr(container, "_docker", lambda: "docker")
+    monkeypatch.setattr(container.subprocess, "run", fake)
+    with pytest.raises((container.CodecheckError, KeyboardInterrupt, OSError)):
+        container.run_in_docker(source_dir=None, site_dir=None, allowed_hosts=[], session_id="s3")
+    assert fake.calls[-1] == ["docker", "rm", "-f", "abc123"]
+    ps = fake.calls[-2]
+    assert f"label={container.CONTAINER_LABEL}" in ps and "name=^/scopeguard-s3$" in ps  # only ours
+
+
+def test_cleanup_never_touches_unlabelled_containers(monkeypatch):
+    fake = _FakeDocker(listed="")  # a same-named container without our label is not listed
+    monkeypatch.setattr(container, "_docker", lambda: "docker")
+    monkeypatch.setattr(container.subprocess, "run", fake)
+    assert container.remove_container("scopeguard-s4") is False
+    assert "rm" not in fake.verbs()
+
+
+def test_startup_sweep_removes_leftovers(monkeypatch):
+    fake = _FakeDocker(listed="id1\nid2\n")
+    monkeypatch.setattr(container, "_docker", lambda: "docker")
+    monkeypatch.setattr(container.subprocess, "run", fake)
+    assert _REAL_SWEEP() == ["id1", "id2"]  # conftest stubs the sweep for the server
+    assert f"label={container.CONTAINER_LABEL}" in fake.calls[0]
+    assert fake.calls[-1] == ["docker", "rm", "-f", "id1", "id2"]
+
+
+@needs_docker
+def test_real_container_is_gone_after_the_run(planted):
+    r = container.run_in_docker(source_dir=str(planted / "backend"), site_dir=None, allowed_hosts=[],
+                                session_id="pytest-cleanup-check")
+    assert r["sandbox"]["container"] == "scopeguard-pytest-cleanup-check"
+    left = subprocess.run(["docker", "ps", "-aq", "--filter", "name=^/scopeguard-pytest-cleanup-check$"],
+                          capture_output=True, text=True, check=False).stdout.strip()
+    assert left == ""

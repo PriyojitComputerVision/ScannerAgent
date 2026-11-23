@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -29,6 +30,14 @@ CONTAINER_APP = "/app"
 CONTAINER_SOURCE = "/input/source"
 CONTAINER_SITE = "/input/site"
 DEFAULT_IMAGE = "python:3.12-slim"
+# Every sandbox container carries this label, so leftovers can be found and
+# removed, and cleanup never touches containers that aren't ours.
+CONTAINER_LABEL = "scopeguard.codecheck=1"
+SESSION_LABEL = "scopeguard.session"
+CONTAINER_PREFIX = "scopeguard-"
+# Same rule as the API's session ids (pentest_agent.schemas.SESSION_ID_RE), which
+# is also a valid Docker container name.
+_SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _BOOT = ("import sys;sys.path.insert(0,{app!r});"
          "from scopeguard.codecheck import main;raise SystemExit(main())")
 
@@ -61,11 +70,64 @@ def docker_status(image: str = DEFAULT_IMAGE, timeout: float = 8.0) -> tuple[boo
     return True, "ok"
 
 
+def container_name(session_id: str | None) -> str:
+    """``scopeguard-<session_id>``, so a container maps straight to its scan.
+    Without a usable session id (direct CLI use): ``scopeguard-adhoc-<random>``."""
+    if session_id and _SESSION_RE.fullmatch(session_id) and ".." not in session_id:
+        return f"{CONTAINER_PREFIX}{session_id}"
+    return f"{CONTAINER_PREFIX}adhoc-{uuid.uuid4().hex[:12]}"
+
+
+def remove_container(name: str, timeout: float = 30.0) -> bool:
+    """Force-remove the sandbox container called ``name`` (stopping it if it
+    still runs). Only a container carrying CONTAINER_LABEL is touched, never an
+    unrelated one with the same name. Never raises; True if one was removed."""
+    exe = _docker()
+    if not exe:
+        return False
+    try:
+        listed = subprocess.run([exe, "ps", "-aq", "--filter", f"label={CONTAINER_LABEL}",
+                                 # names are [A-Za-z0-9._-]: only "." needs escaping
+                                 "--filter", f"name=^/{name.replace('.', chr(92) + '.')}$"],
+                                check=False, capture_output=True, text=True, timeout=timeout)
+        ids = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+        if listed.returncode != 0 or not ids:
+            return False
+        subprocess.run([exe, "rm", "-f", *ids], check=False, capture_output=True, timeout=timeout)
+        return True
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def remove_leftover_containers(timeout: float = 30.0) -> list[str]:
+    """Force-remove every sandbox container still present (labelled
+    ``CONTAINER_LABEL``), e.g. after the server was killed mid-scan. Returns the
+    removed container ids. Call it only when no scan is running (startup)."""
+    exe = _docker()
+    if not exe:
+        return []
+    try:
+        listed = subprocess.run([exe, "ps", "-aq", "--filter", f"label={CONTAINER_LABEL}"],
+                                check=False, capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    ids = [line.strip() for line in listed.stdout.splitlines() if line.strip()] if listed.returncode == 0 else []
+    if ids:
+        try:
+            subprocess.run([exe, "rm", "-f", *ids], check=False, capture_output=True, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            return []
+    return ids
+
+
 def docker_command(*, name: str, image: str, source_dir: str | None, site_dir: str | None,
                    allowed_hosts: list[str], memory_mb: int = 512, cpus: float = 1.0,
-                   pids: int = 64, extra_args: list[str] | None = None) -> list[str]:
+                   pids: int = 64, extra_args: list[str] | None = None,
+                   session_id: str | None = None) -> list[str]:
     """The exact ``docker run`` command line (kept separate so tests can assert it)."""
     cmd = [_docker() or "docker", "run", "--rm", "--name", name,
+           "--label", CONTAINER_LABEL,
+           "--label", f"{SESSION_LABEL}={session_id or ''}",
            "--network", "none",
            "--read-only",
            "--cap-drop", "ALL",
@@ -107,19 +169,31 @@ def _parse(stdout: str, stderr: str, returncode: int) -> dict:
 
 def run_in_docker(*, source_dir: str | None, site_dir: str | None, allowed_hosts: list[str],
                   image: str = DEFAULT_IMAGE, timeout: int = 180, memory_mb: int = 512,
-                  extra_args: list[str] | None = None) -> dict:
-    name = f"scopeguard-codecheck-{uuid.uuid4().hex[:12]}"
+                  extra_args: list[str] | None = None, session_id: str | None = None) -> dict:
+    name = container_name(session_id)
+    # A container of the same session left by a killed earlier attempt would
+    # block the name: remove it first (only ours, see remove_container).
+    remove_container(name)
     cmd = docker_command(name=name, image=image, source_dir=source_dir, site_dir=site_dir,
-                         allowed_hosts=allowed_hosts, memory_mb=memory_mb, extra_args=extra_args)
+                         allowed_hosts=allowed_hosts, memory_mb=memory_mb, extra_args=extra_args,
+                         session_id=session_id)
+    # ``--rm`` deletes the container when it exits normally. If we leave early
+    # (timeout, Ctrl+C, server shutdown, any error), killing the docker CLI
+    # would NOT stop the container, so it is force-removed here as well.
+    finished = False
     try:
         proc = subprocess.run(cmd, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
                               timeout=timeout)
+        finished = True
     except subprocess.TimeoutExpired as exc:
-        subprocess.run([_docker() or "docker", "rm", "-f", name], check=False, capture_output=True, timeout=30)
         raise CodecheckError(f"sandbox container exceeded {timeout}s and was killed") from exc
+    finally:
+        if not finished:
+            remove_container(name)
     out = _parse(proc.stdout, proc.stderr, proc.returncode)
     out["sandbox"] = {"kind": "docker", "image": image, "network": "none", "read_only": True,
-                      "user": "65534", "memory_mb": memory_mb, "guard": "audit-hook"}
+                      "user": "65534", "memory_mb": memory_mb, "guard": "audit-hook",
+                      "container": name, "removed_after_run": True}
     return out
 
 
@@ -153,7 +227,8 @@ def run_in_process(*, source_dir: str | None, site_dir: str | None, allowed_host
 
 def run_codecheck(*, source_dir: str | None, site_dir: str | None, allowed_hosts: list[str],
                   use_docker: bool = True, image: str = DEFAULT_IMAGE, timeout: int = 180,
-                  memory_mb: int = 512, extra_args: list[str] | None = None) -> dict:
+                  memory_mb: int = 512, extra_args: list[str] | None = None,
+                  session_id: str | None = None) -> dict:
     """Docker first; process sandbox when Docker is off or unavailable.
 
     ``sandbox.fallback_reason`` (which callers turn into a red flag) is set only when
@@ -165,7 +240,8 @@ def run_codecheck(*, source_dir: str | None, site_dir: str | None, allowed_hosts
         ok, reason = docker_status(image)
         if ok:
             return run_in_docker(source_dir=source_dir, site_dir=site_dir, allowed_hosts=allowed_hosts,
-                                 image=image, timeout=timeout, memory_mb=memory_mb, extra_args=extra_args)
+                                 image=image, timeout=timeout, memory_mb=memory_mb, extra_args=extra_args,
+                                 session_id=session_id)
     out = run_in_process(source_dir=source_dir, site_dir=site_dir, allowed_hosts=allowed_hosts,
                          timeout=timeout, extra_args=extra_args)
     if use_docker:

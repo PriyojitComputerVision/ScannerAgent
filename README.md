@@ -8,15 +8,32 @@ Docker-free sandbox (a Dockerfile is provided only to package test -> drift chec
 
 ## Architecture
 
-![Architecture: a WebSocket client signs in and sends a scan request to the FastAPI server; the request waits in a server-wide queue, then runs the nine-step LangGraph pipeline; six steps send in-scope requests to the target, two call the Groq LLM, and the report step writes files that the report viewer serves.](docs/architecture.png)
+New to ScopeGuard? Start with **[How a scan works, told as a story](docs/scan-story.png)**: every
+agent as a character with one job, from your request to your report, in plain language.
+
+![Architecture: a WebSocket client signs in and sends a scan request to the FastAPI server; the request waits in a server-wide queue, then runs the eleven-step LangGraph pipeline; six steps send in-scope requests to the target, two call the Groq LLM, and the report step writes files that the report viewer serves.](docs/architecture.png)
 
 A client signs in at `/auth/token` and sends the scan request over `/ws`. The request waits in the
-server-wide queue (2 scans run at once, up to 50 wait; see [API management](#api-management-queues)),
-then the server runs the LangGraph pipeline `validate → recon → auth → sast → sandbox_check → dast → codegen_probes → aggregate → report`
-and streams progress back. Orange lines mark the only traffic to the target website (in scope only).
-Only `codegen_probes` and `aggregate` call the LLM, and both have offline fallbacks. Reports and
+server-wide queue (1 scan runs at a time, up to 50 wait; see [API management](#api-management-queues)),
+then the server runs the LangGraph pipeline `validate → recon → auth → sast → sandbox_check → dast → plan_probes → run_probes → aggregate → summarize → report`
+and streams progress back. `sast` runs only when the sandbox check is off (`SANDBOX_CHECK_ENABLED=false`):
+otherwise `sandbox_check` applies the same JavaScript rules inside its Docker container
+(`scopeguard-<session_id>`, removed after the run). Orange lines mark the only traffic to the target website (in scope only).
+Only `plan_probes` and `summarize` call the LLM, and both have offline fallbacks. Reports and
 SQLite checkpoints are written under `data/`. The same scan engine (`src/scopeguard/`) also runs
 standalone through `python -m scopeguard.cli`.
+
+### Agent graph
+
+<img src="docs/agent-tree.png" alt="LangGraph agent graph: validate, recon, auth, the sast subgraph (run_sast), sandbox_check, dast, plan_probes, run_probes, aggregate, summarize, report; dashed edges are Command routes, including each step's safety stop to aggregate." width="360">
+
+Drawn by LangGraph itself (`get_graph(xray=True).draw_mermaid()`). Solid edges are fixed, dashed
+edges are `Command(goto=...)` routes declared in each node's return annotation, and the `sast` box
+is the SAST sub-agent running as a subgraph. The LLM steps (`plan_probes`, `summarize`) are their own
+nodes, so their results are checkpointed and a resumed run doesn't call the LLM again. Regenerate
+after changing the graph with `uv run python scripts/draw_graph.py` (writes
+[docs/agent-graph.mmd](docs/agent-graph.mmd) and the PNG; rendered locally, nothing is sent to a
+diagram service).
 
 ## Quick start (no setup beyond Python 3.12)
 
@@ -52,6 +69,25 @@ uv run golden-check                       # golden-dataset drift check (see belo
 
 Client message: `{"url": "...", "profile": "quick|standard|aggressive|auth_deep", "authorization_confirmed": true}`
 (`{"resume": true}` with the same `session_id` resumes from the SQLite checkpoint.)
+
+Input is checked strictly. Anything outside these rules is rejected with
+`{"type": "error", "code": 422, "message": "Invalid input", "detail": [...]}` and close code `4422`;
+`detail` names each bad field but never echoes the submitted values:
+
+| Key | Accepted |
+| --- | --- |
+| `session_id` (query) | 1-128 letters, digits, `.`, `_`, `-`, starting with a letter or digit (it names the report folder); otherwise error `400`, close `4400` |
+| `url` | `http(s)://` URL |
+| `profile` | `quick`, `standard`, `aggressive`, `auth_deep` |
+| `authorization_confirmed` | JSON `true` only (`"true"`, `1` or `"yes"` are rejected) |
+| `additional_allowed_domains` | up to 20 host names, optionally `:port`; no scheme, path or wildcard |
+| `notes` / `jwt` / `source_path` | strings up to 2000 / 8000 / 1000 characters |
+| `auth` | `login_url`, `username`, `password`, `username_field`, `password_field`, `extra_form_fields` (max 20) |
+| `force_refresh` | `true` or `false` |
+| `resume` | exactly `{"resume": true}`, nothing else in the message |
+| `access_token` / `authorization` | the API token; removed before the request is processed |
+
+Any other key is rejected. `POST /auth/token` and `/auth/refresh` reject unknown keys too (HTTP `422`).
 The final `complete` message includes absolute report URLs: `report_url` (HTML view, e.g. `http://127.0.0.1:8765/reports/<session_id>/`) and `report_md_url`, `report_json_url`, `report_docx_url` (downloads). Server file paths are never sent. Warnings and errors are also written to `LOG_FILE` (default `data/logs/pentest-agent.log`).
 
 While a scan runs, the server also sends `status` messages, for example when the LLM is
@@ -379,7 +415,7 @@ drift check always calls the model fresh and never uses the cache.
 
 ## API management (queues)
 
-The server runs at most **2 WebSocket scans** and **2 HTTP API calls** at once, across all clients.
+The server runs **1 WebSocket scan** and **1 HTTP API call** at a time, across all clients.
 Up to **50** more of each wait in a first-come, first-served queue. When a queue is full, the request
 gets `429` with the message *"Too many requests … Please try again after some time."* and a
 `Retry-After` (WebSocket: error message, then close code `4429`). `/healthz` is never queued.
@@ -388,9 +424,9 @@ A queued WebSocket client gets a `queued` message right away, whenever its place
 `QUEUE_UPDATE_SECONDS` (default 5) while it waits:
 
 ```json
-{"type": "queued", "position": 3, "queue_length": 5, "active": 2, "max_active": 2, "max_queue": 50,
+{"type": "queued", "position": 3, "queue_length": 5, "active": 1, "max_active": 1, "max_queue": 50,
  "estimated_wait_seconds": 240,
- "message": "Server busy (2/2 scans running). You are #3 in the queue: your scan starts after 3 more scan(s) finish (about 240s)."}
+ "message": "Server busy (1/1 scans running). You are #3 in the queue: your scan starts after 3 more scan(s) finish (about 240s)."}
 ```
 
 `position` is also the number of running scans that must finish before this one starts.
@@ -406,7 +442,7 @@ response carries `X-Queue-Position` (place at arrival, `0` = no wait) and `X-Que
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `WS_MAX_ACTIVE` / `HTTP_MAX_ACTIVE` | 2 | run at once (server-wide); `0` disables the queue |
+| `WS_MAX_ACTIVE` / `HTTP_MAX_ACTIVE` | 1 | run at once (server-wide); `0` disables the queue |
 | `WS_MAX_QUEUE` / `HTTP_MAX_QUEUE` | 50 | waiting places; more get `429` |
 | `QUEUE_UPDATE_SECONDS` | 5 | interval of `queued` updates to waiting WebSocket clients |
 | `HTTP_QUEUE_TIMEOUT_SECONDS` | 60 | longest an HTTP call waits before `429` |
