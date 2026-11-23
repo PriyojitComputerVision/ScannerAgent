@@ -233,3 +233,12 @@ def test_citation_ranges_are_expanded():
     assert text == "A [S1, S2, S3, S4]. B [S5, S6]. C [S7]. D [S1]."
     assert used == [f"S{i}" for i in range(1, 8)] and invalid == ["S8", "S9", "S5000"]
     assert citations.citation_ids("S3-S1") == ["S3", "S1"]  # reversed: endpoints only
+
+
+def test_parenthesised_citations_are_accepted():
+    """gpt-oss sometimes cites as (S1) instead of [S1]; only id-only parentheses count."""
+    srcs = {f"S{i}": {"id": f"S{i}", "url": None, "cwe_url": None} for i in range(1, 4)}
+    text, used, invalid = citations.sanitize(
+        "XSS on search (S1). Header missing (S2, S3). Bad (S9). Prose (see S1 above) stays.", srcs)
+    assert text == "XSS on search [S1]. Header missing [S2, S3]. Bad. Prose (see S1 above) stays."
+    assert used == ["S1", "S2", "S3"] and invalid == ["S9"]

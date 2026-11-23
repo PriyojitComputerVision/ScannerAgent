@@ -273,3 +273,46 @@ def test_judge_uses_json_schema_first(monkeypatch):
     monkeypatch.setattr(llm, "get_judge_llm", lambda: FakeLLM())
     assert golden.default_judge([]).overall == 9
     assert calls == ["json_schema"]
+
+
+# ------------------------------------------------------------ JWT + RBAC per run
+@pytest.fixture
+def golden_auth(tmp_path, monkeypatch):
+    from pentest_agent import api_auth
+    from pentest_agent.config import settings
+
+    keys = tmp_path / "keys"
+    monkeypatch.setattr(settings, "jwt_private_key_path", str(keys / "jwt_private.pem"))
+    monkeypatch.setattr(settings, "jwt_public_key_path", str(keys / "jwt_public.pem"))
+    monkeypatch.setattr(settings, "auth_client_roles", "admin")
+    yield settings
+    api_auth.revoked_refresh_tokens.clear()
+
+
+def _static_ds():
+    ds = DATASET.model_copy(deep=True)
+    ds.cases = [c for c in ds.cases if c.kind == "static_findings"]
+    return ds
+
+
+def test_run_uses_a_fresh_verified_jwt(golden_auth, tmp_path):
+    rep = golden.run(_static_ds(), use_llm=False, require_model=False, auth=True)
+    assert rep.verdict is golden.Verdict.NO_DRIFT, rep.reasons
+    assert rep.auth["subject"] == "golden-check" and rep.auth["roles"] == ["admin"]
+    assert (tmp_path / "keys" / "jwt_private.pem").exists()          # keys created automatically
+    dumped = json.dumps(rep.model_dump(mode="json"))
+    assert "eyJ" not in dumped                                        # the token is never stored
+    assert "Auth: fresh JWT for 'golden-check'" in golden.render_markdown(rep)
+
+
+def test_run_without_permission_is_not_evaluated(golden_auth, monkeypatch):
+    monkeypatch.setattr(golden_auth, "auth_client_roles", "viewer")  # viewer cannot run scans
+    rep = golden.run(_static_ds(), use_llm=False, require_model=False, auth=True)
+    assert rep.verdict is golden.Verdict.NOT_EVALUATED and rep.exit_code == 2
+    assert all("scan:run" in (r.model_error or "") for r in rep.cases)
+
+
+def test_run_auto_refreshes_a_token_near_expiry(golden_auth, monkeypatch):
+    monkeypatch.setattr(golden_auth, "jwt_access_ttl_minutes", 5)    # inside the 10-min window
+    rep = golden.run(_static_ds(), use_llm=False, require_model=False, auth=True)
+    assert rep.verdict is golden.Verdict.NO_DRIFT and rep.auth["refreshed"] >= 1

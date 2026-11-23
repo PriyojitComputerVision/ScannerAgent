@@ -25,6 +25,12 @@ os.environ.setdefault("CHECKPOINT_DB_PATH", str(_TMP_ROOT / "checkpoints" / "mai
 os.environ.setdefault("SUBAGENT_CHECKPOINT_DB_PATH", str(_TMP_ROOT / "checkpoints" / "subagents.sqlite"))
 os.environ.setdefault("REPORTS_DIR", str(_TMP_ROOT / "reports"))
 os.environ.setdefault("LOG_FILE", str(_TMP_ROOT / "logs" / "pentest-agent.log"))
+# API auth is tested explicitly in test_api_auth.py; other tests run without it.
+os.environ["AUTH_ENABLED"] = "false"
+os.environ.setdefault("JWT_PRIVATE_KEY_PATH", str(_TMP_ROOT / "keys" / "jwt_private.pem"))
+os.environ.setdefault("JWT_PUBLIC_KEY_PATH", str(_TMP_ROOT / "keys" / "jwt_public.pem"))
+os.environ.setdefault("AUTH_CLIENTS_FILE", str(_TMP_ROOT / "keys" / "clients.json"))
+os.environ["AUTH_CLIENT_SECRET"] = ""
 os.environ.setdefault("SQUID_CONF_PATH", str(_TMP_ROOT / "squid" / "squid.conf"))
 os.environ.setdefault("SQUID_ACL_TARGET_FILE", str(_TMP_ROOT / "squid" / "allowed_target.acl"))
 

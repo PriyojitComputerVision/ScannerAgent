@@ -22,7 +22,9 @@ import urllib.parse as up
 _DASH = r"\-" + "‐‑‒–—―−"
 _ITEM = rf"[Ss]\d+(?:\s*[{_DASH}]\s*[Ss]?\d+)?"
 CITATION_RE = re.compile(rf"\[\s*({_ITEM}(?:\s*[,;]\s*{_ITEM})*)\s*\]")
-_ID_RE = re.compile(r"[Ss](\d+)")
+# LLMs sometimes cite as (S1) / (S1, S3-S5). Only parentheses that hold nothing
+# but source ids are treated as citations; ordinary parenthesised text is untouched.
+_PAREN_CITATION_RE = re.compile(rf"\(\s*({_ITEM}(?:\s*[,;]\s*{_ITEM})*)\s*\)")
 _RANGE_RE = re.compile(rf"[Ss](\d+)(?:\s*[{_DASH}]\s*[Ss]?(\d+))?")
 _MAX_RANGE = 200  # a longer "range" is a typo, not a citation list
 
@@ -149,7 +151,8 @@ def sanitize(text: str, sources: dict[str, dict],
                 invalid.append(sid)
         return f"[{', '.join(keep)}]" if keep else ""
 
-    out = CITATION_RE.sub(fix, text or "")
+    out = _PAREN_CITATION_RE.sub(r"[\1]", text or "")  # (S1) -> [S1]
+    out = CITATION_RE.sub(fix, out)
     known_urls = {s["url"] for s in sources.values() if s["url"]} | {
         s["cwe_url"] for s in sources.values() if s["cwe_url"]} | known_extra(allowed_urls)
     out = _URL_RE.sub(lambda m: m.group(0) if normalize_url(m.group(0)) in known_urls else "", out)

@@ -30,8 +30,9 @@ or `.venv\Scripts\python.exe -m scopeguard.cli ...`.
 ```bash
 uv sync
 cp .env.example .env            # GROQ_API_KEY is optional; empty = deterministic offline mode
-uv run python scripts/simulate_full.py   # whole pipeline against the built-in target
-uv run pentest-agent                      # ws://127.0.0.1:8765/ws?session_id=<id>
+uv run python scripts/get_token.py       # creates keys/ if needed and prints a 60-min access token
+uv run python scripts/simulate_full.py   # whole pipeline against the built-in target (auth on)
+uv run pentest-agent                      # ws://127.0.0.1:8765/ws?session_id=<id> (Bearer token required)
 uv run pytest
 uv run golden-check                       # golden-dataset drift check (see below)
 ```
@@ -51,6 +52,92 @@ Downloads are named after the session id (CLI: the report folder), e.g. `money-d
 `.md`, `.json`; on disk they stay `report.*`.
 Reports are rendered with every target-controlled value HTML-escaped and served with a strict
 `Content-Security-Policy` (no scripts), so a hostile page cannot inject markup into the viewer.
+
+## API authentication (JWT) and roles (RBAC)
+
+Every call to the agent server needs an access token, except `GET /healthz`,
+`POST /auth/token` and `POST /auth/refresh`. Tokens are RS256 JWTs signed with
+the key pair in `keys/` (gitignored, along with `*.pem`; never commit it).
+
+```bash
+uv run python scripts/get_token.py        # no arguments: creates keys/ if missing, prints a token
+uv run pentest-auth keys                  # (re)create the key pair (--force replaces it)
+uv run pentest-auth secret                # random value for AUTH_CLIENT_SECRET
+uv run pentest-auth token --roles scanner # mint a token locally
+uv run pentest-auth add-client --id ci-bot --roles viewer   # extra client; secret printed once, stored hashed
+uv run pentest-auth list-clients | remove-client --id ci-bot | verify <token>
+```
+
+**Getting a token over HTTP**
+
+```http
+POST /auth/token        {"client_id": "<AUTH_CLIENT_ID>", "client_secret": "<AUTH_CLIENT_SECRET>"}
+-> {"access_token", "refresh_token", "token_type": "Bearer", "roles", "expires_in": 3600, "expires_at", "refresh_expires_in"}
+POST /auth/refresh      {"refresh_token": "..."}   -> a new pair (each refresh token works once)
+```
+
+Send it as `Authorization: Bearer <access_token>` on every HTTP request.
+
+On the WebSocket, most clients cannot set handshake headers, so put the token in
+the first JSON message (it is removed before the scan request is processed and
+never reaches the agents, cache or logs):
+
+```json
+{"access_token": "<token>", "url": "https://your-app.example", "profile": "standard", "authorization_confirmed": true}
+```
+
+(`"authorization": "Bearer <token>"` in the message, the `Authorization` header, or
+`?access_token=` in the URL also work.) The server waits up to 15 s for that first
+message. Browsers can open reports with `?access_token=<token>` (masked in all
+logs); the first report request then sets an HttpOnly cookie so the links inside work.
+
+**Lifetime and automatic refresh**
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `JWT_ACCESS_TTL_MINUTES` | 60 | access token lifetime |
+| `JWT_AUTO_REFRESH_BEFORE_MINUTES` | 10 | the server renews a token with less than this left |
+| `JWT_REFRESH_TTL_MINUTES` | 1440 | max session length from sign-in; no renewal after that |
+
+The server renews tokens by itself. An HTTP response carries the new token in
+`X-New-Access-Token` (and `X-New-Access-Token-Expires-At`). A WebSocket session
+gets `{"type": "token_refreshed", "access_token": ..., "expires_at": ...}` before
+expiry, so scans longer than an hour keep running. When the session cap is
+reached the socket closes with 4401; sign in again and resume with the same
+`session_id`. `pentest_agent.auth_client.TokenManager` does all of this for
+Python clients (`scripts/scan_client.py` uses it).
+
+**Roles** (`AUTH_CLIENT_ROLES` for the `.env` client, `--roles` for others)
+
+| Role | Permissions |
+| --- | --- |
+| `viewer` | read reports |
+| `scanner` | viewer + run/resume own scans (`quick`, `standard`) + LLM-planned probes |
+| `admin` | scanner + `aggressive`/`auth_deep`, authenticated target testing (`jwt`/`auth` in the request), any user's sessions |
+
+The API checks roles first (HTTP 403, WebSocket close 4403). The agent graph
+checks them again per node from the caller stored in its state: the validate
+node blocks forbidden profiles/credentials, the auth/DAST/probe nodes drop
+target credentials without `scan:authenticated`, and the probe node is skipped
+(with a red flag) without `scan:probes`.
+
+| Error | HTTP | WebSocket |
+| --- | --- | --- |
+| missing/invalid/expired token | 401 + `WWW-Authenticate` | `{"type":"error","code":401}`, close 4401 |
+| role lacks permission | 403 | `{"type":"error","code":403}`, close 4403 |
+
+`AUTH_ENABLED=false` turns all of this off (local testing only). In Docker,
+mount the keys (`-v "$PWD/keys:/app/keys"`); without them the container creates
+a new pair at start, and tokens from other keys will not work.
+
+## Text from scanned sites
+
+Hyperlinks are removed from all text read from scanned websites before it is
+stored or shown to an LLM (`scopeguard/textsafe.py`): finding evidence (scanner
+engine and the agent's `Finding` model) and page content wrapped for the LLM.
+Anchors and markdown links keep only their text; URLs and `href`/`src`/`action`
+values become `[link removed]`. A finding's `affected_url` and the validated
+source links in reports are scan metadata and stay.
 
 ## Pipeline
 
@@ -176,6 +263,11 @@ Step-by-step setup, what each run shows and troubleshooting: [docs/LANGSMITH.md]
 findings fixtures, with recorded baselines and reference summaries). `uv run golden-check` runs the real
 pipeline on each case and checks:
 
+* **Auth (JWT + RBAC)**: with `AUTH_ENABLED=true` every run mints a fresh access token for the subject
+  `golden-check` (roles from `AUTH_CLIENT_ROLES`; keys are created if missing), verifies it exactly like the
+  API does, checks each case's profile against the roles, and renews the token if it nears expiry. The report
+  shows subject, roles, key id and expiry (never the token). An auth or permission failure is `NOT_EVALUATED`
+  (exit 2), not drift.
 * **Data (deterministic)**: required/forbidden finding titles, title-set Jaccard, severity histogram (±tolerance),
   pages crawled, blocked links, and input fingerprints against the baseline.
 * **Model (deterministic)**: the LLM answer is used (no fallback), no hallucinated `[Sn]` ids or invented URLs,

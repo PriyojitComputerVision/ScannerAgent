@@ -59,6 +59,10 @@ Thumbs.db
 # --- LangSmith / local trace dumps, if any ---
 .langsmith/
 
+# --- API JWT signing keys (pentest-auth keys): never commit, especially the private key ---
+keys/
+*.pem
+
 # --- Logs ---
 # Warnings/errors file (LOG_FILE, default data/logs/pentest-agent.log) and its
 # rotated backups (pentest-agent.log.1 ... .5).

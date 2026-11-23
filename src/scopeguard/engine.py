@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from html.parser import HTMLParser
 
 from scopeguard import ratelimit
+from scopeguard.textsafe import strip_hyperlinks
 
 # --------------------------------------------------------------------------
 # Constants (category strings match pentest_agent.schemas.OwaspCategory values)
@@ -320,6 +321,7 @@ class Findings:
     def add(self, *, source, category, severity, title, description, url=None,
             evidence="", cwe=None, confidence="medium", recommendation=""):
         path = (up.urlparse(url).path or "/") if url else ""
+        evidence = strip_hyperlinks(evidence or "")  # site-derived text: no hyperlinks
         key = (source, title, path, evidence[:80])
         if key in self._items:
             return

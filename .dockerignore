@@ -3,6 +3,10 @@
 *.env
 !.env.example
 
+# JWT signing keys: mount them at runtime (-v ./keys:/app/keys), never bake into the image.
+keys
+*.pem
+
 # Local state and build artefacts
 .git
 .venv

@@ -153,7 +153,7 @@ def main() -> None:
     import ssl  # noqa: F401
     import urllib.request  # noqa: F401
 
-    from scopeguard import engine, ratelimit  # noqa: F401
+    from scopeguard import engine, ratelimit, textsafe  # noqa: F401
 
     os.chdir(sandbox_dir)
     _install_audit_hook(hosts, ips, ports, sandbox_dir)

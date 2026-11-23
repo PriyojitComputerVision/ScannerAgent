@@ -15,6 +15,12 @@ echo "== [2/3] golden dataset drift check"
 uv run python -m pentest_agent.evals.golden ${GOLDEN_ARGS:-}
 
 echo "== [3/3] starting pentest-agent"
+# JWT keys are never baked into the image. Mount them (-v "$PWD/keys:/app/keys") to keep
+# tokens valid across restarts; otherwise a fresh pair is created for this container.
+if [ "${AUTH_ENABLED:-true}" != "false" ] && [ ! -f "${JWT_PRIVATE_KEY_PATH:-./keys/jwt_private.pem}" ]; then
+    echo "   no JWT keys mounted: generating a new key pair (tokens from other keys will not work)"
+    uv run pentest-auth keys
+fi
 # Inside a container the server must listen on all interfaces to be reachable via -p.
 export WS_HOST=0.0.0.0
 exec uv run pentest-agent

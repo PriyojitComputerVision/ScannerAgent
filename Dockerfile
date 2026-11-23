@@ -1,7 +1,7 @@
 # pentest-agent: test -> golden-dataset drift check -> serve.
 #
 #   docker build -t pentest-agent .
-#   docker run --rm -p 8765:8765 --env-file .env pentest-agent
+#   docker run --rm -p 8765:8765 --env-file .env -v "$PWD/keys:/app/keys" pentest-agent
 #
 # The container runs, in order, and stops at the first failure:
 #   1. pytest                       (offline; LLM/LangSmith keys are masked for this step)
@@ -44,7 +44,7 @@ COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN uv sync --frozen \
     && sed -i 's/\r$//' /usr/local/bin/entrypoint.sh \
     && chmod 0755 /usr/local/bin/entrypoint.sh \
-    && mkdir -p data/reports data/checkpoints golden/results \
+    && mkdir -p data/reports data/checkpoints golden/results keys \
     && chown -R app:app /app
 
 USER app
