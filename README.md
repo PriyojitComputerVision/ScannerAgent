@@ -372,10 +372,45 @@ drift check always calls the model fresh and never uses the cache.
   times, honouring `Retry-After` (seconds or HTTP-date, capped at 30s) or backing off 1/2/4s, and slows
   down after being throttled. Throttling is reported as a **red flag**, so incomplete results are visible.
 * **LLM (Groq)**: retries 429/5xx, waiting for Groq's `Retry-After` (capped at 60s) or jittered backoff.
-* **Backend**: per-client-IP limits return `429 Too Many Requests` + `Retry-After` on HTTP routes
-  (`/healthz` exempt) and close WebSocket scans with code `4429` (`{"type":"error","code":429,"retry_after":n}`).
-  Configure with `HTTP_RATE_LIMIT_PER_MINUTE`, `WS_SCANS_PER_MINUTE`, `MAX_CONCURRENT_SCANS_PER_CLIENT`
-  (in-process, per worker).
+* **Backend**: a per-client-IP limit returns `429 Too Many Requests` + `Retry-After` on HTTP routes
+  (`/healthz` exempt). Configure with `HTTP_RATE_LIMIT_PER_MINUTE`. Concurrency is handled by the
+  server-wide queues below.
+
+## API management (queues)
+
+The server runs at most **2 WebSocket scans** and **2 HTTP API calls** at once, across all clients.
+Up to **50** more of each wait in a first-come, first-served queue. When a queue is full, the request
+gets `429` with the message *"Too many requests … Please try again after some time."* and a
+`Retry-After` (WebSocket: error message, then close code `4429`). `/healthz` is never queued.
+
+A queued WebSocket client gets a `queued` message right away, whenever its place changes, and every
+`QUEUE_UPDATE_SECONDS` (default 5) while it waits:
+
+```json
+{"type": "queued", "position": 3, "queue_length": 5, "active": 2, "max_active": 2, "max_queue": 50,
+ "estimated_wait_seconds": 240,
+ "message": "Server busy (2/2 scans running). You are #3 in the queue: your scan starts after 3 more scan(s) finish (about 240s)."}
+```
+
+`position` is also the number of running scans that must finish before this one starts.
+`estimated_wait_seconds` comes from recent scan durations (`null` until one has finished). When the
+scan starts, the client gets `{"type": "status", "event": "queue_admitted", "waited_seconds": ...}`
+and the normal flow continues. Disconnecting while queued gives up the place.
+`scripts/ws_client.py` prints these as `[queue]` lines.
+
+HTTP calls wait silently (at most `HTTP_QUEUE_TIMEOUT_SECONDS`, default 60, then `429`). Every
+response carries `X-Queue-Position` (place at arrival, `0` = no wait) and `X-Queue-Wait-Seconds`.
+`GET /healthz` shows the current counts:
+`"queues": {"websocket": {"active", "max_active", "waiting", "max_queue"}, "http": {...}}`.
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `WS_MAX_ACTIVE` / `HTTP_MAX_ACTIVE` | 2 | run at once (server-wide); `0` disables the queue |
+| `WS_MAX_QUEUE` / `HTTP_MAX_QUEUE` | 50 | waiting places; more get `429` |
+| `QUEUE_UPDATE_SECONDS` | 5 | interval of `queued` updates to waiting WebSocket clients |
+| `HTTP_QUEUE_TIMEOUT_SECONDS` | 60 | longest an HTTP call waits before `429` |
+
+The queues are in-process (`pentest_agent/admission.py`): run a single uvicorn worker.
 
 ## LangSmith tracing
 
