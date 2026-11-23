@@ -8,10 +8,11 @@ Docker-free sandbox (a Dockerfile is provided only to package test -> drift chec
 
 ## Architecture
 
-![Architecture: a WebSocket client signs in and sends a scan request to the FastAPI server, which runs the nine-step LangGraph pipeline; six steps send in-scope requests to the target, two call the Groq LLM, and the report step writes files that the report viewer serves.](docs/architecture.png)
+![Architecture: a WebSocket client signs in and sends a scan request to the FastAPI server; the request waits in a server-wide queue, then runs the nine-step LangGraph pipeline; six steps send in-scope requests to the target, two call the Groq LLM, and the report step writes files that the report viewer serves.](docs/architecture.png)
 
-A client signs in at `/auth/token` and sends the scan request over `/ws`. The server runs the
-LangGraph pipeline `validate → recon → auth → sast → sandbox_check → dast → codegen_probes → aggregate → report`
+A client signs in at `/auth/token` and sends the scan request over `/ws`. The request waits in the
+server-wide queue (2 scans run at once, up to 50 wait; see [API management](#api-management-queues)),
+then the server runs the LangGraph pipeline `validate → recon → auth → sast → sandbox_check → dast → codegen_probes → aggregate → report`
 and streams progress back. Orange lines mark the only traffic to the target website (in scope only).
 Only `codegen_probes` and `aggregate` call the LLM, and both have offline fallbacks. Reports and
 SQLite checkpoints are written under `data/`. The same scan engine (`src/scopeguard/`) also runs
