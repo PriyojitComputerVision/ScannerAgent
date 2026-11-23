@@ -46,6 +46,29 @@ def test_sources_ordered_by_severity_with_validated_links(sources):
     assert sources["S3"]["cwe_url"] is None
 
 
+def test_prompt_block_groups_sources_under_severity_headings(sources):
+    more = citations.build_sources(FINDINGS + [{"title": "Server banner", "severity": "info"},
+                                               {"title": "Missing CSP", "severity": "low"}])
+    block = citations.sources_prompt_block(more)
+    assert block.splitlines() == [
+        "HIGH severity (1 finding; cite these only as high):",
+        "[S1] HIGH: Reflected XSS (CWE-79, https://example.com/search?q=x)",
+        "",
+        "MEDIUM severity (1 finding; cite these only as medium):",
+        "[S2] MEDIUM: Weird URL (CWE-200)",
+        "",
+        "LOW severity (2 findings; cite these only as low):",
+        "[S3] LOW: Missing HSTS (https://example.com/)",
+        "[S4] LOW: Missing CSP",
+        "",
+        "INFORMATIONAL severity (1 finding; cite these only as informational):",
+        "[S5] INFO: Server banner",
+    ]
+    # the cut-off note still follows a limited list; empty input keeps its message
+    assert citations.sources_prompt_block(more, limit=2).endswith("3 more lower-severity sources not shown")
+    assert citations.sources_prompt_block({}).startswith("(no sources")
+
+
 @pytest.mark.parametrize("url,ok", [
     ("https://example.com/a?b=1", True), ("http://127.0.0.1:3000/", True),
     ("javascript:alert(1)", False), ("https://user:pw@example.com/", False),
