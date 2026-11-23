@@ -10,6 +10,7 @@ Safety properties
 """
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import time
@@ -330,6 +331,11 @@ class ScopedClient:
                 body = raw.decode(charset, errors="replace")
             except LookupError:
                 body = raw.decode("utf-8", errors="replace")
+        except (OSError, http.client.HTTPException, ValueError) as e:
+            # Headers arrived but the body stalled/broke (read timeout, reset,
+            # IncompleteRead): one slow page must not abort the whole scan.
+            self.log.append((method, url, 0))
+            return Response(url=url, error=f"{type(e).__name__}: {e}"[:200])
         finally:
             resp_obj.close()
         self.log.append((method, url, status))
@@ -381,6 +387,9 @@ class ScopedClient:
             h = resp_obj.headers
             status = getattr(resp_obj, "status", None) or resp_obj.getcode()
             body_text = raw.decode(h.get_content_charset() or "utf-8", errors="replace")
+        except (OSError, http.client.HTTPException, ValueError) as e:
+            self.log.append(("POST", url, 0))
+            return Response(url=url, error=f"{type(e).__name__}: {e}"[:200])
         finally:
             resp_obj.close()
         self.log.append(("POST", url, status))
