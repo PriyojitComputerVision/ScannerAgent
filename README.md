@@ -489,10 +489,10 @@ uv run pentest-audit show <session_id>
 `GET /api/audit` (permission `audit:read`, admins) returns the newest records plus a fresh
 verification; the console shows it as the audit trail.
 
-## LLM prompts (`prompts/`, not in the repository)
+## LLM prompts (`prompts/`)
 
 The system prompts for every LLM step are plain-text files in a local `prompts/` folder at the repo
-root. The folder is gitignored, so a fresh clone does not include it. Each step loads its prompt with
+root, committed with the repository. Each step loads its prompt with
 `pentest_agent/prompts.py` from `PROMPTS_DIR` (default `./prompts`, relative to the working directory):
 
 | File | Used by |
@@ -514,9 +514,7 @@ Notes:
 
 * The tests don't read your `prompts/`. `tests/conftest.py` writes stand-in prompts to a temp folder
   and points `PROMPTS_DIR` at it. With `GOLDEN_LIVE=1`, tests use the real `./prompts`.
-* `docker build` copies `prompts/` into the image, so the folder must exist in the build context. An
-  empty folder is fine, but the image then runs without LLM text. A built image contains your prompts,
-  so keep it private if they are.
+* `docker build` copies `prompts/` into the image, so the image runs with the same prompts as the repo.
 
 ## Source citations (anti-hallucination)
 
@@ -652,10 +650,17 @@ pipeline on each case and checks:
 * **Data (deterministic)**: required/forbidden finding titles, title-set Jaccard, severity histogram (±tolerance),
   pages crawled, blocked links, and input fingerprints against the baseline.
 * **Model (deterministic)**: the LLM answer is used (no fallback), no hallucinated `[Sn]` ids or invented URLs,
-  minimum citations, required sources cited, forbidden phrases absent, length.
+  minimum citations, required sources cited, forbidden phrases absent, length, and severity grounding:
+  a sentence about one severity level may only cite findings of that level (`severity_consistent_citations`),
+  and per-severity counts such as "11 high" may not exceed SOURCES (`severity_numbers_grounded`).
 * **Model (LLM-as-judge)**: a pydantic `JudgeVerdict` (faithfulness, coverage, citation accuracy, clarity, overall,
-  hallucinations) whose `overall` score must be **>= 7** (`thresholds.min_judge_score`). Set
-  `GOLDEN_JUDGE_MODEL` to use a different judge model than the generator.
+  hallucinations quoted from the answer). The judge sees every source plus the per-severity counts, and is
+  told that SOURCES are the ground truth and the reference only an example. It runs
+  `thresholds.judge_runs` times (3); the **median** `overall` must be **>= 7** (`thresholds.min_judge_score`).
+  Set `GOLDEN_JUDGE_MODEL` to use a different judge model than the generator.
+* **Reference freshness**: each reference summary is stamped (`baseline.reference_sha256`) together with the
+  baseline it describes. If the baseline changes and nobody has reviewed the reference since, the case is
+  `NOT_EVALUATED` instead of being judged against outdated facts.
 
 It prints one strict verdict and exits with its code:
 
@@ -669,7 +674,8 @@ It prints one strict verdict and exits with its code:
 
 Results are written to `golden/results/golden-<timestamp>/golden_report.{json,md}` and
 `golden/results/latest.json` (git-ignored). `--allow-no-llm` runs data checks only; after an intentional
-scanner change, re-capture baselines with `uv run golden-check --record-baseline`.
+scanner change, re-capture baselines with `uv run golden-check --record-baseline`. It flags each case whose
+reference needs review; rewrite those `reference_summary` texts, then run `uv run golden-check --approve-references`.
 `GOLDEN_LIVE=1 uv run pytest tests/test_golden_dataset.py` also runs the live judge inside pytest.
 
 ## Docker
@@ -743,7 +749,7 @@ environment.
 callers), `mcp_server/` and `a2a_server/` (each with a `CLAUDE.md` usage guide), `credential_store.py`.
 `golden/golden_dataset.json`, `tests/`, `scripts/simulate_full.py`, `scripts/mcp_client.py`, `scripts/a2a_client.py`,
 `scripts/render_docs.py` (docs diagrams from `docs/src/`), `Dockerfile`, `.mcp.json`.
-`prompts/` (local only, gitignored) holds the LLM prompt texts; see [LLM prompts](#llm-prompts-prompts-not-in-the-repository).
+`prompts/` holds the LLM prompt texts; see [LLM prompts](#llm-prompts-prompts).
 
 ## License
 

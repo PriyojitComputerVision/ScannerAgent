@@ -1,0 +1,1 @@
+Summarize the security-testing run so far in 200 words or fewer. Include phases executed, high-level findings and errors. Be factual and do not speculate. Only state facts that appear in the prior summary or the transcript; never add findings, numbers or URLs that are not there.
