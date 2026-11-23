@@ -84,7 +84,7 @@ def test_probe_plan_llm_call_is_cached_across_sessions(monkeypatch):
     plan = ProbePlan(probes=[ProbeCase(probe_type=ProbeType.CORS, path="/", reason="r")])
 
     class Structured:
-        def with_structured_output(self, _):
+        def with_structured_output(self, _, **kw):
             return self
 
     monkeypatch.setattr(cg, "llm_available", lambda: True)

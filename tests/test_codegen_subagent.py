@@ -24,10 +24,37 @@ def test_plan_falls_back_when_llm_raises(monkeypatch):
     monkeypatch.setattr(cg, "llm_available", lambda: True)
 
     class Boom:
-        def with_structured_output(self, _):
+        def with_structured_output(self, _, **kw):
             raise RuntimeError("llm down")
 
     monkeypatch.setattr(cg, "get_llm", lambda temperature=0.0: Boom())
     plan = cg.generate_probe_plan(session_id="s", target_url="https://x.test", allowed_domains=["x.test"],
                                   findings_summary="[]")
     assert plan.probes  # deterministic baseline, not an empty plan
+
+
+def test_plan_tries_json_schema_then_function_calling(monkeypatch):
+    """gpt-oss sometimes calls the tool as 'probePlan' (Groq 400 tool_use_failed):
+    json_schema is tried first, tool calling is the fallback."""
+    from pentest_agent.tools.probe_models import ProbeCase, ProbeType
+
+    calls = []
+    plan = ProbePlan(probes=[ProbeCase(probe_type=ProbeType.CORS, path="/", reason="r")])
+
+    class FakeLLM:
+        def with_structured_output(self, schema, method):
+            calls.append(method)
+            return method
+
+    def invoke(method, _messages):
+        if method == "json_schema":
+            raise RuntimeError("json_schema not supported")
+        return plan
+
+    monkeypatch.setattr(cg, "llm_available", lambda: True)
+    monkeypatch.setattr(cg, "get_llm", lambda temperature=0.0: FakeLLM())
+    monkeypatch.setattr(cg, "invoke_with_backoff", invoke)
+    got = cg.generate_probe_plan(session_id="s", target_url="https://x.test", allowed_domains=["x.test"],
+                                 findings_summary="[]")
+    assert got == plan
+    assert calls == ["json_schema", "function_calling"]
