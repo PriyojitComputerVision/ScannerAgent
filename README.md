@@ -54,6 +54,38 @@ python -m scopeguard.cli --serve --port 8000     # browse existing reports
 On Windows without `python` on PATH, use the uv environment: `uv run python -m scopeguard.cli ...`
 or `.venv\Scripts\python.exe -m scopeguard.cli ...`.
 
+### Browser console (one command)
+
+```bash
+uv run pentest-agent          # server + console + built-in vulnerable target, opens your browser
+uv run scopeguard-demo        # same, but always loopback-only and on a free port if 8765 is taken
+```
+
+The console is served by the agent server itself at `http://127.0.0.1:8765/`: a live view of the
+11-node pipeline, an event stream, a findings radar, severity mix and risk grade, the cited executive
+summary (each `[Sn]` jumps to its finding), attack coverage, a findings explorer and all saved
+reports with html/docx/md/json downloads. The built-in target (`127.0.0.1` only) is offered as a
+one-click demo target. Flags: `--no-browser`, `--no-target`, `--host`, `--port`.
+
+There is no login screen, and API authentication stays on:
+
+- The server prints a **one-time sign-in link** (`/#demo=<code>`, single use, valid 10 minutes, only
+  its SHA-256 is kept in memory). The page exchanges the code at `POST /ui/demo-login` for a normal
+  RS256 token pair with the `AUTH_CLIENT_ROLES` roles, then removes it from the address bar.
+- The browser keeps the pair in `sessionStorage` (per tab) and sends the access token in the
+  `Authorization` header, or in the first WebSocket message. Tokens are never put in a URL. The
+  token is renewed 5 minutes before expiry with the single-use refresh token. The page also adopts
+  `X-New-Access-Token` and `token_refreshed` pushes and retries once after refreshing on a 401.
+- Report links work through an HttpOnly, SameSite=Strict cookie set by `POST /api/report-cookie`.
+- Every UI file is served from a fixed whitelist with a strict CSP: no inline code, no third-party
+  loads, no framing. Scanned-site text is rendered as text only, never parsed as HTML.
+- `/ws` rejects browser connections from another origin (close `4403`).
+
+Reloading the page keeps the session. After a restart, open the new link the server prints.
+Replace `src/pentest_agent/webui/favicon/favicon.png` to change the tab icon and the top-left logo
+(served at `/ui/favicon.png` and `/favicon.ico`, read from disk on each request). In Docker the
+server runs with `--no-browser --no-target`.
+
 ### Full LangGraph + WebSocket agent
 
 ```bash
@@ -61,7 +93,7 @@ uv sync
 cp .env.example .env            # GROQ_API_KEY is optional; empty = deterministic offline mode
 uv run python scripts/get_token.py       # creates keys/ if needed and prints a 60-min access token
 uv run python scripts/simulate_full.py   # whole pipeline against the built-in target (auth on)
-uv run pentest-agent                      # ws://127.0.0.1:8765/ws?session_id=<id> (Bearer token required)
+uv run pentest-agent                      # console at http://127.0.0.1:8765/ + ws://127.0.0.1:8765/ws?session_id=<id>
 uv run python scripts/ws_client.py --simulate   # Postman-free client for the running server (see --help)
 uv run pytest
 uv run golden-check                       # golden-dataset drift check (see below)

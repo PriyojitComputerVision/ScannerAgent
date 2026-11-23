@@ -36,6 +36,7 @@ pentest-agent = "pentest_agent.main:run"
 scopeguard = "scopeguard.cli:main"
 golden-check = "pentest_agent.evals.golden:main"
 pentest-auth = "pentest_agent.api_auth:main"
+scopeguard-demo = "pentest_agent.demo:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
