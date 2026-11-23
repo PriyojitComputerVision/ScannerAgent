@@ -66,7 +66,8 @@ def run_sandboxed_scan(scan_args: dict, wall_timeout: int = 900, memory_mb: int 
             [sys.executable, "-I", "-c", boot],
             input=json.dumps({"scan": scan_args, "sandbox_dir": sandbox_dir,
                               "block_private": bool(block_private)}),
-            capture_output=True, text=True, timeout=wall_timeout, cwd=sandbox_dir, env=env, **kwargs)
+            capture_output=True, text=True, timeout=wall_timeout, cwd=sandbox_dir, env=env,
+            check=False, **kwargs)  # returncode is checked below
     except subprocess.TimeoutExpired as exc:
         raise SandboxError(f"scan exceeded wall-clock limit of {wall_timeout}s") from exc
     finally:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime as dt
 import email.utils
+import math
 import threading
 from dataclasses import dataclass, field
 
@@ -36,9 +37,9 @@ def parse_retry_after(value: str | None, *, cap: float = DEFAULT_MAX_WAIT,
         if when is None:
             return None
         if when.tzinfo is None:
-            when = when.replace(tzinfo=dt.timezone.utc)
-        secs = (when - (now or dt.datetime.now(dt.timezone.utc))).total_seconds()
-    if secs != secs:  # NaN
+            when = when.replace(tzinfo=dt.UTC)
+        secs = (when - (now or dt.datetime.now(dt.UTC))).total_seconds()
+    if math.isnan(secs):
         return None
     return max(0.0, min(secs, cap))
 

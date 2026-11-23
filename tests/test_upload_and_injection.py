@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import ClassVar
 
 import pytest
 
@@ -16,7 +17,7 @@ class _UploadSite(BaseHTTPRequestHandler):
     file whose body contains the marker, echoing it back (simulating a webshell).
     It accepts everything and has no size limit — so the probe should light up."""
 
-    store: dict[str, bytes] = {}
+    store: ClassVar[dict[str, bytes]] = {}
 
     def log_message(self, *a):
         pass
@@ -99,7 +100,7 @@ def test_upload_payloads_are_inert():
         c = content.format(m="DEADBEEF")
         assert "system(" not in c and "exec(" not in c and "eval(" not in c
         assert "passthru" not in c and "/bin/sh" not in c      # no real shell payloads
-    assert "not a real executable" in dict((n, c) for n, c, *_ in engine.UPLOAD_PROBES)["scopeguard-{m}.exe"]
+    assert "not a real executable" in {n: c for n, c, *_ in engine.UPLOAD_PROBES}["scopeguard-{m}.exe"]
 
 
 def test_post_is_rejected_by_the_normal_request_path(upload_site):

@@ -9,7 +9,6 @@ import jwt as pyjwt
 
 from pentest_agent.auth import inspect_jwt, jwt_red_flags
 
-
 TEST_SECRET = "throwaway-test-secret-with-at-least-32-bytes"
 
 
@@ -70,7 +69,7 @@ def test_inspect_jwt_absent_token():
 
 
 def test_inspect_jwt_valid_unexpired_token():
-    future = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)
+    future = dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)
 
     token = _make_token(
         {
@@ -88,7 +87,7 @@ def test_inspect_jwt_valid_unexpired_token():
 
 
 def test_inspect_jwt_expired_token():
-    past = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
+    past = dt.datetime.now(dt.UTC) - dt.timedelta(hours=1)
 
     token = _make_token(
         {
@@ -127,7 +126,7 @@ def test_jwt_red_flags_missing_but_required():
 
 
 def test_jwt_red_flags_expired():
-    past = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
+    past = dt.datetime.now(dt.UTC) - dt.timedelta(hours=1)
 
     token = _make_token(
         {
@@ -173,7 +172,7 @@ def test_jwt_red_flags_alg_none_marker():
 
 
 def test_jwt_red_flags_clean_token_no_flags():
-    future = dt.datetime.now(dt.timezone.utc) + dt.timedelta(hours=1)
+    future = dt.datetime.now(dt.UTC) + dt.timedelta(hours=1)
 
     token = _make_token(
         {

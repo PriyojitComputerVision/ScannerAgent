@@ -10,7 +10,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from pentest_agent import graph
-from pentest_agent.schemas import FinalReport, Finding, OwaspCategory, ScanProfile, Severity
+from pentest_agent.schemas import (
+    FinalReport,
+    Finding,
+    OwaspCategory,
+    ScanProfile,
+    Severity,
+)
 from pentest_agent.tools import report_tool
 from scopeguard import citations
 from scopeguard.report import render_html, write_reports
@@ -84,7 +90,7 @@ def _aggregate_state():
         "target": {"url": "https://example.com", "authorization_confirmed": True, "session_id": "cite-1"},
         "profile": "standard",
         "crawled_pages": ["https://example.com/"],
-        "started_at": dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc).isoformat(),
+        "started_at": dt.datetime(2026, 1, 1, tzinfo=dt.UTC).isoformat(),
         "findings": [
             Finding(source="t", category=OwaspCategory.XSS, severity=Severity.HIGH, title="Reflected XSS",
                     description="d", affected_url="https://example.com/s", cwe="79").model_dump(mode="json"),
@@ -130,8 +136,8 @@ def _report(summary="XSS found [S1].", evidence="<script>alert(1)</script>"):
                 evidence=evidence, cwe="79")
     return FinalReport(session_id="r1", target_url="https://example.com", profile=ScanProfile.STANDARD,
                        jwt_provided=False, auth_tested=False, pages_crawled=1,
-                       started_at=dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc),
-                       finished_at=dt.datetime(2026, 1, 1, 0, 5, tzinfo=dt.timezone.utc),
+                       started_at=dt.datetime(2026, 1, 1, tzinfo=dt.UTC),
+                       finished_at=dt.datetime(2026, 1, 1, 0, 5, tzinfo=dt.UTC),
                        findings=[f], executive_summary=summary,
                        sources=citations.build_sources([f]))
 

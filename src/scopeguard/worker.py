@@ -170,7 +170,7 @@ def main() -> None:
 
     # Import everything the scan needs BEFORE the audit hook locks the process
     # down (later imports would be blocked). Do not let a linter prune these.
-    import email.parser  # noqa: F401
+    import email.parser  # noqa: F401, RUF100
     import email.utils  # noqa: F401
     import html.parser  # noqa: F401
     import http.client  # noqa: F401
@@ -186,7 +186,7 @@ def main() -> None:
         result = engine.run_scan(**scan)
         out = {"ok": True, "result": result, "sandbox": {
             "egress_ips": sorted(ips), "egress_ports": sorted(ports)}}
-    except Exception as exc:  # report, never crash silently
+    except Exception as exc:  # noqa: BLE001 - report, never crash silently
         out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     sys.stdout.write(json.dumps(out))
 

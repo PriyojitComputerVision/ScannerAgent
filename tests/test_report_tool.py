@@ -8,8 +8,8 @@ import docx
 import pytest
 
 from pentest_agent.schemas import (
-    Finding,
     FinalReport,
+    Finding,
     OwaspCategory,
     RedFlag,
     ScanProfile,
@@ -35,10 +35,10 @@ def _sample_report() -> FinalReport:
             "https://third-party.example.net/track"
         ],
         started_at=dt.datetime(
-            2026, 1, 1, tzinfo=dt.timezone.utc
+            2026, 1, 1, tzinfo=dt.UTC
         ),
         finished_at=dt.datetime(
-            2026, 1, 1, 0, 10, tzinfo=dt.timezone.utc
+            2026, 1, 1, 0, 10, tzinfo=dt.UTC
         ),
         findings=[
             Finding(
