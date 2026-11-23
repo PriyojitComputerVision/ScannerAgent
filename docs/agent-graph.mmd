@@ -8,6 +8,7 @@ graph TD;
 	validate(validate)
 	recon(recon)
 	auth(auth)
+	auth_challenge(auth_challenge)
 	sandbox_check(sandbox_check)
 	dast(dast)
 	plan_probes(plan_probes)
@@ -15,27 +16,33 @@ graph TD;
 	aggregate(aggregate)
 	summarize(summarize)
 	report(report)
+	audit(audit)
 	__end__([<p>__end__</p>]):::last
 	__start__ --> validate;
-	aggregate -.-> __end__;
+	aggregate -.-> audit;
 	aggregate -.-> summarize;
+	audit -.-> __end__;
 	auth -.-> aggregate;
+	auth -.-> auth_challenge;
 	auth -.-> sandbox_check;
 	auth -.-> sast\3arun_sast;
+	auth_challenge -.-> aggregate;
+	auth_challenge -.-> sandbox_check;
+	auth_challenge -.-> sast\3arun_sast;
 	dast -.-> aggregate;
 	dast -.-> plan_probes;
 	plan_probes -.-> aggregate;
 	plan_probes -.-> run_probes;
 	recon -.-> aggregate;
 	recon -.-> auth;
-	report -.-> __end__;
+	report -.-> audit;
 	run_probes -.-> aggregate;
 	sandbox_check -.-> aggregate;
 	sandbox_check -.-> dast;
 	sast\3arun_sast --> sandbox_check;
 	summarize -.-> report;
-	validate -.-> __end__;
 	validate -.-> aggregate;
+	validate -.-> audit;
 	validate -.-> recon;
 	subgraph sast
 	sast\3arun_sast(run_sast)

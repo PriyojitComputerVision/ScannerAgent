@@ -1,0 +1,177 @@
+<!doctype html>
+<!-- Source of docs/architecture.png. Render: uv run python scripts/render_docs.py -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ScopeGuard architecture</title>
+<style>
+  :root { --ink: #1d232e; --muted: #5a6474; --line: #c9ced6; --panel: #eceef1; --red: #c4421a; --violet: #6b3fd6;
+          --teal: #0f766e; --amber: #b45309; --mono: "Cascadia Code", Consolas, "JetBrains Mono", monospace;
+          --sans: "Segoe UI", system-ui, -apple-system, Arial, sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #fff; color: var(--ink); font: 14px/1.45 var(--sans); width: 1200px; padding: 28px; }
+  h1 { font: 600 24px var(--sans); margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .box { border: 1.5px solid var(--line); border-radius: 6px; background: #fff; padding: 10px 14px; }
+  .box b, .box .t { display: block; font-weight: 600; font-size: 14.5px; }
+  .box .t.mono { font-family: var(--mono); font-size: 15px; }
+  .box span { display: block; color: var(--muted); font-size: 12.5px; }
+  .label { font: 600 11.5px var(--mono); letter-spacing: 2px; text-transform: uppercase; color: var(--muted); margin: 0 0 8px; }
+  .row { display: grid; gap: 12px; }
+  .clients { grid-template-columns: 1.3fr 1fr 1fr; margin-bottom: 10px; }
+  .arrow { color: var(--muted); font-size: 12px; text-align: center; margin: 2px 0 8px; }
+  .panel { background: var(--panel); border-radius: 10px; padding: 16px; margin-bottom: 14px; }
+  .server { grid-template-columns: repeat(4, 1fr); }
+  .wide { grid-column: span 4; }
+  .main { display: grid; grid-template-columns: 1fr 300px; gap: 16px; align-items: start; }
+  .pipe { display: grid; grid-template-columns: 190px 1fr 132px; gap: 8px 10px; align-items: stretch; }
+  .node { border: 2px solid var(--ink); border-radius: 6px; background: #fff; padding: 7px 11px; position: relative; }
+  .node .t { font: 600 15px var(--mono); }
+  .node span { color: var(--muted); font-size: 12px; display: block; }
+  .node.new { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(15, 118, 110, .15); }
+  .node.hitl { border-color: var(--amber); box-shadow: 0 0 0 3px rgba(180, 83, 9, .15); }
+  .node::after { content: "↓"; position: absolute; left: 50%; bottom: -15px; transform: translateX(-50%); color: var(--muted); font-size: 12px; }
+  .node.last::after { content: "→ END"; left: auto; right: -2px; bottom: -17px; transform: none; font: 11px var(--mono); }
+  .mod { border: 1.5px solid var(--line); border-radius: 6px; background: #fff; padding: 7px 11px; }
+  .mod b { font-size: 13.5px; }
+  .mod span { display: block; color: var(--muted); font-size: 12px; }
+  .tags { display: flex; flex-direction: column; gap: 3px; justify-content: center; align-items: flex-start; }
+  .tag { font: 600 10.5px var(--mono); padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+  .tag.web { color: var(--red); background: rgba(196, 66, 26, .1); }
+  .tag.llm { color: var(--violet); background: rgba(107, 63, 214, .1); }
+  .tag.box { color: var(--teal); background: rgba(15, 118, 110, .1); border: 0; padding: 2px 6px; }
+  .tag.you { color: var(--amber); background: rgba(180, 83, 9, .12); }
+  .tag.disk { color: #334155; background: #e2e8f0; }
+  .note { color: var(--muted); font-size: 12px; margin-top: 12px; }
+  .ext { display: flex; flex-direction: column; gap: 12px; }
+  .ext .box { border-style: dashed; }
+  .ext .box.web { border: 2px solid var(--red); }
+  .ext .box.web .h { color: var(--red); }
+  .ext .box.you { border: 2px solid var(--amber); }
+  .ext .box.disk { border-style: solid; }
+  .ext .h { font: 600 11px var(--mono); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 4px; color: var(--muted); }
+  ul { margin: 4px 0 0; padding-left: 16px; color: var(--muted); font-size: 12px; }
+  li { margin: 1px 0; }
+  .legend { display: flex; gap: 14px; flex-wrap: wrap; margin: 0 0 16px; font-size: 12px; color: var(--muted); }
+  .legend .tag { margin-right: 4px; }
+</style>
+</head>
+<body>
+  <h1>ScopeGuard architecture</h1>
+  <p class="sub">A browser console or any WebSocket client starts a scan; the FastAPI server queues it and runs the 13-step LangGraph pipeline. Every route ends in a tamper-evident audit record.</p>
+  <div class="legend">
+    <span><i class="tag web">target</i> sends in-scope requests to the website</span>
+    <span><i class="tag llm">LLM</i> calls Groq (optional, offline fallback)</span>
+    <span><i class="tag box">sandbox</i> runs isolated</span>
+    <span><i class="tag you">human</i> pauses for the operator</span>
+    <span><i class="tag disk">disk</i> writes under data/</span>
+  </div>
+
+  <div class="row clients">
+    <div class="box"><b>Browser console · uv run pentest-agent</b><span>one-time sign-in link → RS256 JWT in sessionStorage; strict CSP, no inline code</span></div>
+    <div class="box"><b>WebSocket client</b><span>scripts/ws_client.py · Postman · any WS client</span></div>
+    <div class="box"><b>Operator (human in the loop)</b><span>signs in to SSO / enters the MFA code when a scan pauses</span></div>
+  </div>
+  <div class="arrow">JWT + scan request ↓ &nbsp; · &nbsp; ↑ queued · phase_update · input_required · complete + report URLs &nbsp; · &nbsp; auth_response ↓</div>
+
+  <div class="panel">
+    <p class="label">FastAPI server · websocket_server.py</p>
+    <div class="row server">
+      <div class="box"><span class="t mono">/auth/token · /refresh</span><span>RS256 JWT, single-use refresh, roles per client (RBAC)</span></div>
+      <div class="box"><span class="t mono">/ws?session_id=…</span><span>verify JWT · same-origin only · strict input · RBAC · cache · sign-in pauses</span></div>
+      <div class="box"><span class="t mono">/ · /ui/* · /api/*</span><span>whitelisted console files; /api/info, /api/reports, /api/audit (audit:read)</span></div>
+      <div class="box"><span class="t mono">/reports/…</span><span>no-script CSP viewer; HttpOnly cookie, never a token in the URL</span></div>
+      <div class="box wide"><b>Admission queues · admission.py</b><span>1 scan and 1 HTTP call at a time (server-wide), 50 more wait in order, then 429; queued clients get their position every 5 s. Requests rejected before the graph are still audited.</span></div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="panel">
+      <p class="label">LangGraph pipeline · graph.py · graph.astream(), thread = session_id</p>
+      <div class="pipe">
+        <div class="node"><span class="t">validate</span><span>refuses → audit</span></div>
+        <div class="mod"><b>guardrails.py · rbac.py · netpolicy.py</b><span>authorization; scope = host + www + allowed; metadata / link-local / reserved IPs refused</span></div>
+        <div class="tags"><i class="tag disk">no network</i></div>
+
+        <div class="node"><span class="t">recon</span><span>crawl + discovery</span></div>
+        <div class="mod"><b>tools/recon.py · discovery.py</b><span>in-scope pages, robots, sitemap, .well-known; file links never fetched</span></div>
+        <div class="tags"><i class="tag web">target</i></div>
+
+        <div class="node"><span class="t">auth</span><span>JWT · form login · SSO/MFA detection</span></div>
+        <div class="mod"><b>tools/auth_flow.py · auth_detect.py</b><span>never signs in to identity providers; an MFA page is not a login</span></div>
+        <div class="tags"><i class="tag web">target</i></div>
+
+        <div class="node hitl"><span class="t">auth_challenge</span><span>interrupt() · human in the loop</span></div>
+        <div class="mod"><b>SSO: hand over the session · MFA: one-time code</b><span>paused + checkpointed; answer validated; timeout → unauthenticated</span></div>
+        <div class="tags"><i class="tag you">human</i><i class="tag web">target</i></div>
+
+        <div class="node"><span class="t">sast</span><span>only if sandbox check is off</span></div>
+        <div class="mod"><b>subagents/sast_subagent.py (subgraph)</b><span>skipped while sandbox_check runs the same JavaScript rules</span></div>
+        <div class="tags"><i class="tag web">target</i></div>
+
+        <div class="node"><span class="t">sandbox_check</span><span>also does the JS SAST</span></div>
+        <div class="mod"><b>container scopeguard-&lt;session_id&gt;</b><span>text of pages + scripts in Docker (--network none), removed after</span></div>
+        <div class="tags"><i class="tag web">target</i><i class="tag box">sandbox</i></div>
+
+        <div class="node"><span class="t">dast</span><span>sandboxed child process</span></div>
+        <div class="mod"><b>scopeguard sandbox.py → worker.py → engine.py</b><span>python -I, audit hook, pinned egress IPs; GET/HEAD/OPTIONS/TRACE; session cookie/bearer</span></div>
+        <div class="tags"><i class="tag web">target</i><i class="tag box">sandbox</i></div>
+
+        <div class="node"><span class="t">plan_probes</span><span>LLM plan · scan:probes</span></div>
+        <div class="mod"><b>code_exec.plan_probes → codegen_subagent.py</b><span>ProbePlan of whitelisted probes, stored in state</span></div>
+        <div class="tags"><i class="tag llm">LLM</i></div>
+
+        <div class="node"><span class="t">run_probes</span><span>runs the stored plan</span></div>
+        <div class="mod"><b>tools/probe_runner.py</b><span>re-validates the plan; GET/OPTIONS only, no generated code</span></div>
+        <div class="tags"><i class="tag web">target</i></div>
+
+        <div class="node"><span class="t">aggregate</span><span>deterministic</span></div>
+        <div class="mod"><b>scopeguard/citations.py</b><span>dedupe findings, red flags, built-in summary citing [Sn]</span></div>
+        <div class="tags"></div>
+
+        <div class="node"><span class="t">summarize</span><span>LLM summary</span></div>
+        <div class="mod"><b>generate_executive_summary</b><span>must cite [Sn]; otherwise aggregate's summary stays</span></div>
+        <div class="tags"><i class="tag llm">LLM</i></div>
+
+        <div class="node"><span class="t">report</span><span>html · md · json · docx</span></div>
+        <div class="mod"><b>tools/report_tool.py · scopeguard report / docx_report</b><span>all four formats from the same structured data</span></div>
+        <div class="tags"><i class="tag disk">disk</i></div>
+
+        <div class="node new last"><span class="t">audit</span><span>every route ends here</span></div>
+        <div class="mod"><b>audit_log.py → scopeguard/audit.py</b><span>hash-chained (HMAC) JSONL record: who, what, outcome, sign-in result, report hashes; no secrets</span></div>
+        <div class="tags"><i class="tag disk">disk</i></div>
+      </div>
+      <p class="note">Each step picks the next with Command(goto). State is checkpointed after every step (AES-encrypted with CHECKPOINT_ENCRYPTION_KEY), so {"resume": true} continues a run, including one paused for sign-in. A step past AGENT_MAX_ITERATIONS is skipped and the run moves on to the report and the audit record.</p>
+    </div>
+
+    <div class="ext">
+      <p class="label">Outside the server</p>
+      <div class="box web"><div class="h">HTTP requests, in scope only</div><b>Target website</b>
+        <ul>
+          <li>links outside scope recorded, never fetched</li>
+          <li>every connection: resolve → check IP → connect to that IP (no DNS rebinding)</li>
+          <li>cloud metadata / link-local always blocked</li>
+          <li>no file downloads; text capped, binaries discarded unread</li>
+          <li>429 → Retry-After; no redirects followed</li>
+        </ul></div>
+      <div class="box you"><div class="h">human in the loop</div><b>Operator's own browser</b>
+        <ul>
+          <li>SSO sign-in at the identity provider</li>
+          <li>hands back only the target session</li>
+          <li>IdP password and MFA factor never reach the agent</li>
+        </ul></div>
+      <div class="box"><div class="h">optional</div><b>Groq LLM · llm.py</b>
+        <ul><li>plan_probes and summarize only</li><li>429: waits ≤ 120 s, then fallback</li><li>no key or prompt file → deterministic output</li></ul></div>
+      <div class="box"><div class="h">optional</div><b>LangSmith</b>
+        <ul><li>one trace per scan; tokens, keys, passwords, cookies redacted</li></ul></div>
+      <div class="box disk"><div class="h">local disk · data/</div><b>Files the server writes</b>
+        <ul>
+          <li>reports/&lt;session_id&gt;/report.*</li>
+          <li>checkpoints/main.sqlite (AES at rest)</li>
+          <li>audit/audit.jsonl (pentest-audit verify)</li>
+          <li>logs/pentest-agent.log</li>
+        </ul></div>
+    </div>
+  </div>
+</body>
+</html>

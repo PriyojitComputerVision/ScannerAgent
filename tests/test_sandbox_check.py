@@ -235,7 +235,9 @@ def test_iteration_cap_stops_a_node_and_flags_it(monkeypatch):
     stopped = limited(_state(node_runs={"dast": 5}))
     assert calls == [1] and stopped.goto == "aggregate"
     assert "max 5 per scan" in stopped.update["red_flags"][0]
-    assert graph.with_iteration_limit("report", node)(_state(node_runs={"report": 5})).goto == graph.END
+    # a capped report still gets its audit record; only a capped audit ends the run
+    assert graph.with_iteration_limit("report", node)(_state(node_runs={"report": 5})).goto == "audit"
+    assert graph.with_iteration_limit("audit", node)(_state(node_runs={"audit": 5})).goto == graph.END
     assert graph._add_counts({"dast": 2}, {"dast": 1, "sast": 1}) == {"dast": 3, "sast": 1}
     assert graph.recursion_limit() == 5 * len(graph.NODE_NAMES) + 5
 
