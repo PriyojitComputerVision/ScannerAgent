@@ -224,7 +224,7 @@ class Response:
 
 class ScopedClient:
     def __init__(self, allowed_domains, *, max_requests=500, timeout=8.0,
-                 max_bytes=1_000_000, delay=0.05, bearer=None,
+                 max_bytes=1_000_000, delay=0.05, bearer=None, cookie=None,
                  max_retries=ratelimit.DEFAULT_MAX_RETRIES, max_wait=ratelimit.DEFAULT_MAX_WAIT,
                  sleep=time.sleep):
         self.allowed = {d.strip().lower() for d in allowed_domains if d and d.strip()}
@@ -233,6 +233,8 @@ class ScopedClient:
         self.max_bytes = max_bytes
         self.delay = delay
         self.bearer = bearer
+        # Session cookie header for authenticated scans (e.g. after SSO/MFA sign-in).
+        self.cookie = cookie if cookie and not any(c in cookie for c in "\r\n\x00") else None
         self.count = 0
         self.max_retries = max_retries
         self.max_wait = max_wait
@@ -291,6 +293,8 @@ class ScopedClient:
         hdrs = {"User-Agent": USER_AGENT, "Accept": "text/html,application/json,*/*"}
         if self.bearer and "\n" not in self.bearer and "\r" not in self.bearer:
             hdrs["Authorization"] = f"Bearer {self.bearer}"
+        if self.cookie:
+            hdrs["Cookie"] = self.cookie
         hdrs.update(headers or {})
         req = urllib.request.Request(url, method=method, headers=hdrs)
         resp_obj = None
@@ -361,6 +365,8 @@ class ScopedClient:
         hdrs = {"User-Agent": USER_AGENT, "Content-Type": f"multipart/form-data; boundary={boundary}"}
         if self.bearer and "\n" not in self.bearer and "\r" not in self.bearer:
             hdrs["Authorization"] = f"Bearer {self.bearer}"
+        if self.cookie:
+            hdrs["Cookie"] = self.cookie
         req = urllib.request.Request(url, data=body, method="POST", headers=hdrs)
         resp_obj = None
         try:
@@ -471,7 +477,7 @@ class Findings:
 # --------------------------------------------------------------------------
 class Scanner:
     def __init__(self, target_url, allowed_domains, profile="standard", bearer=None,
-                 delay=0.05, max_pages=None, max_requests=None, upload_active=False):
+                 delay=0.05, max_pages=None, max_requests=None, upload_active=False, cookie=None):
         self.cfg = dict(PROFILES.get(profile, PROFILES["standard"]))
         if max_pages:
             self.cfg["max_pages"] = max_pages
@@ -480,7 +486,7 @@ class Scanner:
         self.target = target_url
         self.profile = profile
         self.client = ScopedClient(allowed_domains, max_requests=self.cfg["max_requests"],
-                                   delay=delay, bearer=bearer)
+                                   delay=delay, bearer=bearer, cookie=cookie)
         self.f = Findings()
         self.pages: list[Page] = []
         self.blocked: set[str] = set()
@@ -1220,9 +1226,9 @@ class Scanner:
 
 
 def run_scan(target_url, allowed_domains, profile="standard", bearer=None, delay=0.05,
-             max_pages=None, max_requests=None, upload_active=False) -> dict:
+             max_pages=None, max_requests=None, upload_active=False, cookie=None) -> dict:
     return Scanner(target_url, allowed_domains, profile, bearer, delay, max_pages, max_requests,
-                   upload_active=upload_active).run()
+                   upload_active=upload_active, cookie=cookie).run()
 
 
 if __name__ == "__main__":  # pragma: no cover

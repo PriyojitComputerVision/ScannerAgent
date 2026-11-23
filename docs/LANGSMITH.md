@@ -52,7 +52,7 @@ with metadata `session_id`, `target_host`, `profile` and `app`. Below it:
 
 | Run | What it is |
 | --- | --- |
-| `validate`, `recon`, `auth`, `sast`, `dast`, `codegen_probes`, `aggregate`, `report` | LangGraph nodes |
+| `validate`, `recon`, `auth`, `auth_challenge`, `sast`, `sandbox_check`, `dast`, `plan_probes`, `run_probes`, `aggregate`, `summarize`, `report`, `audit` | LangGraph nodes (`auth_challenge` only when a scan pauses for SSO / MFA; its answer is redacted like every secret) |
 | `recon_and_crawl`, `authenticate`, `run_native_dast`, ... | LangChain tools |
 | `js_sast_scan` | JavaScript SAST over crawled assets |
 | `native_dast_sandbox_scan` | the sandboxed DAST scan (inputs/outputs, duration) |

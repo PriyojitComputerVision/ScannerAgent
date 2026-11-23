@@ -23,14 +23,17 @@ def test_every_route_is_visible_in_the_drawn_graph():
     edges, nodes = _edges()
     assert "sast:run_sast" in nodes  # the SAST sub-agent is drawn inside the main graph
     expected = {
-        ("__start__", "validate"), ("validate", "recon"), ("validate", "__end__"),
+        ("__start__", "validate"), ("validate", "recon"), ("validate", "audit"),
         ("recon", "auth"), ("auth", "sast:run_sast"), ("auth", "sandbox_check"),
+        # human in the loop: auth pauses in auth_challenge for SSO / MFA, then continues
+        ("auth", "auth_challenge"), ("auth_challenge", "sandbox_check"), ("auth_challenge", "sast:run_sast"),
         ("sast:run_sast", "sandbox_check"),
         ("sandbox_check", "dast"), ("dast", "plan_probes"), ("plan_probes", "run_probes"),
         ("plan_probes", "aggregate"), ("run_probes", "aggregate"),
-        ("aggregate", "summarize"), ("summarize", "report"), ("report", "__end__"),
+        ("aggregate", "summarize"), ("summarize", "report"), ("report", "audit"),
+        ("audit", "__end__"),  # the audit record is the last step of every run
         # safety stop (AGENT_MAX_ITERATIONS): any step can jump to aggregate
-        ("recon", "aggregate"), ("dast", "aggregate"), ("aggregate", "__end__"),
+        ("recon", "aggregate"), ("dast", "aggregate"), ("aggregate", "audit"),
     }
     assert expected <= edges
     assert "flowchart" in graph.build_graph().get_graph(xray=True).draw_mermaid()
@@ -40,7 +43,11 @@ def test_wrapped_nodes_keep_their_declared_targets():
     run = graph.with_iteration_limit("recon", graph.recon_node)
     assert set(graph.command_destinations(run)) == {"auth", "aggregate"}
     run = graph.with_iteration_limit("report", graph.report_node)
+    assert set(graph.command_destinations(run)) == {"audit"}
+    run = graph.with_iteration_limit("audit", graph.audit_node)
     assert set(graph.command_destinations(run)) == {"__end__"}
+    edges, _ = _edges()
+    assert not {(s, t) for s, t in edges if t == "__end__"} - {("audit", "__end__")},         "every route must end through the audit node"
 
 
 def _parent_with_sast():

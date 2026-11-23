@@ -24,6 +24,9 @@ os.environ["LANGSMITH_API_KEY"] = ""
 os.environ.setdefault("CHECKPOINT_DB_PATH", str(_TMP_ROOT / "checkpoints" / "main.sqlite"))
 os.environ.setdefault("SUBAGENT_CHECKPOINT_DB_PATH", str(_TMP_ROOT / "checkpoints" / "subagents.sqlite"))
 os.environ.setdefault("REPORTS_DIR", str(_TMP_ROOT / "reports"))
+# Tests never touch the real audit log or use the real HMAC key from .env.
+os.environ["AUDIT_LOG_PATH"] = str(_TMP_ROOT / "audit" / "audit.jsonl")
+os.environ["AUDIT_HMAC_KEY"] = ""
 os.environ.setdefault("LOG_FILE", str(_TMP_ROOT / "logs" / "pentest-agent.log"))
 # API auth is tested explicitly in test_api_auth.py; other tests run without it.
 os.environ["AUTH_ENABLED"] = "false"

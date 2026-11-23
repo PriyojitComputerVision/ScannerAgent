@@ -17,6 +17,9 @@ What it does, like a Postman session:
    first message (default), the Authorization header, or ?access_token=.
 4. Sends the scan request, prints every server message as it arrives, adopts
    "token_refreshed" tokens, and prints the report URLs at the end.
+5. With --interactive-auth, answers a sign-in pause (SSO / MFA, human in the
+   loop): it asks for the one-time code, or for the session cookie / bearer
+   token after you signed in in your browser, with hidden input. Empty = skip.
 
 Exit codes: 0 complete, 1 server error / rejected, 2 socket closed early,
 3 server not reachable or no token. Only scan sites you own or are authorized to test.
@@ -25,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
 import sys
 import time
@@ -55,6 +59,8 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     p.add_argument("--allow-domain", action="append", default=[], metavar="DOMAIN",
                    help="extra in-scope domain (repeatable)")
     p.add_argument("--notes", help="free-text notes stored with the scan")
+    p.add_argument("--interactive-auth", action="store_true",
+                   help="pause for SSO / MFA sign-in and ask here (admin; human in the loop)")
     p.add_argument("--payload", type=Path, metavar="FILE",
                    help="JSON file sent as the request body (overrides the scan options above)")
     p.add_argument("--host", default="127.0.0.1")
@@ -131,7 +137,30 @@ def _build_payload(args: argparse.Namespace, target_url: str | None) -> dict:
         body["notes"] = args.notes
     if args.force_refresh:
         body["force_refresh"] = True
+    if args.interactive_auth:
+        body["interactive_auth"] = True
     return body
+
+
+def _ask_sign_in(msg: dict) -> dict:
+    """Terminal answer to a sign-in pause. Secrets are read with getpass (not echoed)."""
+    req = msg.get("request") or {}
+    print(f"\n[sign-in] {msg.get('message', '')}")
+    for key in ("evidence", "idp_host", "login_url", "target_url"):
+        if req.get(key):
+            print(f"          {key}: {req[key]}")
+    print(f"          answer within {msg.get('timeout_seconds')}s; leave empty to skip")
+    if not sys.stdin.isatty():
+        print("          (stdin is not a terminal: skipping)")
+        return {"action": "skip"}
+    if req.get("kind") == "mfa":
+        code = getpass.getpass("          one-time code: ").strip()
+        return {"action": "mfa_code", "code": code} if code else {"action": "skip"}
+    cookie = getpass.getpass("          Cookie header for the target (name=value; ...): ").strip()
+    bearer = getpass.getpass("          or bearer token: ").strip()
+    if not (cookie or bearer):
+        return {"action": "skip"}
+    return {"action": "session", **({"cookie": cookie} if cookie else {}), **({"bearer": bearer} if bearer else {})}
 
 
 def _print_message(msg: dict, raw: bool) -> None:
@@ -194,6 +223,16 @@ async def _run(args: argparse.Namespace, target_url: str | None) -> int:
                     if tm:
                         tm.observe_ws_message(msg)
                     print(f"[auth]   server renewed the token (expires {msg.get('expires_at')})")
+                    continue
+                if msg.get("type") == "input_required":
+                    answer = await asyncio.to_thread(_ask_sign_in, msg)
+                    await ws.send(json.dumps({"type": "auth_response", **answer}))
+                    continue
+                if msg.get("type") == "input_invalid":
+                    print(f"[sign-in] answer rejected: {msg.get('message')} "
+                          f"{'; '.join(d.get('msg', '') for d in msg.get('detail') or [])}")
+                    answer = await asyncio.to_thread(_ask_sign_in, {"request": {}, "message": "Try again."})
+                    await ws.send(json.dumps({"type": "auth_response", **answer}))
                     continue
                 _print_message(msg, args.raw)
                 if msg.get("type") == "error":

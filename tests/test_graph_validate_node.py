@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from langgraph.graph import END
-
 from pentest_agent.graph import validate_input_node
 
 
@@ -12,7 +10,7 @@ def test_validate_input_node_blocks_unauthorized(valid_target_dict):
 
     cmd = validate_input_node(state)
 
-    assert cmd.goto == END
+    assert cmd.goto == "audit"  # refused runs still get an audit record
     assert cmd.update["phase"] == "blocked"
     assert "authorization_confirmed" in cmd.update["error"]
 

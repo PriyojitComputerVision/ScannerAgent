@@ -11,16 +11,19 @@ Docker-free sandbox (a Dockerfile is provided only to package test -> drift chec
 New to ScopeGuard? Start with **[How a scan works, told as a story](docs/scan-story.png)**: every
 agent as a character with one job, from your request to your report, in plain language.
 
-![Architecture: a WebSocket client signs in and sends a scan request to the FastAPI server; the request waits in a server-wide queue, then runs the eleven-step LangGraph pipeline; six steps send in-scope requests to the target, two call the Groq LLM, and the report step writes files that the report viewer serves.](docs/architecture.png)
+![Architecture: the browser console or a WebSocket client signs in and sends a scan request to the FastAPI server; the request waits in a server-wide queue, then runs the 13-step LangGraph pipeline; the auth_challenge step can pause for the operator (SSO / MFA), several steps send in-scope requests to the target, two call the Groq LLM, the report step writes files and the audit step appends a tamper-evident record.](docs/architecture.png)
 
 A client signs in at `/auth/token` and sends the scan request over `/ws`. The request waits in the
 server-wide queue (1 scan runs at a time, up to 50 wait; see [API management](#api-management-queues)),
-then the server runs the LangGraph pipeline `validate → recon → auth → sast → sandbox_check → dast → plan_probes → run_probes → aggregate → summarize → report`
-and streams progress back. `sast` runs only when the sandbox check is off (`SANDBOX_CHECK_ENABLED=false`):
+then the server runs the LangGraph pipeline `validate → recon → auth → [auth_challenge] → sast → sandbox_check → dast → plan_probes → run_probes → aggregate → summarize → report → audit`
+and streams progress back. `auth_challenge` runs only when the target needs a human for SSO or MFA
+(see [Sign-in with SSO / MFA](#sign-in-with-sso--mfa-human-in-the-loop)); every route, including
+refused and safety-stopped runs, ends in `audit` (see [Audit log](#audit-log)). `sast` runs only when the sandbox check is off (`SANDBOX_CHECK_ENABLED=false`):
 otherwise `sandbox_check` applies the same JavaScript rules inside its Docker container
 (`scopeguard-<session_id>`, removed after the run). Orange lines mark the only traffic to the target website (in scope only).
-Only `plan_probes` and `summarize` call the LLM, and both have offline fallbacks. Reports and
-SQLite checkpoints are written under `data/`. The same scan engine (`src/scopeguard/`) also runs
+Only `plan_probes` and `summarize` call the LLM, and both have offline fallbacks. Reports,
+SQLite checkpoints (AES-encrypted with `CHECKPOINT_ENCRYPTION_KEY`) and the audit log are written under `data/`.
+The diagrams are rendered from `docs/src/*.html` with `uv run python scripts/render_docs.py`. The same scan engine (`src/scopeguard/`) also runs
 standalone through `python -m scopeguard.cli`.
 
 ### Agent graph
@@ -62,9 +65,10 @@ uv run scopeguard-demo        # same, but always loopback-only and on a free por
 ```
 
 The console is served by the agent server itself at `http://127.0.0.1:8765/`: a live view of the
-11-node pipeline, an event stream, a findings radar, severity mix and risk grade, the cited executive
+13-step pipeline, an event stream, a findings radar, severity mix and risk grade, the cited executive
 summary (each `[Sn]` jumps to its finding), attack coverage, a findings explorer and all saved
-reports with html/docx/md/json downloads. The built-in target (`127.0.0.1` only) is offered as a
+reports with html/docx/md/json downloads. Admins also see the **audit trail** (live chain check) and
+can tick **Pause for SSO / MFA sign-in** to complete a target's sign-in themselves when asked. The built-in target (`127.0.0.1` only) is offered as a
 one-click demo target. Flags: `--no-browser`, `--no-target`, `--host`, `--port`.
 
 There is no login screen, and API authentication stays on:
@@ -116,6 +120,7 @@ Input is checked strictly. Anything outside these rules is rejected with
 | `notes` / `jwt` / `source_path` | strings up to 2000 / 8000 / 1000 characters |
 | `auth` | `login_url`, `username`, `password`, `username_field`, `password_field`, `extra_form_fields` (max 20) |
 | `force_refresh` | `true` or `false` |
+| `interactive_auth` | JSON `true` / `false`: pause for SSO / MFA sign-in (admin; see [Sign-in with SSO / MFA](#sign-in-with-sso--mfa-human-in-the-loop)) |
 | `resume` | exactly `{"resume": true}`, nothing else in the message |
 | `access_token` / `authorization` | the API token; removed before the request is processed |
 
@@ -162,7 +167,8 @@ Example `--payload` body (keep it out of git: it holds a live token; `keys/` is 
 
 The client checks `GET /healthz`, gets a token, connects to `/ws?session_id=<id>`, prints every
 `status` / `phase_update` / `error` message as it arrives, adopts `token_refreshed` tokens,
-and prints the report URLs at the end.
+and prints the report URLs at the end. With `--interactive-auth` it answers a sign-in pause in the
+terminal (hidden input for codes, cookies and tokens; empty = skip).
 
 | Option | Meaning |
 | --- | --- |
@@ -258,7 +264,7 @@ Python clients (`scripts/scan_client.py` uses it).
 | --- | --- |
 | `viewer` | read reports |
 | `scanner` | viewer + run/resume own scans (`quick`, `standard`) + LLM-planned probes |
-| `admin` | scanner + `aggressive`/`auth_deep`, authenticated target testing (`jwt`/`auth` in the request), any user's sessions |
+| `admin` | scanner + `aggressive`/`auth_deep`, authenticated target testing (`jwt`/`auth`/`interactive_auth` in the request), any user's sessions, the audit log (`audit:read`) |
 
 The API checks roles first (HTTP 403, WebSocket close 4403). The agent graph
 checks them again per node from the caller stored in its state: the validate
@@ -338,7 +344,58 @@ red flag and the run moves on, and a LangGraph `recursion_limit` backstops the w
 
 ## Pipeline
 
-validate/gate -> recon+crawl -> auth -> JS SAST -> native DAST -> custom probes -> aggregate -> report (md + html + docx)
+validate/gate -> recon+crawl -> auth -> [human sign-in: SSO / MFA] -> JS SAST -> native DAST -> custom probes -> aggregate -> summary -> report (md + html + docx) -> audit record
+
+## Sign-in with SSO / MFA (human in the loop)
+
+The agent signs in to a target by itself only with a JWT or a username/password form. It never signs
+in to an identity provider (Okta, Entra ID, Google, Auth0, SAML/OIDC, ...) and never stores MFA
+secrets: those are designed to need a person. Instead, with `"interactive_auth": true` (admin,
+`scan:authenticated`) the run **pauses** in the `auth_challenge` node with LangGraph `interrupt()`,
+checkpointed, until the operator answers:
+
+| Detected (tools/auth_detect.py) | What you do | What the agent does |
+| --- | --- | --- |
+| **SSO**: the login redirects to another host, posts SAML, links to an OIDC/OAuth `authorize` endpoint or a known IdP | Sign in in your own browser, then paste the target's session (Cookie header and/or bearer token) | Checks the session with one in-scope GET, then scans signed in |
+| **MFA**: after the password step the target shows a one-time-code form (or redirects to `/mfa`, `/2fa`, `/otp`, ...) | Type the current code | Submits it to the target's own form with the pre-MFA session and CSRF token (no second login) |
+| A login form but no credentials | Sign in yourself and paste the session | Same as SSO |
+
+Protocol: the server sends `{"type": "input_required", "request": {"kind", "login_url", "idp_host",
+"evidence", "target_url"}, "timeout_seconds": n}` and waits for
+`{"type": "auth_response", "action": "skip" | "session" | "mfa_code", "cookie"?, "bearer"?, "code"?}`
+on the same socket. Answers are validated strictly (no CR/LF, codes 4-12 characters); an invalid one
+gets `{"type": "input_invalid"}` and the wait continues. No answer within `AUTH_INPUT_TIMEOUT_SECONDS`
+(default 300) means skip: the scan continues unauthenticated. A client that disconnects while paused
+can reconnect with `{"resume": true}` and is asked again.
+
+Without `interactive_auth`, SSO and MFA raise a red flag and the scan runs unauthenticated. A password
+login that lands on an MFA page or back on the login form is never counted as signed in. The session
+(cookie or bearer) is sent by DAST and the probes to in-scope hosts only; it, the MFA code and the
+pre-MFA session are never streamed to clients, logged, traced or written to the audit log, and
+checkpoints holding them are AES-encrypted with `CHECKPOINT_ENCRYPTION_KEY`.
+
+## Audit log
+
+Every finished scan gets one record in `data/audit/audit.jsonl` (`AUDIT_LOG_PATH`), written by the
+graph's last node `audit` for every run the graph executes (completed, refused by guardrails/RBAC,
+safety stop) and by the server for outcomes the graph never sees: requests rejected before the graph
+(token, role, cross-origin, queue full, invalid input), cached results, crashes and disconnects.
+CLI scans (`scopeguard.cli`) are recorded too.
+
+A record holds who (subject, roles, client IP, transport), what (sanitized target URL, profile, extra
+hosts, which credentials were *provided*, never their values), when, the outcome and reason, the
+steps run, result counts, how sign-in went (`auth.challenge`, `auth.challenge_result`) and the
+SHA-256 of every report file. Records are hash-chained (`seq`, `prev`, `hash`); with `AUDIT_HMAC_KEY`
+the chain is an HMAC, so records cannot be forged or rewritten without the key.
+
+```bash
+uv run pentest-audit verify --reports-dir data/reports   # exit 0 = intact, 1 = tampered (edits, gaps, reorders, changed reports)
+uv run pentest-audit list --limit 20
+uv run pentest-audit show <session_id>
+```
+
+`GET /api/audit` (permission `audit:read`, admins) returns the newest records plus a fresh
+verification; the console shows it as the audit trail.
 
 ## LLM prompts (`prompts/`, not in the repository)
 
@@ -590,5 +647,6 @@ environment.
 
 `src/scopeguard/` stdlib-only engine, sandbox, citations, rate limiting, reports, simulated target, CLI.
 `src/pentest_agent/` LangGraph agent, guardrails, schemas, tools, tracing, rate limits, websocket server,
-`evals/golden.py`, `prompts.py`. `golden/golden_dataset.json`, `tests/`, `scripts/simulate_full.py`, `Dockerfile`.
+`evals/golden.py`, `prompts.py`, `audit_log.py`, `web_ui.py` + `webui/`. `golden/golden_dataset.json`, `tests/`,
+`scripts/simulate_full.py`, `scripts/render_docs.py` (docs diagrams from `docs/src/`), `Dockerfile`.
 `prompts/` (local only, gitignored) holds the LLM prompt texts; see [LLM prompts](#llm-prompts-prompts-not-in-the-repository).
