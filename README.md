@@ -42,6 +42,70 @@ Client message: `{"url": "...", "profile": "quick|standard|aggressive|auth_deep"
 (`{"resume": true}` with the same `session_id` resumes from the SQLite checkpoint.)
 The final `complete` message includes absolute report URLs: `report_url` (HTML view, e.g. `http://127.0.0.1:8765/reports/<session_id>/`) and `report_md_url`, `report_json_url`, `report_docx_url` (downloads). Server file paths are never sent. Warnings and errors are also written to `LOG_FILE` (default `data/logs/pentest-agent.log`).
 
+While a scan runs, the server also sends `status` messages, for example when the LLM is
+rate limited (`"event": "llm_rate_limit_wait"`, `"wait_seconds"`). One LLM call waits at most
+`LLM_RATE_LIMIT_MAX_WAIT_SECONDS` (default 120) before that step uses its offline fallback.
+
+### WebSocket client (instead of Postman)
+
+`scripts/ws_client.py` runs the same WebSocket flow from the terminal against a running server.
+Start the server first (`uv run pentest-agent`), then run the client in a second terminal from the repo root:
+
+```bash
+# Self-test against the built-in vulnerable target (prints SIMULATION PASSED/FAILED)
+uv run python scripts/ws_client.py --simulate
+
+# Scan your own site (only targets you own or are authorized to test)
+uv run python scripts/ws_client.py https://your-app.example --profile standard --i-have-authorization
+
+# Same, with your own access token (e.g. from scripts/get_token.py)
+uv run python scripts/ws_client.py https://your-app.example --i-have-authorization --token "eyJhbGciOi..."
+
+# Send a Postman-style JSON body as-is (an access_token inside it is used; nothing else signs in)
+uv run python scripts/ws_client.py --payload keys/body.json
+
+# Resume an interrupted run with the session id it printed
+uv run python scripts/ws_client.py --session-id ws-1795422976 --resume
+```
+
+Example `--payload` body (keep it out of git: it holds a live token; `keys/` is gitignored):
+
+```json
+{
+  "access_token": "<token>",
+  "url": "https://your-app.example/",
+  "profile": "standard",
+  "authorization_confirmed": true,
+  "force_refresh": true
+}
+```
+
+The client checks `GET /healthz`, gets a token, connects to `/ws?session_id=<id>`, prints every
+`status` / `phase_update` / `error` message as it arrives, adopts `token_refreshed` tokens,
+and prints the report URLs at the end.
+
+| Option | Meaning |
+| --- | --- |
+| `url` | target URL (needs `--i-have-authorization`; not used with `--simulate`, `--resume`, `--payload`) |
+| `--profile` | `quick`, `standard` (default), `aggressive`, `auth_deep` |
+| `--simulate` | scan the built-in vulnerable target and check the expected findings |
+| `--payload FILE` | JSON file sent as the request body (overrides the scan options) |
+| `--session-id ID` / `--resume` | choose the session id / resume that session from its checkpoint |
+| `--force-refresh` | ignore a cached result for the same request |
+| `--allow-domain DOMAIN` | extra in-scope domain (repeatable) |
+| `--notes TEXT` | free-text notes stored with the scan |
+| `--token TOKEN` | access token to use as-is |
+| `--token-in message\|header\|query` | send the token in the first message (default), `Authorization` header or `?access_token=` |
+| `--no-auth` | send no token (server with `AUTH_ENABLED=false`) |
+| `--host` / `--port` | server address (default `127.0.0.1` / `WS_PORT`) |
+| `--raw` | print every message as full JSON |
+| `--save-md FILE` | write the markdown report to a file |
+
+Without `--token` or a token in the payload, the client signs in at `POST /auth/token` with
+`AUTH_CLIENT_ID` / `AUTH_CLIENT_SECRET` from `.env`, or signs a token locally with `keys/`.
+Exit codes: `0` complete, `1` server error or rejected (e.g. `401` expired token),
+`2` socket closed early (it prints the resume command), `3` server not reachable or no token.
+
 ### Report viewer
 
 | Where | URL |
