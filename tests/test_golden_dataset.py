@@ -230,7 +230,7 @@ def test_empty_llm_answer_is_retried_then_reported(monkeypatch):
     assert r.fallback_used and r.fallback_reason == "LLM returned an empty answer"
 
 
-def test_judge_falls_back_to_json_schema(monkeypatch):
+def test_judge_falls_back_to_function_calling(monkeypatch):
     from pentest_agent import llm
 
     calls = []
@@ -241,8 +241,8 @@ def test_judge_falls_back_to_json_schema(monkeypatch):
 
             class Runnable:
                 def invoke(self, messages):
-                    if method == "function_calling":
-                        raise RuntimeError("Tool choice is required, but model did not call a tool")
+                    if method == "json_schema":
+                        raise RuntimeError("json_schema not supported by this model")
                     return {"faithfulness": 8, "coverage": 8, "citation_accuracy": 8, "clarity": 8,
                             "overall": 8, "rationale": "ok"}
             return Runnable()
@@ -250,4 +250,26 @@ def test_judge_falls_back_to_json_schema(monkeypatch):
     monkeypatch.setattr(llm, "get_judge_llm", lambda: FakeLLM())
     v = golden.default_judge([])
     assert isinstance(v, golden.JudgeVerdict) and v.overall == 8
-    assert calls == ["function_calling", "json_schema"]
+    assert calls == ["json_schema", "function_calling"]
+
+
+def test_judge_uses_json_schema_first(monkeypatch):
+    """gpt-oss sometimes calls the tool as 'judgeVerdict' (Groq 400 tool_use_failed);
+    json_schema must be tried first so that path is normally never hit."""
+    from pentest_agent import llm
+
+    calls = []
+
+    class FakeLLM:
+        def with_structured_output(self, schema, method):
+            calls.append(method)
+
+            class Runnable:
+                def invoke(self, messages):
+                    return {"faithfulness": 9, "coverage": 9, "citation_accuracy": 9, "clarity": 9,
+                            "overall": 9, "rationale": "ok"}
+            return Runnable()
+
+    monkeypatch.setattr(llm, "get_judge_llm", lambda: FakeLLM())
+    assert golden.default_judge([]).overall == 9
+    assert calls == ["json_schema"]
