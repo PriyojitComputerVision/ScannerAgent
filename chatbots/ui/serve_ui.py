@@ -226,11 +226,14 @@ class State:
         return {"editable": True, "hosts": list(self.scanner.hosts)}
 
 
-def start_backend(state: State, scanner_url: str, roles: str | None) -> subprocess.Popen:
+def start_backend(state: State, scanner_url: str, roles: str | None,
+                  disable_tools: list[str] | None = None) -> subprocess.Popen:
     cmd = ["uv", "run", "--project", str(BACKEND_DIR), "python", "chatbot.py", "--serve",
            "--port", str(state.backend_port), "--url", scanner_url, "--allow-none"]
     if roles:
         cmd += ["--roles", roles]
+    for tool in disable_tools or []:
+        cmd += ["--disable-tool", tool]
     LOGS.mkdir(parents=True, exist_ok=True)
     log = (LOGS / "chatbot-mcp-api.log").open("w", encoding="utf-8")
     return subprocess.Popen(cmd, cwd=BACKEND_DIR, env=child_env({"CHATBOT_API_KEY": state.api_key}),
@@ -392,6 +395,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-scanner-llm", action="store_true",
                     help="the scanner skips its own LLM steps (faster); the chat agent still uses the LLM")
     ap.add_argument("--roles", default=None, help="token roles (default: CHATBOT_ROLES in .env, else scanner)")
+    ap.add_argument("--disable-tool", action="append", default=None, metavar="TOOL",
+                    help="switch a chat tool off (repeatable; default: CHATBOT_DISABLED_TOOLS in .env)")
     ap.add_argument("--no-browser", action="store_true", help="print the link instead of opening a browser")
     a = ap.parse_args(argv)
 
@@ -430,7 +435,7 @@ def main(argv: list[str] | None = None) -> int:
         state = State(a.port, a.backend_port, scanner, a.url)
         print(f"[ui] starting the chatbot backend on 127.0.0.1:{a.backend_port} - log: "
               f"{LOGS / 'chatbot-mcp-api.log'}", file=sys.stderr, flush=True)
-        procs.append(start_backend(state, scanner_url, a.roles))
+        procs.append(start_backend(state, scanner_url, a.roles, a.disable_tool))
         try:
             server = ExclusiveServer((a.host, a.port), make_handler(state))
         except OSError:

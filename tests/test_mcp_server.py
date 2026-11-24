@@ -234,6 +234,42 @@ async def test_inline_credentials_off_by_default(monkeypatch, fake_graph):
     await _call("get_scan", {"scan_id": started["scan_id"], "wait_seconds": 5})
 
 
+def test_disabled_tools_are_neither_listed_nor_callable():
+    import os
+    import subprocess
+    import sys
+
+    code = (
+        "import asyncio, json\n"
+        "from pentest_agent.mcp_server import server as s\n"
+        "async def main():\n"
+        "    names = [t.name for t in await s.mcp.list_tools()]\n"
+        "    try:\n"
+        "        await s.mcp.call_tool('cancel_scan', {'scan_id': 'mcp-123456'})\n"
+        "        called = 'ran'\n"
+        "    except Exception as exc:\n"
+        "        called = type(exc).__name__\n"
+        "    print(json.dumps({'names': names, 'called': called, 'disabled': s.DISABLED_TOOLS}))\n"
+        "asyncio.run(main())\n")
+    env = {**os.environ, "MCP_DISABLED_TOOLS": "cancel_scan, verify_audit_log, no_such_tool"}
+    out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=120,
+                         check=False)
+    assert out.returncode == 0, out.stderr[-2000:]
+    data = json.loads(out.stdout.strip().splitlines()[-1])
+    assert data["disabled"] == ["cancel_scan", "verify_audit_log"]
+    assert "cancel_scan" not in data["names"] and "verify_audit_log" not in data["names"]
+    assert {"scan_policy", "start_scan", "get_scan"} <= set(data["names"])
+    assert data["called"] != "ran"  # a disabled tool cannot be called either
+    assert "unknown tool name(s) no_such_tool" in out.stderr
+
+
+def test_tool_list_parsing():
+    assert mcp_mod.parse_tool_list("get_report; list_scans ,bogus,") == (["get_report", "list_scans"], ["bogus"])
+    assert set(mcp_mod.MCP_TOOL_NAMES) == {
+        "scan_policy", "start_scan", "start_demo_scan", "get_scan", "cancel_scan", "list_scans",
+        "list_reports", "get_report", "verify_audit_log"}
+
+
 def test_only_the_pentest_agent_profiles_are_offered():
     from typing import get_args
 

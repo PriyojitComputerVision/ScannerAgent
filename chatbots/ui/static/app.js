@@ -550,8 +550,13 @@ async function info() {
       const d = r.data;
       conn.className = 'conn ok';
       conn.textContent = 'MCP ' + d.endpoint + ' · roles ' + (d.roles || []).join(',');
+      const tools = d.tools || {};
       conn.title = 'Allowlisted: ' + (Array.isArray(d.allowlisted) ? d.allowlisted.join(', ') : d.allowlisted)
-        + (d.scanner_llm === false ? ' · scanner without LLM steps' : '');
+        + (d.scanner_llm === false ? ' · scanner without LLM steps' : '')
+        + '\nTools on: ' + ((tools.enabled || []).join(', ') || 'none')
+        + ((tools.disabled_here || []).length ? '\nSwitched off here: ' + tools.disabled_here.join(', ') : '')
+        + ((tools.not_offered_by_server || []).length
+          ? '\nNot offered by the server: ' + tools.not_offered_by_server.join(', ') : '');
       return;
     }
     conn.className = 'conn bad';

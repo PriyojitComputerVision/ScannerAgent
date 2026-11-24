@@ -114,8 +114,17 @@ guardrails as the console:
   scan. Empty means the built-in demo app only.
 - **Authorization.** `authorization_confirmed` must be `true`.
 - **RBAC and limits.** Role checks apply, and only one scan runs at a time.
+- **Profiles.** Only the four pentest profiles (`quick`, `standard`, `aggressive`, `auth_deep`);
+  anything else is refused.
 - **Audit log.** Every attempt is recorded, including refused, cancelled and crashed ones.
 - **Untrusted output.** Text from the target is returned wrapped as untrusted.
+- **Logging.** The server log has one line per MCP tool call (caller, safe arguments,
+  outcome, duration) and per WebSocket message, never payloads, arguments in full or tokens.
+
+**Switching MCP tools off.** `MCP_DISABLED_TOOLS` in `.env` lists tools to remove, comma
+separated (for example `cancel_scan,verify_audit_log`). A removed tool is not listed and
+cannot be called, over HTTP and stdio. `uv run scopeguard-mcp --check` shows which tools
+are on, and `scan_policy` reports them as `disabled_tools`. Restart after a change.
 
 Authenticated scans use **credential profiles**. The operator stores the secret once; agents pass
 only the profile's name, so passwords never enter an agent's context:
@@ -545,6 +554,9 @@ error-based SQLi signature • open redirect (never followed) • path traversal
 
 The LLM (or, without one, a built-in default plan) picks up to 16 checks from a fixed list. Hand-written
 Python runs each check with GET or OPTIONS only, never follows redirects, and never runs generated code.
+What the planner sees from the scanned site (the crawled paths, reduced to in-scope relative
+paths, and the findings so far) is wrapped as untrusted data and paired with the
+content-injection reminder; without that reminder prompt the LLM is not called at all.
 
 | Probe type | What it reports |
 | --- | --- |
@@ -694,6 +706,12 @@ uses the scanner's MCP server as its tools:
 - **Separate project:** it has its own uv project and venv, because `langchain-mcp-adapters`
   needs the MCP 1.x client.
 - **Settings:** it uses the Groq key and model from this repo's `.env`.
+- **Guardrails:** messages are checked before they reach the LLM (jailbreaks, prompt
+  injection and prompt-leak attempts, approval bypass, SQL / shell / script / template
+  payloads, path traversal, pasted secrets), tool arguments before every call, and answers
+  on the way out (no prompt leakage, secrets redacted).
+- **Tool switches:** `CHATBOT_DISABLED_TOOLS` (or `--disable-tool`) turns chat tools off;
+  tools the server disabled (`MCP_DISABLED_TOOLS`) are never offered.
 
 ```powershell
 uv run --project chatbots\mcp_chatbot python chatbots\ui\serve_ui.py --allow your-site.example --allow other-site.example
