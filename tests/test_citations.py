@@ -46,6 +46,15 @@ def test_sources_ordered_by_severity_with_validated_links(sources):
     assert sources["S3"]["cwe_url"] is None
 
 
+def test_target_url_with_non_breaking_hyphens_is_kept(sources):
+    # gpt-oss writes U+2011 hyphens, also inside host names
+    text = "The scan of https://syslab‑blond.vercel.app/ found XSS [S1]."
+    clean, _, _ = citations.sanitize(text, sources, ("https://syslab-blond.vercel.app/",))
+    assert clean == "The scan of https://syslab-blond.vercel.app/ found XSS [S1]."
+    clean, _, _ = citations.sanitize("See https://evil‑site.test/ [S1].", sources, ())
+    assert "evil" not in clean
+
+
 def test_prompt_block_groups_sources_under_severity_headings(sources):
     more = citations.build_sources(FINDINGS + [{"title": "Server banner", "severity": "info"},
                                                {"title": "Missing CSP", "severity": "low"}])

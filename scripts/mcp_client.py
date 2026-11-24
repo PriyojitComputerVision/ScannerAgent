@@ -226,6 +226,9 @@ async def session(a: argparse.Namespace, ev: Events, client_cm) -> int:
         findings = status.get("findings") or []
         for i, f in enumerate(findings, 1):
             await ev.finding(i, len(findings), f)
+        if status.get("findings_omitted"):
+            await ev.emit("more", f"{status['findings_omitted']} more finding(s) not returned",
+                          "See the full list in the report files below.")
         for flag in status.get("red_flags") or []:
             await ev.emit("red flag", short(flag, 300))
         if status.get("executive_summary"):
@@ -259,7 +262,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="scan profile (default quick)")
     ap.add_argument("--delay", type=float, default=1.0, help="pause after each event, seconds (default 1)")
     ap.add_argument("--poll", type=float, default=1.0, help="how long each get_scan waits, seconds (default 1)")
-    ap.add_argument("--findings", type=int, default=8, help="findings to show one by one (default 8)")
+    ap.add_argument("--findings", type=int, default=100,
+                    help="findings to show one by one (default 100 = all, the server maximum)")
     ap.add_argument("--timeout", type=int, default=900, help="cancel the scan after this many seconds")
     ap.add_argument("--no-llm", action="store_true", help="run without the LLM (no Groq calls)")
     ap.add_argument("--show-refusal", action="store_true",
