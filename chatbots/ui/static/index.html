@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>ScopeGuard MCP chatbot</title>
+  <link rel="icon" type="image/png" href="/favicon.png">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <header class="top">
+    <img class="logo" src="/favicon.png" alt="" width="34" height="34">
+    <div class="brand">
+      <h1>ScopeGuard MCP chatbot</h1>
+      <p class="sub">LangChain agent &middot; scanner tools over MCP &middot; you approve every scan</p>
+    </div>
+    <div class="conn" id="conn">connecting&hellip;</div>
+    <button type="button" id="new-chat" class="ghost">New chat</button>
+  </header>
+
+  <section class="allow" aria-label="Allowed targets">
+    <span class="allow-label">Allowed targets</span>
+    <div id="allow-list" class="chips"></div>
+    <form id="allow-form" class="allow-form" autocomplete="off">
+      <input id="allow-input" maxlength="300" placeholder="add a host you own or may test, e.g. your-site.example">
+      <button type="submit" class="ghost">Add</button>
+    </form>
+    <span id="allow-status" class="allow-status"></span>
+  </section>
+
+  <main>
+    <section id="log" class="log" aria-live="polite">
+      <div class="hello">
+        <p>Send a URL you own or are authorized to test, for example
+          <code>scan https://your-site.example/ with the standard profile</code>, or ask for
+          <code>a quick demo scan</code>.</p>
+        <p class="muted">Scan progress streams here step by step. Nothing is scanned until you approve it.</p>
+      </div>
+    </section>
+  </main>
+  <button type="button" id="jump-latest" class="jump" hidden>&darr; Jump to latest</button>
+
+  <form id="composer" class="composer" autocomplete="off">
+    <textarea id="input" rows="2" maxlength="4000" placeholder="Message the scanner agent (Enter to send, Shift+Enter for a new line)"></textarea>
+    <button type="submit" id="send">Send</button>
+  </form>
+
+  <script src="/app.js"></script>
+</body>
+</html>
