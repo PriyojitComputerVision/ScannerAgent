@@ -232,3 +232,48 @@ def test_other_llm_errors_are_short_and_safe():
     assert sc.describe_error(_groq_error("APIStatusError", 413, "Request too large for model"))["kind"] == "too_large"
     other = sc.describe_error(ValueError("x" * 1000))
     assert other["kind"] == "error" and len(other["text"]) < 330
+
+
+def test_tools_can_be_switched_off_here_and_on_the_server():
+    from langchain_core.tools import tool as lc_tool
+
+    from chatbot import CHATBOT_TOOL_NAMES, parse_disabled, select_tools
+
+    def fake(name):
+        @lc_tool(name)
+        async def t() -> str:
+            """fake MCP tool"""
+            return "{}"
+        return t
+
+    server = {n: fake(n) for n in ("scan_policy", "start_scan", "start_demo_scan", "get_scan", "cancel_scan",
+                                   "list_scans", "list_reports", "get_report")}
+    disabled, unknown = parse_disabled("cancel_scan, get_report; bogus")
+    assert disabled == {"cancel_scan", "get_report"} and unknown == ["bogus"]
+    tools, report = select_tools(server, disabled)
+    names = [t.name for t in tools]
+    assert "cancel_scan" not in names and "get_report" not in names and "watch_scan" in names
+    assert report["disabled_here"] == ["cancel_scan", "get_report"]
+
+    # The server switched get_scan and scan_policy off: watch_scan cannot exist, nothing crashes.
+    del server["get_scan"], server["scan_policy"]
+    tools, report = select_tools(server, set())
+    names = [t.name for t in tools]
+    assert "watch_scan" not in names and "scan_policy" not in names
+    assert {"watch_scan", "scan_policy"} <= set(report["not_offered_by_server"])
+    assert set(CHATBOT_TOOL_NAMES) == {"scan_policy", "start_scan", "start_demo_scan", "cancel_scan",
+                                       "list_scans", "list_reports", "get_report", "watch_scan"}
+
+
+async def test_the_model_is_told_which_tools_are_on():
+    seen: list[str] = []
+
+    class Recording(ScriptedModel):
+        def _generate(self, messages, *a, **k):
+            seen.append(str(messages[0].content))  # the system prompt
+            return super()._generate(messages, *a, **k)
+
+    eng = sc.Engine(sc.build_agent([start_scan], model=Recording(messages=iter([AIMessage(content="hi")]))))
+    await eng.send("t7", "what can you do?", lambda e: None)
+    assert seen and "Tools switched on in this session: start_scan." in seen[0]
+    assert "never call it" in seen[0]

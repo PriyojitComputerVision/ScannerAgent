@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -34,6 +35,10 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+import guardrails
+
+log = logging.getLogger("scopeguard.chatbot")
 
 HERE = Path(__file__).resolve().parent
 REPO = Path(os.environ.get("SCOPEGUARD_HOME") or HERE.parents[1]).resolve()
@@ -300,13 +305,21 @@ def hitl_middleware():
 
 
 def tool_guard_middleware():
-    """Tool errors become messages the model can explain (instead of ending the
-    turn), and very long tool results are clipped to keep within the token limits."""
+    """Pre-guardrail on every tool call's arguments (the model's own calls and calls a
+    reviewer edited), then: tool errors become messages the model can explain (instead
+    of ending the turn), and very long tool results are clipped (token limits)."""
     from langchain.agents.middleware import wrap_tool_call
     from langchain_core.messages import ToolMessage
 
     @wrap_tool_call
     async def guard(request, handler):
+        call = request.tool_call
+        problem = guardrails.check_tool_args(call["name"], call.get("args"))
+        if problem:
+            log.warning("Guardrail refused tool call %s: %s", call["name"], problem)
+            return ToolMessage(content=f"Refused by the guardrail: {problem}. Tell the user; do not retry with "
+                                       "different values unless they ask.",
+                               tool_call_id=call["id"], name=call["name"], status="error")
         try:
             result = await handler(request)
         except Exception as exc:  # noqa: BLE001 - reported to the model as the tool result
@@ -482,10 +495,14 @@ def build_agent(tools: list, extra_middleware: list | None = None, model=None, s
     from langchain.agents.middleware import ClearToolUsesEdit, ContextEditingMiddleware
     from langgraph.checkpoint.memory import InMemorySaver
 
+    names = [getattr(t, "name", str(t)) for t in tools]
+    tool_note = (f"\n\nTools switched on in this session: {', '.join(names) or 'none'}. Any other tool named "
+                 "above is switched off by the operator: never call it; if the user needs it, say it is "
+                 "unavailable.")
     return create_agent(
         model=model or make_llm(load_settings()),
         tools=tools,
-        system_prompt=load_prompt(),
+        system_prompt=load_prompt() + tool_note,
         middleware=[summarization_middleware(summary_model or model), hitl_middleware(), tool_guard_middleware(),
                     # keep only the latest tool output once the history grows (token limit)
                     ContextEditingMiddleware(edits=[ClearToolUsesEdit(trigger=CLEAR_TOOLS_AT, keep=1)]),
@@ -594,6 +611,8 @@ class Engine:
         self.recursion_limit = recursion_limit
         self.pending: dict[str, list[dict]] = {}  # thread -> action requests awaiting review
         self.policy = None  # optional async () -> dict: the scanner's scan_policy (no LLM)
+        # What the output guardrail checks answers against (no prompt leakage).
+        self.prompts = [load_prompt(), load_prompt("summary_prompt")]
 
     def _config(self, thread_id: str) -> dict:
         return {"configurable": {"thread_id": thread_id}, "recursion_limit": self.recursion_limit}
@@ -602,7 +621,14 @@ class Engine:
         if self.pending.get(thread_id):
             emit({"type": "error", "text": "Answer the pending approval first."})
             return
-        await self._stream({"messages": [{"role": "user", "content": text}]}, thread_id, emit)
+        # Pre-guardrail: a blocked message never reaches the model or the conversation history.
+        verdict = guardrails.check_input(text)
+        if not verdict.allowed:
+            log.warning("Guardrail blocked a message in %s: %s", thread_id[:12], verdict.category)
+            emit({"type": "guardrail", "stage": "input", "category": verdict.category, "text": verdict.message})
+            emit({"type": "done", "waiting_for_approval": False})
+            return
+        await self._stream({"messages": [{"role": "user", "content": verdict.text}]}, thread_id, emit)
 
     async def decide(self, thread_id: str, answers: list[dict], emit: Emit) -> None:
         from langgraph.types import Command
@@ -645,7 +671,14 @@ class Engine:
                                 emit({"type": "tool_call", "name": call["name"], "args": call["args"]})
                             text = _content_text(msg.content).strip()
                             if text and not msg.tool_calls:
-                                emit({"type": "answer", "text": text})
+                                # Post-guardrail: no prompt leakage, no secrets in the answer.
+                                safe, reason = guardrails.check_output(text, self.prompts)
+                                if reason:
+                                    log.warning("Guardrail changed an answer in %s: %s", thread_id[:12], reason)
+                                    emit({"type": "guardrail", "stage": "output", "category": reason,
+                                          "text": "The reply was changed by the output guardrail ("
+                                                  + reason.replace("_", " ") + ")."})
+                                emit({"type": "answer", "text": safe, "replaced": bool(reason)})
                         elif isinstance(msg, ToolMessage):
                             emit({"type": "tool_result", "name": msg.name,
                                   "status": getattr(msg, "status", "success"),
@@ -677,6 +710,8 @@ class _Printer:
             print("\n", flush=True)
             self.streaming = False
             if kind == "answer":
+                if ev.get("replaced"):  # the streamed text was withdrawn by the output guardrail
+                    print(f"[guardrail] The reply above is withdrawn. Instead:\n{ev['text']}\n", flush=True)
                 return
         _print_event(ev)
 
@@ -698,6 +733,8 @@ def _print_event(ev: dict) -> None:
     elif kind == "error":
         label = "Groq limit" if ev.get("kind") == "rate_limit" else "error"
         print(f"\n[{label}] {ev['text']}\n", flush=True)
+    elif kind == "guardrail":
+        print(f"\n[guardrail: {ev.get('category')}] {ev['text']}\n", flush=True)
 
 
 def _ask_review(requests: list[dict]) -> list[dict]:

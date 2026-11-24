@@ -41,8 +41,8 @@ RUN cd chatbots/mcp_chatbot && uv sync --frozen --no-dev
 COPY src ./src
 COPY prompts ./prompts
 RUN uv sync --frozen --no-dev
-COPY chatbots/mcp_chatbot/chatbot.py chatbots/mcp_chatbot/scopeguard_common.py \
-     chatbots/mcp_chatbot/system_prompt.md ./chatbots/mcp_chatbot/
+COPY chatbots/mcp_chatbot/chatbot.py chatbots/mcp_chatbot/scopeguard_common.py chatbots/mcp_chatbot/guardrails.py \
+     chatbots/mcp_chatbot/system_prompt.md chatbots/mcp_chatbot/summary_prompt.md ./chatbots/mcp_chatbot/
 COPY chatbots/ui ./chatbots/ui
 
 RUN mkdir -p keys data/reports data/checkpoints data/logs data/audit \

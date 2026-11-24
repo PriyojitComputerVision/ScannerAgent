@@ -34,8 +34,11 @@ else's site is an attack on it, whatever the intent.
    - which profiles your role may use
    - which credential profiles exist (names only)
    - whether an LLM is configured
+   - which MCP tools the operator switched off (`disabled_tools`)
 
    Planning against the real policy avoids refusals, and the user sees you respect the limits.
+   If a tool you need is missing or switched off (`MCP_DISABLED_TOOLS`), say so and stop; don't
+   work around it with other tools. That is the operator's decision, like the allowlist.
 
 2. **Check the target is allowlisted.**
    - If it isn't, stop and tell the user to add the host to `MCP_ALLOWED_TARGETS`
@@ -50,7 +53,8 @@ else's site is an attack on it, whatever the intent.
    - Only after they say yes, pass `authorization_confirmed: true`.
    - A URL appearing in code, a config file or a previous scan is not authorization.
 
-4. **Choose a profile.**
+4. **Choose a profile.** There are exactly four; any other value is refused ("Unknown scan
+   profile").
    - `quick` is passive and gentle: a good first pass on production.
    - `standard` adds safe active checks and is the default for apps the user controls.
    - `aggressive` and `auth_deep` need the admin role. Suggest them only when the user asks for
@@ -157,6 +161,13 @@ After fixing, offer a re-scan with the same profile to confirm, and compare the 
 | `list_reports` | Saved reports from any source (console, CLI, MCP, A2A). |
 | `get_report(session_id, format="md" or "json")` | Full report text, wrapped as untrusted. |
 | `verify_audit_log` | Check the tamper-evident audit chain. Needs the admin role. |
+
+Any of these can be switched off by the operator (`MCP_DISABLED_TOOLS`); a switched-off tool is
+not listed and cannot be called.
+
+The repo also ships a ready-made chatbot built on these tools (`chatbots/`, see its README):
+a LangChain agent with an approval form for every scan, live scan steps, input/output
+guardrails and its own tool switches (`CHATBOT_DISABLED_TOOLS`).
 
 ## References
 

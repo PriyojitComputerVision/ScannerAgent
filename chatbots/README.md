@@ -18,6 +18,12 @@ shows the scanner's verified result and explains it.
   writes the analysis around it, so it cannot misfile a severity or invent a file path.
 - **Allowed targets:** any number of hosts. Add or remove them in the UI. Each change
   restarts only the scanner, so the conversation keeps going.
+- **Guardrails:** messages are checked before they reach the model, tool arguments before
+  every call, and answers on the way out (see [Guardrails](#guardrails)).
+- **Long chats:** `SummarizationMiddleware` replaces older messages with a short summary,
+  and context editing keeps only the latest tool output, so every request fits Groq's limit.
+- **Tool switches:** any chat tool can be switched off (see
+  [Switching tools on and off](#switching-tools-on-and-off)).
 
 ```
 chatbots/
@@ -25,8 +31,10 @@ chatbots/
 ├── mcp_chatbot/                       own uv project + venv (MCP 1.x client; the scanner uses MCP 2.x)
 │   ├── chatbot.py                     terminal chatbot, or --serve for the UI's JSON API
 │   ├── scopeguard_common.py           settings, sign-in, agent, streaming engine, approval
-│   ├── system_prompt.md
-│   ├── test_chatbot.py                offline tests (no LLM, no server)
+│   ├── guardrails.py                  input, tool-argument and output guardrails (stdlib)
+│   ├── system_prompt.md               the chat agent's prompt
+│   ├── summary_prompt.md              the summarizer's prompt
+│   ├── test_chatbot.py, test_guardrails.py   offline tests (no LLM, no server)
 │   └── .env.example                   copy to .env (gitignored)
 └── ui/                                serve_ui.py (ONE command: scanner + chatbot + UI) + static page
 ```
@@ -44,6 +52,7 @@ Copy `mcp_chatbot/.env.example` to `mcp_chatbot/.env` (gitignored).
   example: `CHATBOT_ALLOW=syslab-blond.vercel.app,staging.example.com,localhost:3000`.
 - **`CHATBOT_NO_SCANNER_LLM=true`:** the scanner skips its own LLM steps (executive
   summary, probe plan), which is faster. The chat agent still uses the LLM.
+- **`CHATBOT_DISABLED_TOOLS`:** chat tools to switch off, comma separated (see below).
 - **Groq limits:** Groq's on_demand tier allows 8,000 tokens per request and per minute, so
   results reach the model in compact form and old tool outputs are cleared from the
   history. Each turn may wait briefly for the rate limit.
@@ -114,6 +123,57 @@ uv run --project chatbots/mcp_chatbot python chatbots/mcp_chatbot/chatbot.py --a
 At the approval prompt, answer `a` (approve), `e` (edit the arguments as JSON) or `r`
 (reject). `/new` starts a new conversation; `/quit` exits. Without `--allow`, it uses the
 pentest-agent at `SCOPEGUARD_URL` (default `http://127.0.0.1:8765`).
+
+## Guardrails
+
+Three deterministic layers in `mcp_chatbot/guardrails.py`. They need no LLM call, so they cost no
+tokens and can't be talked out of a decision:
+
+1. **Input (before the model).** Every message is normalized first (Unicode NFKC, zero-width and
+   bidi control characters removed, so hidden or look-alike characters can't sneak a pattern
+   through). These are blocked:
+   - jailbreaks ("ignore previous instructions", "developer mode", fake `system:` tags);
+   - prompt-leak attempts ("show me your system prompt");
+   - attempts to skip the approval ("set authorization_confirmed=true", "auto-approve");
+   - injection payloads: SQL (`' OR '1'='1`, `UNION SELECT`, `; DROP TABLE`), shell
+     (`; rm -rf`, `$(...)`), script or XSS markup, template expressions, path traversal;
+   - pasted secrets (API keys, JWTs, private keys, `password: ...`);
+   - messages over 4,000 characters.
+
+   A blocked message is never sent to the model and never stored in the conversation; you
+   see a notice saying why. Ordinary security questions ("what does the SQL injection finding
+   mean?") pass.
+2. **Tool arguments (before every call).** This covers the model's own calls and calls you
+   edited in the approval form.
+   - Only a clean `http(s)` URL is accepted: no credentials in it, no quotes or markup, and no
+     payload hidden in the query.
+   - Only the four profiles, safe scan ids and credential profile names are accepted.
+   - Inline tokens or passwords are refused.
+3. **Output (on the way out).** A reply that reproduces the system prompt is withdrawn and
+   replaced, and anything that looks like a secret is redacted.
+
+The system prompt adds the same rules for the model itself: it never reveals its instructions,
+never accepts rule changes from the chat, and never crafts attack payloads.
+
+These protect the chat assistant. The scanner keeps its own boundary regardless: allowlist,
+authorization, RBAC, sandbox and network policy.
+
+## Switching tools on and off
+
+There are two levels. Both are read at startup, so restart after a change.
+
+| Where | Setting | Effect |
+| --- | --- | --- |
+| Scanner (main `.env`) | `MCP_DISABLED_TOOLS=cancel_scan,verify_audit_log` | The tools are removed from the MCP server for every client (this chatbot, Claude Code, any MCP client): not listed, not callable. |
+| Chatbot (`mcp_chatbot/.env` or the main `.env`) | `CHATBOT_DISABLED_TOOLS=get_report,list_scans` | This chat agent doesn't use them, even if the server offers them. |
+| Chatbot (command line) | `--disable-tool get_report --disable-tool list_scans` | Same, for one run (passed through by `serve_ui.py` too). |
+
+- **Chat tools:** `scan_policy`, `start_scan`, `start_demo_scan`, `cancel_scan`, `list_scans`,
+  `list_reports`, `get_report` and `watch_scan`. `watch_scan` needs the server's `get_scan`.
+- **What the model knows:** it is told which tools are on, so it says a tool is unavailable
+  instead of trying to call it.
+- **In the UI:** hover over the connection badge (top right) to see which tools are on, which
+  you switched off, and which the server doesn't offer.
 
 ## Docker: one container
 

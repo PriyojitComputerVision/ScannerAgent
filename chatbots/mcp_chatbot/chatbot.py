@@ -34,6 +34,7 @@ from scopeguard_common import (
     console_loop,
     host_of,
     load_settings,
+    log,
     mcp_json,
     run_api,
     scan_result_markdown,
@@ -98,16 +99,47 @@ def make_watch_scan(get_scan):
     return watch_scan
 
 
-async def make_engine(base: str, roles: list[str]) -> Engine:
+# Every tool the chat agent can have; switch any of them off with CHATBOT_DISABLED_TOOLS
+# (chatbot .env) or --disable-tool. The server can also switch MCP tools off for everyone
+# (MCP_DISABLED_TOOLS in the main .env); those are simply not offered.
+CHATBOT_TOOL_NAMES = (*MODEL_TOOLS, "watch_scan")
+
+
+def parse_disabled(raw: str | list[str] | None) -> tuple[set[str], list[str]]:
+    items = raw if isinstance(raw, list) else (raw or "").replace(";", ",").split(",")
+    names = {n.strip() for n in items if n and n.strip()}
+    return {n for n in names if n in CHATBOT_TOOL_NAMES}, sorted(n for n in names if n not in CHATBOT_TOOL_NAMES)
+
+
+def select_tools(server_tools: dict, disabled: set[str]) -> tuple[list, dict]:
+    """The chat agent's tools: what the server offers, minus what is switched off here.
+    watch_scan needs the server's get_scan. Returns (tools, report for the UI/log)."""
+    tools = [server_tools[n] for n in MODEL_TOOLS if n in server_tools and n not in disabled]
+    if "watch_scan" not in disabled and "get_scan" in server_tools:
+        tools.append(make_watch_scan(server_tools["get_scan"]))
+    on = [t.name for t in tools]
+    report = {"enabled": on,
+              "disabled_here": sorted(disabled),
+              "not_offered_by_server": sorted(n for n in CHATBOT_TOOL_NAMES
+                                              if n not in on and n not in disabled)}
+    if ({"start_scan", "start_demo_scan"} & set(on)) and "watch_scan" not in on:
+        log.warning("Scans can start but cannot be followed: watch_scan is off or the server disabled get_scan.")
+    return tools, report
+
+
+async def make_engine(base: str, roles: list[str], disabled: set[str] | None = None) -> Engine:
     minter = TokenMinter(load_settings(), "mcp-chatbot", roles)
-    mcp_tools = {t.name: t for t in await load_mcp_tools(base, minter)}
-    tools = [mcp_tools[n] for n in MODEL_TOOLS if n in mcp_tools] + [make_watch_scan(mcp_tools["get_scan"])]
+    server_tools = {t.name: t for t in await load_mcp_tools(base, minter)}
+    tools, report = select_tools(server_tools, disabled or set())
+    log.warning("Chatbot tools on: %s", ", ".join(report["enabled"]) or "none")
     engine = Engine(build_agent(tools))
+    engine.tools_report = report
 
-    async def policy() -> dict:  # for the UI's Allowed targets bar: straight from MCP, no LLM
-        return mcp_json(await mcp_tools["scan_policy"].ainvoke({}))
+    if "scan_policy" in server_tools:
+        async def policy() -> dict:  # for the UI's Allowed targets bar: straight from MCP, no LLM
+            return mcp_json(await server_tools["scan_policy"].ainvoke({}))
 
-    engine.policy = policy
+        engine.policy = policy
     return engine
 
 
@@ -129,6 +161,9 @@ def main(argv: list[str] | None = None) -> int:
                          "the chat agent still uses the LLM")
     ap.add_argument("--roles", default=env.get("CHATBOT_ROLES") or "scanner",
                     help="token roles, e.g. scanner or admin (CHATBOT_ROLES, default scanner)")
+    ap.add_argument("--disable-tool", action="append", default=None, metavar="TOOL",
+                    help="switch a chat tool off (repeatable; default CHATBOT_DISABLED_TOOLS). Tools: "
+                         + ", ".join(CHATBOT_TOOL_NAMES))
     ap.add_argument("--serve", action="store_true", help="serve the JSON API for chatbots/ui instead of the console")
     ap.add_argument("--port", type=int, default=8801, help="API port with --serve (default 8801)")
     a = ap.parse_args(argv)
@@ -136,17 +171,28 @@ def main(argv: list[str] | None = None) -> int:
     roles = [r.strip() for r in a.roles.split(",") if r.strip()]
     hosts = [] if a.allow_none else (a.allow if a.allow is not None else (env.get("CHATBOT_ALLOW") or "").split(","))
     allow = [host_of(h.strip()) for h in hosts if h.strip()]
+    disabled, unknown = parse_disabled(a.disable_tool if a.disable_tool is not None
+                                       else env.get("CHATBOT_DISABLED_TOOLS", ""))
+    if unknown:
+        print(f"Unknown tool name(s) ignored: {', '.join(unknown)}. Valid: {', '.join(CHATBOT_TOOL_NAMES)}",
+              file=sys.stderr)
 
     with scanner_server(a.url, allow, a.start_server, scanner_llm=not a.no_scanner_llm) as base:
         info = {"name": NAME, "kind": "mcp", "server": base, "endpoint": f"{base}/mcp", "roles": roles,
                 "allowlisted": allow or "from the server's .env", "repo": str(REPO),
                 "scanner_llm": not a.no_scanner_llm}
+        async def build() -> Engine:
+            engine = await make_engine(base, roles, disabled)
+            info["tools"] = engine.tools_report  # shown in the UI
+            return engine
+
         if a.serve:
-            run_api(lambda: make_engine(base, roles), info, a.port)
+            run_api(build, info, a.port)
             return 0
 
         async def chat():
-            engine = await make_engine(base, roles)
+            engine = await build()
+            print(f"Tools on: {', '.join(engine.tools_report['enabled']) or 'none'}")
             await console_loop(engine, f"{NAME} - tools from {base}/mcp (roles {', '.join(roles)})")
 
         asyncio.run(chat())
