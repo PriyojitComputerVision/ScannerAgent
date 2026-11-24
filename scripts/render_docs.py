@@ -1,9 +1,11 @@
 """Render the hand-written docs diagrams to PNG, locally:
 
     uv run python scripts/render_docs.py            # docs/src/*.html -> docs/*.png
+    uv run python scripts/render_docs.py mcp-tools  # only the named diagram(s)
 
 Sources: docs/src/architecture.html -> docs/architecture.png and
-docs/src/scan-story.html -> docs/scan-story.png. Edit the HTML, then re-run.
+docs/src/scan-story.html -> docs/scan-story.png, docs/src/mcp-tools.html ->
+docs/mcp-tools.png. Edit the HTML, then re-run.
 Rendering uses a local headless Edge/Chrome over the DevTools protocol; the
 pages load no remote resources, so nothing leaves this machine. The agent
 graph (docs/agent-tree.png) comes from scripts/draw_graph.py instead.
@@ -26,7 +28,8 @@ import websockets
 
 ROOT = Path(__file__).resolve().parent.parent
 DOCS = ROOT / "docs"
-PAGES = {"architecture.html": "architecture.png", "scan-story.html": "scan-story.png"}
+PAGES = {"architecture.html": "architecture.png", "scan-story.html": "scan-story.png",
+         "mcp-tools.html": "mcp-tools.png"}
 BROWSERS = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
     r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
@@ -80,7 +83,11 @@ async def _render(ws_url: str, html: Path, png: Path) -> None:
         print(f"wrote {png.relative_to(ROOT)} ({width * SCALE}x{height * SCALE})")
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    names = sys.argv[1:] if argv is None else argv
+    pages = {src: out for src, out in PAGES.items() if not names or Path(src).stem in names}
+    if not pages:
+        raise SystemExit(f"Unknown diagram(s) {names}; choose from: {', '.join(Path(p).stem for p in PAGES)}")
     port = _free_port()
     profile = tempfile.mkdtemp(prefix="render-docs-")
     proc = subprocess.Popen([_browser(), "--headless=new", "--disable-gpu", "--hide-scrollbars",
@@ -98,7 +105,7 @@ def main() -> int:
                 if time.time() > deadline:
                     raise SystemExit("The browser did not start.") from None
                 time.sleep(0.3)
-        for src, out in PAGES.items():
+        for src, out in pages.items():
             asyncio.run(_render(page["webSocketDebuggerUrl"], DOCS / "src" / src, DOCS / out))
     finally:
         proc.terminate()

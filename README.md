@@ -96,6 +96,9 @@ server runs with `--no-browser --no-target`.
 `uv run pentest-agent` also starts two agent endpoints next to the console. Both are listed in the
 startup banner and in the console's **Agent integrations** card:
 
+![MCP tools: the human operator, the MCP chatbot agent and coding assistants call nine MCP tools over Streamable HTTP or stdio, grouped into discover (scan_policy), run (start_scan, start_demo_scan, cancel_scan, each approved by a person), follow (get_scan, list_scans) and read (list_reports, get_report, verify_audit_log); every call goes through the shared ScanService rules before the scan pipeline sends in-scope requests to the target.](docs/mcp-tools.png)
+
+
 | Endpoint | Who uses it | Auth |
 | --- | --- | --- |
 | MCP over Streamable HTTP, `http://127.0.0.1:8765/mcp` | MCP clients that connect by URL | API JWT (`Authorization: Bearer`); tools run as the token's subject and roles |
