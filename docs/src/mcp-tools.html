@@ -1,0 +1,230 @@
+<!doctype html>
+<!-- Source of docs/mcp-tools.png. Render: uv run python scripts/render_docs.py -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ScopeGuard MCP tools</title>
+<style>
+  :root { --ink: #1d232e; --muted: #5a6474; --line: #c9ced6; --panel: #eceef1; --red: #c4421a; --violet: #6b3fd6;
+          --teal: #0f766e; --amber: #b45309; --blue: #1d4ed8; --mono: "Cascadia Code", Consolas, "JetBrains Mono", monospace;
+          --sans: "Segoe UI", system-ui, -apple-system, Arial, sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #fff; color: var(--ink); font: 14px/1.45 var(--sans); width: 1500px; padding: 28px; }
+  h1 { font: 600 24px var(--sans); margin: 0 0 4px; }
+  .sub { color: var(--muted); margin: 0 0 18px; max-width: 1300px; }
+  .label { font: 600 11.5px var(--mono); letter-spacing: 2px; text-transform: uppercase; color: var(--muted); margin: 0 0 10px; }
+  .legend { display: flex; gap: 18px; flex-wrap: wrap; margin: 0 0 18px; color: var(--muted); font-size: 12.5px; }
+  .tag { font: 600 10.5px var(--mono); padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+  .tag.you { color: var(--amber); background: rgba(180, 83, 9, .12); }
+  .tag.read { color: var(--teal); background: rgba(15, 118, 110, .1); }
+  .tag.web { color: var(--red); background: rgba(196, 66, 26, .1); }
+  .tag.guard { color: var(--blue); background: rgba(29, 78, 216, .09); }
+  .tag.llm { color: var(--violet); background: rgba(107, 63, 214, .1); }
+  .tag.disk { color: #334155; background: #e2e8f0; }
+
+  .grid { display: grid; grid-template-columns: 300px 46px 640px 46px 1fr; align-items: stretch; }
+  .col { display: flex; flex-direction: column; gap: 12px; }
+  .pipe { display: flex; flex-direction: column; justify-content: center; align-items: center; color: var(--muted);
+          font: 600 22px var(--sans); gap: 6px; }
+  .pipe small { font: 600 10px var(--mono); letter-spacing: 1px; writing-mode: vertical-rl; transform: rotate(180deg); }
+
+  .persona { border: 2px solid var(--ink); border-radius: 10px; background: #fff; padding: 12px 14px; }
+  .persona.human { border-color: var(--amber); box-shadow: 0 0 0 3px rgba(180, 83, 9, .14); }
+  .persona.agent { border-color: var(--violet); box-shadow: 0 0 0 3px rgba(107, 63, 214, .12); }
+  .persona .who { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }
+  .avatar { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; flex: none;
+            font: 700 15px var(--sans); color: #fff; }
+  .human .avatar { background: var(--amber); }
+  .agent .avatar { background: var(--violet); }
+  .dev .avatar { background: #334155; }
+  .persona b { font-size: 15px; }
+  .persona ul { margin: 4px 0 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; }
+  .persona li { margin: 1px 0; }
+  .persona .via { font: 600 11px var(--mono); color: var(--muted); margin-top: 6px; }
+
+  .server { background: var(--panel); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+  .transport { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .box { border: 1.5px solid var(--line); border-radius: 8px; background: #fff; padding: 9px 12px; }
+  .box .t { font: 600 14px var(--mono); display: block; }
+  .box span { display: block; color: var(--muted); font-size: 12px; }
+  .groups { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .group { background: #fff; border: 1.5px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .group h3 { margin: 0 0 8px; font: 600 11.5px var(--mono); letter-spacing: 1.5px; text-transform: uppercase; color: var(--muted); }
+  .group.run { border-color: var(--amber); }
+  .tool { border-top: 1px dashed var(--line); padding: 7px 0 6px; }
+  .tool:first-of-type { border-top: 0; padding-top: 0; }
+  .tool .n { font: 600 14px var(--mono); }
+  .tool .d { color: var(--muted); font-size: 12px; display: block; margin: 1px 0 4px; }
+  .tool .tags { display: flex; gap: 4px; flex-wrap: wrap; }
+  .guards { border: 2px solid var(--blue); border-radius: 10px; background: #fff; padding: 10px 12px; }
+  .guards .t { font: 600 14px var(--mono); color: var(--blue); }
+  .guards ul { margin: 6px 0 0; padding-left: 18px; columns: 2; column-gap: 22px; font-size: 12.5px; color: var(--ink); }
+
+  .behind .box { border-width: 2px; }
+  .behind .box.web { border-color: var(--red); }
+  .behind .box.flow { border-color: var(--ink); }
+  .behind .box.opt { border-style: dashed; }
+  .behind ul { margin: 4px 0 0; padding-left: 18px; color: var(--muted); font-size: 12px; }
+  .down { text-align: center; color: var(--muted); font-size: 18px; line-height: 1; }
+
+  .story { margin-top: 22px; background: var(--panel); border-radius: 12px; padding: 16px; }
+  .steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+  .step { background: #fff; border: 1.5px solid var(--line); border-radius: 8px; padding: 9px 11px; position: relative; }
+  .step .num { position: absolute; top: -10px; left: 10px; width: 22px; height: 22px; border-radius: 50%;
+               background: var(--ink); color: #fff; font: 700 12px var(--sans); display: grid; place-items: center; }
+  .step b { display: block; margin: 6px 0 2px; font: 600 13.5px var(--mono); }
+  .step span { color: var(--muted); font-size: 12.5px; }
+  .step.you { border-color: var(--amber); }
+  .step.you .num { background: var(--amber); }
+  .note { color: var(--muted); font-size: 12px; margin-top: 10px; }
+</style>
+</head>
+<body>
+<h1>ScopeGuard MCP tools</h1>
+<p class="sub">Agents reach the scanner through nine MCP tools. Every tool call goes through the same shared rules
+(ScanService) as the console and A2A, so an agent can only do what the operator allowed, and a person approves
+every scan.</p>
+
+<div class="legend">
+  <span><span class="tag you">you approve</span> needs a human (chatbot: approval form)</span>
+  <span><span class="tag read">read only</span> no request to the target</span>
+  <span><span class="tag web">target</span> sends in-scope requests to the website</span>
+  <span><span class="tag guard">rules</span> checked by ScanService</span>
+  <span><span class="tag disk">disk</span> reads data/</span>
+</div>
+
+<div class="grid">
+  <!-- personas -->
+  <div class="col">
+    <div class="label">Agent personas</div>
+    <div class="persona human">
+      <div class="who"><div class="avatar">H</div><b>Human operator</b></div>
+      <ul>
+        <li>owns the targets and sets the allowlist</li>
+        <li>approves, edits or cancels every scan</li>
+        <li>reads the verified result and reports</li>
+      </ul>
+      <div class="via">approval form · chatbot UI</div>
+    </div>
+    <div class="persona agent">
+      <div class="who"><div class="avatar">A</div><b>MCP chatbot agent</b></div>
+      <ul>
+        <li>LangChain create_agent · AgentState</li>
+        <li>InMemorySaver · summarization</li>
+        <li>HumanInTheLoop before start/cancel</li>
+        <li>watch_scan streams each step</li>
+      </ul>
+      <div class="via">Streamable HTTP /mcp · Bearer JWT</div>
+    </div>
+    <div class="persona dev">
+      <div class="who"><div class="avatar">C</div><b>Coding assistant</b></div>
+      <ul>
+        <li>Claude Code, Cursor, VS Code, Codex</li>
+        <li>asks the user before confirming authorization</li>
+        <li>turns findings into code fixes</li>
+      </ul>
+      <div class="via">stdio · scopeguard-mcp (.mcp.json)</div>
+    </div>
+  </div>
+
+  <div class="pipe">⇄<small>JSON-RPC TOOL CALLS</small>⇄</div>
+
+  <!-- MCP server -->
+  <div class="server">
+    <div class="label" style="margin:0">MCP server · mcp_server/server.py</div>
+    <div class="transport">
+      <div class="box"><span class="t">/mcp · Streamable HTTP</span><span>inside pentest-agent · every call needs a JWT;
+        tools run as the token's user and roles</span></div>
+      <div class="box"><span class="t">stdio · scopeguard-mcp</span><span>child process of the assistant · no port,
+        no token · principal "mcp" with MCP_ROLE</span></div>
+    </div>
+    <div class="groups">
+      <div class="group">
+        <h3>1 · Discover</h3>
+        <div class="tool"><span class="n">scan_policy</span>
+          <span class="d">allowed targets, profiles your role may run, credential profile names, rules</span>
+          <div class="tags"><span class="tag read">read only</span></div></div>
+      </div>
+      <div class="group run">
+        <h3>2 · Run</h3>
+        <div class="tool"><span class="n">start_scan</span>
+          <span class="d">target_url, authorization_confirmed, profile (quick / standard / aggressive / auth_deep),
+            credentials by name</span>
+          <div class="tags"><span class="tag you">you approve</span><span class="tag web">target</span><span class="tag guard">rules</span></div></div>
+        <div class="tool"><span class="n">start_demo_scan</span>
+          <span class="d">built-in vulnerable app on loopback; no allowlist entry needed</span>
+          <div class="tags"><span class="tag you">you approve</span><span class="tag guard">rules</span></div></div>
+        <div class="tool"><span class="n">cancel_scan</span>
+          <span class="d">stops after the current step; audited</span>
+          <div class="tags"><span class="tag you">you approve</span></div></div>
+      </div>
+      <div class="group">
+        <h3>3 · Follow</h3>
+        <div class="tool"><span class="n">get_scan</span>
+          <span class="d">status + finished steps; at the end counts, findings, red flags, summary, report files,
+            audit record (chatbot: watch_scan streams it)</span>
+          <div class="tags"><span class="tag read">read only</span></div></div>
+        <div class="tool"><span class="n">list_scans</span>
+          <span class="d">your scans in this server process</span>
+          <div class="tags"><span class="tag read">read only</span></div></div>
+      </div>
+      <div class="group">
+        <h3>4 · Read</h3>
+        <div class="tool"><span class="n">list_reports</span>
+          <span class="d">saved reports, also from the console, CLI and A2A</span>
+          <div class="tags"><span class="tag read">read only</span><span class="tag disk">disk</span></div></div>
+        <div class="tool"><span class="n">get_report</span>
+          <span class="d">full report text (md / json), wrapped as untrusted content</span>
+          <div class="tags"><span class="tag read">read only</span><span class="tag disk">disk</span></div></div>
+        <div class="tool"><span class="n">verify_audit_log</span>
+          <span class="d">hash chain + report hashes (admin)</span>
+          <div class="tags"><span class="tag read">read only</span><span class="tag disk">disk</span></div></div>
+      </div>
+    </div>
+    <div class="guards">
+      <span class="t">Rules on every call · scan_service.py</span>
+      <ul>
+        <li>target on the operator allowlist</li>
+        <li>authorization_confirmed must be true</li>
+        <li>only the four pentest profiles</li>
+        <li>RBAC roles, owner-only scans</li>
+        <li>credentials by profile name, never returned</li>
+        <li>one scan at a time</li>
+        <li>output wrapped as untrusted data</li>
+        <li>every call logged, every refusal audited</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="pipe">→<small>RUNS</small>→</div>
+
+  <!-- behind the tools -->
+  <div class="col behind">
+    <div class="label">Behind the tools</div>
+    <div class="box flow"><span class="t">LangGraph scan pipeline</span>
+      <ul><li>validate · recon · auth · sandbox_check</li><li>dast · plan_probes · run_probes</li>
+        <li>aggregate · summarize · report · audit</li></ul></div>
+    <div class="down">↓</div>
+    <div class="box web"><span class="t">Target website</span>
+      <ul><li>in-scope requests only</li><li>GET / HEAD / OPTIONS / TRACE</li><li>no file downloads, no DNS rebinding</li></ul></div>
+    <div class="box"><span class="t">data/ on disk</span>
+      <ul><li>reports/&lt;scan_id&gt;/report.html · .md · .json · .docx</li><li>audit/audit.jsonl (hash-chained)</li></ul></div>
+    <div class="box opt"><span class="t">Groq LLM (optional)</span>
+      <ul><li>probe plan + executive summary</li><li>deterministic fallback without it</li></ul></div>
+  </div>
+</div>
+
+<div class="story">
+  <div class="label">A typical session (chatbot)</div>
+  <div class="steps">
+    <div class="step"><div class="num">1</div><b>scan_policy</b><span>the agent checks the target is allowed and which profiles it may use</span></div>
+    <div class="step you"><div class="num">2</div><b>approval form</b><span>you pick target and profile and tick "I own or may test this site"</span></div>
+    <div class="step"><div class="num">3</div><b>start_scan</b><span>runs with authorization_confirmed=true, set by your approval</span></div>
+    <div class="step"><div class="num">4</div><b>get_scan · watch_scan</b><span>each step streams in; the verified result block appears</span></div>
+    <div class="step"><div class="num">5</div><b>explain · get_report</b><span>the agent explains the findings; full report on request</span></div>
+  </div>
+  <p class="note">Everything a scan returns comes from the scanned site: evidence, summary and reports are wrapped in
+    &lt;&lt;&lt;UNTRUSTED_…&gt;&gt;&gt; markers, and agents treat them as data, never as instructions.</p>
+</div>
+</body>
+</html>
