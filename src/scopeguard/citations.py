@@ -172,7 +172,10 @@ def sanitize(text: str, sources: dict[str, dict],
     out = CITATION_RE.sub(fix, out)
     known_urls = {s["url"] for s in sources.values() if s["url"]} | {
         s["cwe_url"] for s in sources.values() if s["cwe_url"]} | known_extra(allowed_urls)
-    out = _URL_RE.sub(lambda m: m.group(0) if normalize_url(m.group(0)) in known_urls else "", out)
+    # LLMs often write non-breaking hyphens (U+2011) inside host names; restore them so the
+    # real target URL is not mistaken for an invented one.
+    out = _URL_RE.sub(lambda m: m.group(0).translate(_URL_HYPHENS)
+                      if normalize_url(m.group(0)) in known_urls else "", out)
     out = re.sub(r"[ \t]+([.,;:])", r"\1", out)  # tidy spaces left by removals
     out = re.sub(r"[ \t]{2,}", " ", out).strip()
     return out, used, invalid
@@ -183,8 +186,11 @@ def find_urls(text: str) -> list[str]:
     return [normalize_url(u) for u in _URL_RE.findall(text or "")]
 
 
+_URL_HYPHENS = str.maketrans({"‐": "-", "‑": "-"})
+
+
 def normalize_url(url: str) -> str:
-    return url.rstrip(".,;:!?")
+    return url.translate(_URL_HYPHENS).rstrip(".,;:!?")
 
 
 def known_extra(urls) -> set[str]:

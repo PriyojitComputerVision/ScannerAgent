@@ -178,6 +178,9 @@ async def session(a: argparse.Namespace, ev: Events, token: str, base: str, star
         findings = result.get("findings") or []
         for i, f in enumerate(findings, 1):
             await ev.finding(i, len(findings), f)
+        if result.get("findings_omitted"):
+            await ev.emit("more", f"{result['findings_omitted']} more finding(s) not returned",
+                          "See the full list in the report files below.")
         for flag in result.get("red_flags") or []:
             await ev.emit("red flag", short(flag, 300))
         if result.get("report_files"):
@@ -212,7 +215,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--credentials", metavar="PROFILE", help="with --target: credential profile name")
     ap.add_argument("--profile", default="quick", choices=["quick", "standard"], help="scan profile")
     ap.add_argument("--delay", type=float, default=1.0, help="pause after each event, seconds (default 1)")
-    ap.add_argument("--findings", type=int, default=8, help="findings to show one by one (default 8)")
+    ap.add_argument("--findings", type=int, default=100,
+                    help="findings to show one by one (default 100 = all, the server maximum)")
     ap.add_argument("--no-llm", action="store_true", help="no Groq calls (only for a server this script starts)")
     ap.add_argument("--show-refusal", action="store_true", help="also show the allowlist rejecting a host")
     a = ap.parse_args(argv)

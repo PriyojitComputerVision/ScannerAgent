@@ -154,7 +154,7 @@ The scripts set themselves up:
 - **Missing pieces.** A missing credential profile stops the run with a `SETUP` event that prints
   the exact `uv run scopeguard-mcp credentials add ...` command.
 
-Other options: `--findings N` (findings shown one by one), `--no-llm`, `--show-refusal` (demo of
+Other options: `--findings N` (findings shown one by one; default 100, i.e. all the server returns), `--no-llm`, `--show-refusal` (demo of
 the allowlist refusing a host), `-h` for all.
 
 For a quick unattended scan without any server, the stdlib CLI needs only the authorization flag:
