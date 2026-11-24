@@ -34,6 +34,57 @@ DEFAULT_IMAGE = "python:3.12-slim"
 # removed, and cleanup never touches containers that aren't ours.
 CONTAINER_LABEL = "scopeguard.codecheck=1"
 SESSION_LABEL = "scopeguard.session"
+# "<host>:<pid>" of the server process that started the container. The startup sweep
+# removes a container only when that process is gone, so a second server (another
+# console, the chatbot's private scanner, a test client) never kills a running scan.
+OWNER_LABEL = "scopeguard.owner"
+
+
+def owner_id() -> str:
+    import socket
+
+    return f"{socket.gethostname()}:{os.getpid()}"
+
+
+def _pid_alive(pid: int) -> bool:
+    """Whether a process exists. (Not os.kill(pid, 0): on Windows that terminates it.)"""
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.GetLastError() == 5  # access denied: it exists
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _orphaned(owner: str) -> bool:
+    """True if the container's owning server process is gone (or the label is missing,
+    i.e. an older version made it). Containers owned by another host are kept: we
+    cannot see that host's processes."""
+    import socket
+
+    host, _, pid = (owner or "").rpartition(":")
+    if not owner or not pid.isdigit():
+        return True
+    if host != socket.gethostname():
+        return False
+    return int(pid) != os.getpid() and not _pid_alive(int(pid))
 CONTAINER_PREFIX = "scopeguard-"
 # Same rule as the API's session ids (pentest_agent.schemas.SESSION_ID_RE), which
 # is also a valid Docker container name.
@@ -100,18 +151,24 @@ def remove_container(name: str, timeout: float = 30.0) -> bool:
 
 
 def remove_leftover_containers(timeout: float = 30.0) -> list[str]:
-    """Force-remove every sandbox container still present (labelled
-    ``CONTAINER_LABEL``), e.g. after the server was killed mid-scan. Returns the
-    removed container ids. Call it only when no scan is running (startup)."""
+    """Force-remove sandbox containers (labelled ``CONTAINER_LABEL``) left behind by a
+    server that is gone, e.g. killed mid-scan. Containers of a server that is still
+    running (``OWNER_LABEL``) are kept. Returns the removed container ids."""
     exe = _docker()
     if not exe:
         return []
     try:
-        listed = subprocess.run([exe, "ps", "-aq", "--filter", f"label={CONTAINER_LABEL}"],
+        listed = subprocess.run([exe, "ps", "-a", "--filter", f"label={CONTAINER_LABEL}",
+                                 "--format", "{{.ID}}\t{{.Label \"" + OWNER_LABEL + "\"}}"],
                                 check=False, capture_output=True, text=True, timeout=timeout)
     except (OSError, subprocess.TimeoutExpired):
         return []
-    ids = [line.strip() for line in listed.stdout.splitlines() if line.strip()] if listed.returncode == 0 else []
+    ids = []
+    if listed.returncode == 0:
+        for line in listed.stdout.splitlines():
+            cid, _, owner = line.strip().partition("\t")
+            if cid and _orphaned(owner.strip()):
+                ids.append(cid)
     if ids:
         try:
             subprocess.run([exe, "rm", "-f", *ids], check=False, capture_output=True, timeout=timeout)
@@ -128,6 +185,7 @@ def docker_command(*, name: str, image: str, source_dir: str | None, site_dir: s
     cmd = [_docker() or "docker", "run", "--rm", "--name", name,
            "--label", CONTAINER_LABEL,
            "--label", f"{SESSION_LABEL}={session_id or ''}",
+           "--label", f"{OWNER_LABEL}={owner_id()}",
            "--network", "none",
            "--read-only",
            "--cap-drop", "ALL",

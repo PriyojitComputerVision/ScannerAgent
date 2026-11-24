@@ -678,6 +678,26 @@ scanner change, re-capture baselines with `uv run golden-check --record-baseline
 reference needs review; rewrite those `reference_summary` texts, then run `uv run golden-check --approve-references`.
 `GOLDEN_LIVE=1 uv run pytest tests/test_golden_dataset.py` also runs the live judge inside pytest.
 
+## MCP chatbot (`chatbots/`)
+
+A LangChain `create_agent` chatbot (with `AgentState` and an in-memory checkpointer) that
+uses the scanner's MCP server as its tools:
+- **Approval:** a human approves every scan (`HumanInTheLoopMiddleware`).
+- **Streaming:** scan steps stream live.
+- **Results:** the scanner's own result block is shown, and the model explains it.
+- **Interfaces:** one command (`chatbots/ui/serve_ui.py`) starts the scanner, the
+  chatbot and a browser UI where you add any number of allowed targets. A terminal version
+  and a single Dockerfile are included.
+- **Separate project:** it has its own uv project and venv, because `langchain-mcp-adapters`
+  needs the MCP 1.x client.
+- **Settings:** it uses the Groq key and model from this repo's `.env`.
+
+```powershell
+uv run --project chatbots\mcp_chatbot python chatbots\ui\serve_ui.py --allow your-site.example --allow other-site.example
+```
+
+See [chatbots/README.md](chatbots/README.md).
+
 ## Docker
 
 ```bash

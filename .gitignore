@@ -76,3 +76,5 @@ data/
 # Only the results are ignored; golden/golden_dataset.json is tracked (tests,
 # the drift check and the Docker image all need it).
 golden/results/
+# --- chatbots: local settings (keys stay out of git) ---
+chatbots/mcp_chatbot/.env

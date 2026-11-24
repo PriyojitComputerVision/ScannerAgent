@@ -234,6 +234,51 @@ async def test_inline_credentials_off_by_default(monkeypatch, fake_graph):
     await _call("get_scan", {"scan_id": started["scan_id"], "wait_seconds": 5})
 
 
+def test_only_the_pentest_agent_profiles_are_offered():
+    from typing import get_args
+
+    from pentest_agent.scan_service import SCAN_PROFILES
+    from pentest_agent.schemas import ScanProfile
+
+    expected = {"quick", "standard", "aggressive", "auth_deep"}
+    assert set(SCAN_PROFILES) == {p.value for p in ScanProfile} == expected
+    assert set(get_args(mcp_mod.Profile)) == expected  # the MCP schema lists exactly these
+
+
+@pytest.mark.parametrize("bad", ["turbo", "QUICK", "", "standard ", None, 3])
+async def test_unknown_profiles_are_refused_by_the_service(bad, monkeypatch):
+    from pentest_agent.scan_service import PolicyError
+
+    monkeypatch.setattr(settings, "mcp_allowed_targets", "app.example.com")
+    mcp_mod.reset_service()
+    svc = mcp_mod.service()
+    with pytest.raises(PolicyError, match="Unknown scan profile"):
+        await svc.start_scan("https://app.example.com/", authorization_confirmed=True, profile=bad)
+    with pytest.raises(PolicyError, match="Use one of: quick, standard, aggressive, auth_deep"):
+        await svc.start_demo_scan(profile=bad)
+
+
+async def test_mcp_rejects_an_unknown_profile():
+    with pytest.raises(Exception, match="profile|literal|quick"):
+        await _call("start_demo_scan", {"profile": "turbo"})
+
+
+async def test_every_tool_call_is_logged_without_secrets(monkeypatch, fake_graph, caplog):
+    caplog.set_level("INFO", logger="pentest_agent.mcp")
+    monkeypatch.setattr(settings, "mcp_role", "admin")
+    mcp_mod.reset_service()
+    with pytest.raises(ToolError):
+        await _call("start_scan", {"target_url": "https://app.example.com/login?next=/x",
+                                   "authorization_confirmed": True, "jwt": "eyJhbGciOi.secret.sig"})
+    await _call("scan_policy")
+    lines = [r.getMessage() for r in caplog.records if r.name == "pentest_agent.mcp"]
+    refused = next(m for m in lines if m.startswith("MCP start_scan("))
+    assert "target=app.example.com" in refused and "inline_credentials=yes" in refused
+    assert "-> refused: Inline credentials are disabled" in refused and " ms)" in refused
+    assert any(m.startswith("MCP scan_policy(") and "-> ok" in m for m in lines)
+    assert not any("eyJhbGciOi" in m or "next=/x" in m for m in lines)  # no secrets, no URL paths
+
+
 def test_credential_file_rejects_login_url_on_other_host(cred_file):
     with pytest.raises(cred_file.CredentialError, match="login URL"):
         cred_file.save(cred_file.CredentialProfile(

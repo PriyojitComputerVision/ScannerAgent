@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -272,6 +273,7 @@ def test_container_is_named_after_the_session_id():
     assert cmd[cmd.index("--name") + 1] == "scopeguard-s1" and "--rm" in cmd
     labels = [cmd[i + 1] for i, x in enumerate(cmd) if x == "--label"]
     assert container.CONTAINER_LABEL in labels and "scopeguard.session=s1" in labels
+    assert f"{container.OWNER_LABEL}={container.owner_id()}" in labels
 
 
 def test_finished_container_is_left_to_docker_rm(monkeypatch):
@@ -303,13 +305,38 @@ def test_cleanup_never_touches_unlabelled_containers(monkeypatch):
     assert "rm" not in fake.verbs()
 
 
-def test_startup_sweep_removes_leftovers(monkeypatch):
-    fake = _FakeDocker(listed="id1\nid2\n")
+def test_startup_sweep_removes_only_orphaned_containers(monkeypatch):
+    import socket
+
+    host = socket.gethostname()
+    done = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                          capture_output=True, text=True, check=True)
+    dead_pid = int(done.stdout)  # a process that has exited
+    listed = "".join([
+        "old1\t\n",                              # no owner label (older version): leftover
+        f"dead1\t{host}:{dead_pid}\n",           # its server is gone: leftover
+        f"mine1\t{container.owner_id()}\n",      # this server: kept
+        f"live1\t{host}:{os.getppid()}\n",       # another running process on this host: kept
+        "remote1\totherhost:1234\n",             # another host: cannot check, kept
+    ])
+    fake = _FakeDocker(listed=listed)
     monkeypatch.setattr(container, "_docker", lambda: "docker")
     monkeypatch.setattr(container.subprocess, "run", fake)
-    assert _REAL_SWEEP() == ["id1", "id2"]  # conftest stubs the sweep for the server
+    assert _REAL_SWEEP() == ["old1", "dead1"]  # conftest stubs the sweep for the server
     assert f"label={container.CONTAINER_LABEL}" in fake.calls[0]
-    assert fake.calls[-1] == ["docker", "rm", "-f", "id1", "id2"]
+    assert fake.calls[-1] == ["docker", "rm", "-f", "old1", "dead1"]
+
+
+def test_pid_check_never_kills_the_process():
+    # os.kill(pid, 0) would terminate a process on Windows; _pid_alive must only look.
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert container._pid_alive(proc.pid) and container._pid_alive(proc.pid)
+        assert proc.poll() is None
+    finally:
+        proc.kill()
+        proc.wait()
+    assert not container._pid_alive(proc.pid)
 
 
 @needs_docker
