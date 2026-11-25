@@ -440,6 +440,89 @@ def test_bootstrap_starts_the_kind_node_applies_manifests_and_probes(monkeypatch
     assert any(c[:2] == ["docker", "start"] for c in fake.calls)
 
 
+def test_bootstrap_creates_a_missing_kind_cluster_and_installs_checked_calico(monkeypatch, tmp_path):
+    fake = FakeBringUp()
+    manifests = tmp_path / "sandbox.yaml"
+    manifests.write_text("kind: Namespace", encoding="utf-8")
+    calico = tmp_path / f"calico-{k8s.CALICO_VERSION}.yaml"
+    calico.write_bytes(b"pinned")
+    monkeypatch.setattr(k8s, "CALICO_SHA256", __import__("hashlib").sha256(b"pinned").hexdigest())
+    base_run = fake.run
+
+    def run(args, input_=None, timeout=60.0):
+        if "current-context" in args:
+            return subprocess.CompletedProcess(args, 0, b"kind-scopeguard\n", b"")
+        if "daemonset" in args:
+            fake.calls.append(args)
+            return subprocess.CompletedProcess(args, 1, b"", b"NotFound")
+        if "rollout" in args:
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+        if "apply" in args and str(calico) in args:
+            fake.calls.append(args)
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+        return base_run(args, input_, timeout)
+
+    def docker(args, **kw):
+        fake.calls.append(args)
+        if args[1] == "inspect":                                  # no node container at all
+            return subprocess.CompletedProcess(args, 1, "", "No such object")
+        if args[1:3] == ["create", "cluster"]:
+            assert "--config" in args and args[args.index("--name") + 1] == "scopeguard"
+            fake.started = True
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(k8s, "_run", run)
+    monkeypatch.setattr(k8s, "_kubectl", lambda: "kubectl")
+    monkeypatch.setattr(k8s, "_kind", lambda: "kind")
+    monkeypatch.setattr(k8s.shutil, "which", lambda name: name)
+    monkeypatch.setattr(k8s.subprocess, "run", docker)
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    monkeypatch.setattr(k8s, "cluster_status", lambda cfg: (True, "ok"))
+    kind_cfg = tmp_path / "kind.yaml"
+    kind_cfg.write_text("kind: Cluster", encoding="utf-8")
+    res = _REAL_BOOTSTRAP(k8s.K8sConfig(), kind_cluster="scopeguard", manifests=str(manifests), wait_seconds=5,
+                          auto_create=True, kind_config=str(kind_cfg), cache_dir=str(tmp_path))
+    joined = " | ".join(res["actions"])
+    assert res["ready"] is True, res
+    assert "kind cluster scopeguard: created" in joined and f"Calico: installed {k8s.CALICO_VERSION}" in joined
+    assert "applied sandbox.yaml" in joined
+    # without auto_create a missing cluster is only reported (scans use the Python sandbox)
+    fake.started = False
+    res = _REAL_BOOTSTRAP(k8s.K8sConfig(), kind_cluster="scopeguard", manifests=str(manifests), wait_seconds=1)
+    assert res["ready"] is False and "no kind node container" in res["reason"]
+
+
+def test_calico_is_never_installed_into_another_context_or_with_a_bad_hash(monkeypatch, tmp_path):
+    calls = []
+
+    def run(args, input_=None, timeout=60.0):
+        calls.append(args)
+        if "current-context" in args:
+            return subprocess.CompletedProcess(args, 0, b"prod-cluster\n", b"")
+        raise AssertionError(args)
+
+    monkeypatch.setattr(k8s, "_run", run)
+    monkeypatch.setattr(k8s, "_kubectl", lambda: "kubectl")
+    assert k8s._ensure_calico(k8s.K8sConfig(), "scopeguard", str(tmp_path)).startswith("skipped")
+    assert not any("apply" in c for c in calls)
+    (tmp_path / f"calico-{k8s.CALICO_VERSION}.yaml").write_bytes(b"tampered")
+
+    class Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n):
+            return b"tampered"
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda url, timeout=0: Resp())
+    with pytest.raises(k8s.K8sError, match="SHA-256"):
+        k8s._calico_manifest(str(tmp_path))
+
+
 def test_bootstrap_without_kubectl_or_docker_means_python_sandbox(monkeypatch):
     monkeypatch.setattr(k8s, "_kubectl", lambda: None)
     assert _REAL_BOOTSTRAP(k8s.K8sConfig())["reason"] == "kubectl not found"
