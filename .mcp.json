@@ -3,7 +3,7 @@
     "scopeguard": {
       "type": "stdio",
       "command": "uv",
-      "args": ["run", "scopeguard-mcp"]
+      "args": ["run", "--no-sync", "python", "-m", "pentest_agent.mcp_server.server"]
     }
   }
 }
