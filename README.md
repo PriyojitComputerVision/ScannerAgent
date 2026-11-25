@@ -41,6 +41,11 @@ diagram service).
 
 ## Quick start (no setup beyond Python 3.12)
 
+Check this machine first: `uv run python scripts/system_check.py` (Python, dependencies, settings, keys,
+audit trails, the Python sandbox's memory cap and analyzer, Docker/kubectl and where code scans will run;
+`--bootstrap` brings the Kubernetes sandbox up first, `--quick` skips the sandbox tests, `--json` for
+scripts; exit 1 on any FAIL). Kubernetes sandbox setup (kind + Calico): [k8s/README.md](k8s/README.md).
+
 ```bash
 # 1. Self-contained simulation. Needs NOTHING installed (stdlib only):
 cd src && python -m scopeguard.cli --simulate
@@ -466,8 +471,32 @@ unpacked and read **only inside a Kubernetes Job**; the code is never run.
   Angular bypass, autoescape off), **IDOR / access control** (lookups by request ids, routes without an
   ownership check, admin routes without auth, mass assignment, open redirect, path traversal, CSRF off),
   SSRF, SSTI, insecure cookies, secrets, sensitive logging, obfuscated code / Trojan Source, supply chain
-  (`postinstall`, `curl | sh`), Dockerfile / Kubernetes misconfiguration. Every rule carries a fix; the
-  report has a **Recommendations** table (one row per rule, most severe first).
+  (`postinstall`, `curl | sh`), Dockerfile / Kubernetes misconfiguration, **DOM-based attacks** (URL /
+  referrer / postMessage data into HTML or code sinks, DOM open redirect, `javascript:` URL injection,
+  message listeners without an origin check, prototype pollution, string timers) and **DoS weaknesses**
+  in the code (ReDoS, regexes from input, unbounded body/upload sizes, HTTP calls without timeouts,
+  loop/allocation sizes from input, XML entity expansion, login/reset/OTP routes without rate limiting).
+  ScopeGuard only *detects* DoS weaknesses statically; it never sends denial-of-service traffic.
+* **Remediation**: every rule carries a fix, and the IDOR, XSS, DOM, DoS, injection and SSRF rules carry
+  structured guidance (`scopeguard/remediation.py`): a summary, ordered steps, a **before/after code fix in
+  the language of the affected file** (JS/TS, Python or PHP) and OWASP Cheat Sheet links. Reports have a
+  **Recommendations** table (one row per rule) and a **Remediation** section; the console and
+  `get_code_scan` show the same.
+* **Pre-guardrails** (before anything reaches the sandbox; a failure refuses the scan): `.zip` name, MIME
+  type and zip signature, size cap, per-user upload rate (`CODE_UPLOAD_MAX_PER_HOUR`), the
+  `authorization_confirmed` flag, archive integrity (SHA-256 unchanged since the upload), a metadata-only
+  archive preflight (readable, entry/size limits, not all encrypted, something analysable), and sandbox
+  readiness including the Kubernetes isolation probe.
+* **Post-guardrails** (on the sandbox output, before it is shown or stored): schema validation, locations
+  confined to the upload, secrets re-masked, control/bidi characters removed, prompt-injection text in the
+  code flagged, size caps, and sandbox violations / partial scans turned into red flags. Both verdict lists
+  are stored with the result, shown in the console, returned by MCP and printed in the report.
+* **Separate audit trail** (`CODE_AUDIT_LOG_PATH`, `data/audit/code_audit.jsonl`): a hash-chained record
+  for every upload, refusal, pre/post guardrail verdict, sandbox attempt (Job name, memory, multiplier,
+  OOMKilled, files done), completion (with report hashes) and deletion; also the agent's code-check
+  attempts. It never holds code or secrets. `uv run pentest-audit --trail code verify|list|show`,
+  `GET /api/audit?trail=code`, the console's Audit card (Scans / Code & sandbox) and MCP
+  `verify_audit_log(trail="code")`.
 * **Sandbox**: one batch/v1 **Job** per scan running a stock image (`K8S_IMAGE`, default
   `python:3.12-slim`; pin a digest). The analyzer code is an immutable ConfigMap named after its
   SHA-256 (verified before use) mounted read-only; the zip is streamed into the pod's stdin. Deny-all
@@ -475,6 +504,17 @@ unpacked and read **only inside a Kubernetes Job**; the code is never run.
   127.0.0.1, non-root, read-only root, capabilities dropped, seccomp, `activeDeadlineSeconds`,
   `ttlSecondsAfterFinished`, optional `K8S_RUNTIME_CLASS` (gVisor/Kata). Set up once with
   `kubectl apply -f k8s/sandbox.yaml`. The same Job runs the agent's code check.
+  Local cluster with Calico (enforces NetworkPolicy), step by step: [k8s/README.md](k8s/README.md).
+* **Started before the console**: with `kubectl` present, `pentest-agent` / `scopeguard-demo` bring the sandbox
+  up first (start the stopped kind node `K8S_KIND_CLUSTER`, apply `k8s/sandbox.yaml` if missing, ship the
+  analyzer, run the isolation probe; at most `K8S_STARTUP_WAIT_SECONDS`), then serve the console; the start-up
+  banner's **Code sandbox** line says where scans run. No `kubectl`, no Docker, or any step failing: scans run
+  in the Python process sandbox (`SANDBOX_REQUIRE_KUBERNETES=false`, the default). By hand:
+  `uv run python -m scopeguard.k8s --bootstrap`.
+* **Network isolation is proven, not assumed** (`K8S_VERIFY_NETWORK_ISOLATION=true`): before trusting a
+  cluster, a probe Job in the sandbox namespace tries to reach the Kubernetes API and the internet; if
+  either connects, scans are refused ("NetworkPolicy ... is NOT enforced"). Some network plugins (kind's
+  default, Docker Desktop) ignore NetworkPolicy: use Calico or Cilium. Local kind cluster with Calico: see [k8s/README.md](k8s/README.md).
 * **Memory and out-of-memory crashes**: the limit is **5×** the content size
   (`SANDBOX_MEMORY_MULTIPLIER`; floor 256 MB, ceiling 4 GB). If the pod is OOMKilled (or the analyzer
   hits `MemoryError`), it is retried **once with 10×** (`SANDBOX_RETRY_MEMORY_MULTIPLIER`) and
@@ -696,6 +736,15 @@ Step-by-step setup, what each run shows and troubleshooting: [docs/LANGSMITH.md]
 
 ## Golden dataset and drift check
 
+Drift is decided on the **results** the summary reports, not on its citation formatting: required
+findings reported (cited **or** named), severities attributed correctly, counts not inflated, plus safety
+checks (an answer exists, no invented URLs or forbidden claims, length). Citation checks are listed for
+information only. A case whose data could not be collected (crash, killed run) is `NOT_EVALUATED`, never
+`DATA_DRIFT`; a model failure on drifted data is labelled *unattributed*. The report models are pydantic
+(`CaseResult.status`, a validator that makes verdict / exit code / drift flags consistent,
+`verdict_explanation`). `golden-check --reclassify` re-scores every stored run in `golden/results/` with
+the current rules (no LLM calls) and writes `golden_report.reclassified.{json,md}` next to each original.
+
 `golden/golden_dataset.json` holds the golden cases (sandboxed scans of the built-in target and fixed
 findings fixtures, with recorded baselines and reference summaries). `uv run golden-check` runs the real
 pipeline on each case and checks:
@@ -728,7 +777,7 @@ It prints one strict verdict and exits with its code:
 | `DATA_DRIFT` | 10 | the model's input data changed (scanner output / fixtures differ from baseline) |
 | `MODEL_DRIFT` | 20 | data is stable but the LLM output failed a check or scored below threshold |
 | `DATA_AND_MODEL_DRIFT` | 30 | both (model failures on drifted cases are not attributed to the model) |
-| `NOT_EVALUATED` | 2 | no `GROQ_API_KEY` / judge error: the model could not be assessed |
+| `NOT_EVALUATED` | 2 | no `GROQ_API_KEY`, judge error, or a case whose data could not be collected (crash/killed run): not drift |
 
 Results are written to `golden/results/golden-<timestamp>/golden_report.{json,md}` and
 `golden/results/latest.json` (git-ignored). `--allow-no-llm` runs data checks only; after an intentional

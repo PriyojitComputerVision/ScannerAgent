@@ -106,9 +106,9 @@ def test_grounded_summary_passes_model_checks_and_judge():
 
 
 @pytest.mark.parametrize("bad_text,failed_check", [
-    (GOOD_TWO + " A critical SQL injection was also found [S7].", "no_hallucinated_citations"),
     (GOOD_TWO + " See https://evil.example/report.", "no_invented_urls"),
-    (GOOD_TWO.replace(" [S2]", ""), "must_cite_sources"),
+    (GOOD_TWO.replace("A low-severity hardening gap: responses omit the X-Content-Type-Options header [S2]. ", ""),
+     "required_findings_reported"),
     (GOOD_TWO + " This could lead to a data breach.", "must_not_mention"),
     ("XSS [S1] and headers [S2].", "length_words"),
 ])
@@ -123,11 +123,11 @@ def test_hallucinated_or_ungrounded_summary_fails(bad_text, failed_check):
 @pytest.mark.parametrize("bad_text,failed_check,detail", [
     # valid ids, wrong severity: S2 is low, cited in a sentence about medium findings
     (GOOD_TWO.replace("cross-site scripting [S1]", "cross-site scripting [S1, S2]"),
-     "severity_consistent_citations", "S2 is low"),
+     "severity_attribution", "S2 is low"),
     (GOOD_TWO.replace("none critical or high", "one critical and two medium"),
-     "severity_numbers_grounded", "'two medium' but SOURCES have 1 medium"),
+     "severity_counts_grounded", "'two medium' but SOURCES have 1 medium"),
     (GOOD_TWO.replace("none critical or high", "no medium findings"),
-     "severity_numbers_grounded", "'no medium'"),
+     "severity_counts_grounded", "'no medium'"),
 ])
 def test_wrong_severity_claims_fail_deterministically(bad_text, failed_check, detail):
     case = _case("static-two-findings")
@@ -216,15 +216,50 @@ def test_judge_score_below_threshold_is_model_drift():
     assert verdict is golden.Verdict.MODEL_DRIFT and parts["model_drift_cases"] == [case.id]
 
 
-def test_fallback_summary_counts_as_model_failure():
-    def fallback(**kw):
+def test_correct_results_without_citations_are_not_drift():
+    """Drift is about the reported results: the right findings at the right severities pass even
+    when the model left out the [Sn] tags (and production fell back to its cited summary)."""
+    plain = citations.CITATION_RE.sub("", GOOD_TWO)
+
+    def uncited(**kw):
         s = citations.build_sources(kw["findings"])
-        return SummaryResult(text="x", sources=s, raw_llm_output="ungrounded", llm_used=True,
+        return SummaryResult(text="fallback", sources=s, raw_llm_output=plain, llm_used=True,
                              fallback_used=True, fallback_reason="LLM output had no valid source citations")
     case = _case("static-two-findings")
     r = golden.evaluate_case(case, DATASET.thresholds, use_llm=True, judge=_good_judge(),
-                             summarize=lambda **kw: fallback(**kw))
-    assert not next(c for c in r.model_checks if c.name == "llm_answer_used").passed
+                             summarize=lambda **kw: uncited(**kw))
+    by = {c.name: c for c in r.model_checks}
+    assert by["required_findings_reported"].passed and by["llm_answer_produced"].passed
+    assert not by["citations_present"].passed and by["citations_present"].kind == "citation"
+    assert not by["citations_present"].blocking and r.model_ok and r.status == "ok"
+
+
+def test_unknown_citation_id_is_reported_but_not_drift():
+    case = _case("static-two-findings")
+    r = golden.evaluate_case(case, DATASET.thresholds, use_llm=True, judge=_good_judge(),
+                             summarize=_summarizer(GOOD_TWO + " See also [S7]."))
+    bad = next(c for c in r.model_checks if c.name == "no_unknown_citation_ids")
+    assert not bad.passed and not bad.blocking and r.model_ok
+
+
+def test_missing_required_finding_is_drift_even_with_citations():
+    case = _case("static-two-findings")
+    text = GOOD_TWO.replace("A low-severity hardening gap: responses omit the X-Content-Type-Options header [S2]. ",
+                            "")
+    r = golden.evaluate_case(case, DATASET.thresholds, use_llm=True, judge=_good_judge(),
+                             summarize=_summarizer(text))
+    assert not r.model_ok and r.status == "model_drift"
+    detail = next(c.detail for c in r.model_checks if c.name == "required_findings_reported")
+    assert "X-Content-Type-Options" in detail
+
+
+def test_named_finding_counts_as_reported():
+    title_to_ids = {"Possible SQL injection": {"S1"}, "Exposed environment file": {"S2"}}
+    assert golden.finding_reported("Possible SQL injection", "The login form is SQL-injectable.", set(), title_to_ids)
+    assert golden.finding_reported("Exposed environment file", "An .env environment file is public.", set(),
+                                   title_to_ids)
+    assert not golden.finding_reported("Exposed environment file", "Cookies lack flags.", set(), title_to_ids)
+    assert golden.finding_reported("Exposed environment file", "see [S2]", {"S2"}, title_to_ids)
 
 
 # ---------------------------------------------------------------- strict verdict
@@ -267,7 +302,7 @@ def test_full_offline_run_writes_results(tmp_path):
     ds = DATASET.model_copy(deep=True)
     ds.cases = [c for c in ds.cases if c.kind == "static_findings"]
     for c in ds.cases:
-        c.expectations.must_cite_titles = []
+        c.expectations.must_report_titles = []
         c.expectations.must_not_mention = []
     rep = golden.run(ds, use_llm=True, judge=_good_judge(9), summarize=summarize)
     out = golden.write_results(rep, tmp_path)
@@ -405,3 +440,142 @@ def test_run_auto_refreshes_a_token_near_expiry(golden_auth, monkeypatch):
     monkeypatch.setattr(golden_auth, "jwt_access_ttl_minutes", 5)    # inside the 10-min window
     rep = golden.run(_static_ds(), use_llm=False, require_model=False, auth=True)
     assert rep.verdict is golden.Verdict.NO_DRIFT and rep.auth["refreshed"] >= 1
+
+
+# ---------------------------------------------------------------- attribution + consistency (pydantic)
+def test_case_status_names_the_attribution():
+    assert _result("a").status == "ok"
+    assert _result("a", data_ok=False).status == "data_drift"
+    assert _result("a", data_ok=False, model_ok=False).status == "unattributed_model_failure"
+    assert _result("a", model_ok=False).status == "model_drift"
+    assert _result("a", evaluated=False).status == "not_evaluated"
+    dumped = _result("a", data_ok=False, model_ok=False).model_dump()
+    assert dumped["status"] == "unattributed_model_failure" and dumped["data_ok"] is False  # computed fields
+
+
+def _report(results, verdict=None, **over):
+    v, parts = golden.classify(results)
+    verdict = verdict or v
+    fields = dict(dataset_version="1", generated_at="t", generator_model=None, judge_model=None,
+                  min_judge_score=7, verdict=verdict, exit_code=golden.EXIT_CODES[verdict],
+                  mean_judge_score=None, reasons=[], cases=results, **parts)
+    fields.update(over)
+    return golden.GoldenReport(**fields)
+
+
+def test_data_drift_with_model_failures_is_exit_10_and_says_why():
+    """The case behind 'exit 10 but it shows model drift': the model failed only where the data drifted."""
+    rep = _report([_result("a", data_ok=False, model_ok=False), _result("b")])
+    assert rep.verdict is golden.Verdict.DATA_DRIFT and rep.exit_code == 10
+    assert not rep.model_drift and rep.unattributed_model_failures == ["a"]
+    assert "NOT counted as model drift because their data drifted: a" in rep.verdict_explanation
+    md = golden.render_markdown(rep)
+    assert "| a | unattributed_model_failure | FAIL | FAIL (unattributed) |" in md
+    assert "**Why:** DATA_DRIFT (exit 10)" in md
+
+
+@pytest.mark.parametrize("over", [
+    {"verdict": golden.Verdict.MODEL_DRIFT, "exit_code": 20},     # verdict contradicts the cases
+    {"exit_code": 20},                                            # exit code contradicts the verdict
+    {"model_drift": True},                                        # flag contradicts the cases
+    {"model_drift_cases": ["a"]},
+])
+def test_inconsistent_report_cannot_be_built(over):
+    with pytest.raises(ValueError, match="inconsistent golden report"):
+        _report([_result("a", data_ok=False, model_ok=False)], **over)
+
+
+def test_unattributed_reasons_are_labelled(tmp_path):
+    def summarize(**kw):
+        return _summarizer("High severity issue: reflected input [S1] and a missing X-Content-Type-Options "
+                           "header [S2].")(**kw)   # wrong severities (a result error)
+
+    case = _case("static-two-findings")
+    drifted = case.model_copy(deep=True)
+    drifted.baseline.input_sha256 = "0" * 64                              # force data drift
+    drifted.baseline.reference_sha256 = golden.reference_stamp(drifted)   # reference still approved
+    ds =DATASET.model_copy(update={"cases": [drifted]})
+    rep = golden.run(ds, use_llm=True, judge=_good_judge(), summarize=summarize, auth=False)
+    assert rep.exit_code == 10 and rep.unattributed_model_failures == [case.id]
+    assert any(r.startswith("[model, unattributed: data drifted/result]") for r in rep.reasons)
+    assert not any(r.startswith("[model] ") for r in rep.reasons)
+
+
+# ---------------------------------------------------------------- severity self-check + repair
+def _fake_llm(monkeypatch, answers):
+    from types import SimpleNamespace
+
+    from pentest_agent import graph
+
+    calls = []
+    it = iter(answers)
+
+    def invoke(_llm, messages):
+        calls.append(messages)
+        return SimpleNamespace(content=next(it))
+
+    monkeypatch.setattr(graph, "llm_available", lambda: True)
+    monkeypatch.setattr(graph, "get_llm", lambda **_: None)
+    monkeypatch.setattr(graph, "invoke_with_backoff", invoke)
+    return graph, calls
+
+
+def _two_findings():
+    return [Finding.model_validate(x) for x in _case("static-two-findings").input_findings]
+
+
+def test_misfiled_severities_get_one_targeted_repair(monkeypatch):
+    bad = "High-severity findings include reflected input [S1] and a missing header [S2]."
+    good = "A medium finding is reflected input [S1]. A low finding is a missing header [S2]."
+    graph, calls = _fake_llm(monkeypatch, [bad, good])
+    r = graph.generate_executive_summary("https://golden.example.test", "standard", 3, _two_findings(), [],
+                                         use_cache=False)
+    assert r.raw_llm_output == good and r.first_raw_llm_output == bad
+    assert r.severity_repair_attempted and r.severity_issues == []
+    assert len(calls) == 2 and "S1 is medium but cited in a sentence about high" in calls[1][-1].content
+    assert golden.severity_mismatches(r.raw_llm_output, r.sources) == []
+
+
+def test_repair_never_makes_the_answer_worse(monkeypatch):
+    bad = "High finding: reflected input [S1]. A low finding is a missing header [S2]."
+    worse = "High findings: reflected input [S1] and a missing header [S2]."
+    graph, _ = _fake_llm(monkeypatch, [bad, worse])
+    r = graph.generate_executive_summary("https://golden.example.test", "standard", 3, _two_findings(), [],
+                                         use_cache=False)
+    assert r.raw_llm_output == bad and r.severity_issues == ["S1 is medium but cited in a sentence about high"]
+
+
+def test_correct_answer_is_not_repaired(monkeypatch):
+    good = "A medium finding is reflected input [S1]. A low finding is a missing header [S2]."
+    graph, calls = _fake_llm(monkeypatch, [good])
+    r = graph.generate_executive_summary("https://golden.example.test", "standard", 3, _two_findings(), [],
+                                         use_cache=False)
+    assert len(calls) == 1 and not r.severity_repair_attempted and r.first_raw_llm_output is None
+
+
+def test_repair_that_drops_citations_is_rejected(monkeypatch):
+    bad = "High-severity findings include reflected input [S1] and a missing header [S2]."
+    no_cites = "A medium finding is reflected input. A low finding is a missing header."
+    graph, calls = _fake_llm(monkeypatch, [bad, no_cites])
+    r = graph.generate_executive_summary("https://golden.example.test", "standard", 3, _two_findings(), [],
+                                         use_cache=False)
+    assert r.raw_llm_output == bad and r.severity_repair_attempted and r.severity_issues
+    assert "never drop them" in calls[1][-1].content
+
+
+def test_uncited_answer_gets_a_repair_instead_of_the_fallback(monkeypatch):
+    plain = "A medium finding is reflected input. A low finding is a missing header."
+    cited = "A medium finding is reflected input [S1]. A low finding is a missing header [S2]."
+    graph, calls = _fake_llm(monkeypatch, [plain, cited])
+    r = graph.generate_executive_summary("https://golden.example.test", "standard", 3, _two_findings(), [],
+                                         use_cache=False)
+    assert not r.fallback_used and r.raw_llm_output == cited and r.used_citations == ["S1", "S2"]
+    assert "cites no SOURCES" in calls[1][-1].content
+
+
+def test_uncited_high_finding_is_a_repair_issue():
+    from pentest_agent import graph
+
+    sources = {"S1": {"severity": "high", "title": "SQLi"}, "S2": {"severity": "low", "title": "hdr"}}
+    assert graph.severity_issues("A low finding is a header [S2].", sources) == ["S1 is high but not cited"]
+    assert graph.severity_issues("A high finding is SQLi [S1]. A low one [S2].", sources) == []

@@ -148,6 +148,10 @@ async def test_scan_runs_and_returns_cleaned_results(fake_graph):
     assert res["executive_summary"].startswith("<<<UNTRUSTED_PAGE_CONTENT")
     assert res["red_flags"] == ["rate limited"]
     assert set(res["report_files"]) == {"md"}
+    # URLs served by the agent, never a path on the server (unusable elsewhere, leaks the layout)
+    url = res["report_files"]["md"]
+    assert url.startswith(("http://", "https://")) and "/reports/" in url and url.endswith("/report.md")
+    assert settings.reports_dir not in url and "\\" not in url and ":/Users" not in url
     # The graph got the MCP principal and client, never credentials.
     inputs = fake_graph.inputs
     assert inputs["principal"]["sub"] == "mcp" and inputs["client"] == {"via": "mcp"}
@@ -354,6 +358,7 @@ async def test_get_report_wraps_and_blocks_traversal():
     (folder / "report.md").write_text("# Report\nsee https://evil.test/x", encoding="utf-8")
     rep = await _call("get_report", {"session_id": "mcp-report1"})
     assert rep["content"].startswith("<<<UNTRUSTED_PAGE_CONTENT") and "evil.test" not in rep["content"]
+    assert "path" not in rep and rep["url"].endswith("/reports/mcp-report1/report.md")
     for bad in ("../secrets", "..", "a/b"):
         with pytest.raises(ToolError):
             await _call("get_report", {"session_id": bad})

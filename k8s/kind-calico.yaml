@@ -1,0 +1,10 @@
+# Local kind cluster for the ScopeGuard Kubernetes Job sandbox, with Calico.
+#
+# kind's default network plugin (kindnet) does not reliably enforce NetworkPolicy for
+# short-lived pods: the sandbox isolation probe then (correctly) refuses the cluster and
+# scans fall back to the Python sandbox. Calico enforces it. Setup steps: k8s/README.md.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+networking:
+  disableDefaultCNI: true      # Calico is installed instead (it enforces NetworkPolicy)
+  podSubnet: 192.168.0.0/16    # Calico's default pool

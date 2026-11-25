@@ -26,6 +26,7 @@ os.environ.setdefault("SUBAGENT_CHECKPOINT_DB_PATH", str(_TMP_ROOT / "checkpoint
 os.environ.setdefault("REPORTS_DIR", str(_TMP_ROOT / "reports"))
 # Tests never touch the real audit log or use the real HMAC key from .env.
 os.environ["AUDIT_LOG_PATH"] = str(_TMP_ROOT / "audit" / "audit.jsonl")
+os.environ["CODE_AUDIT_LOG_PATH"] = str(_TMP_ROOT / "audit" / "code_audit.jsonl")
 os.environ["AUDIT_HMAC_KEY"] = ""
 os.environ.setdefault("LOG_FILE", str(_TMP_ROOT / "logs" / "pentest-agent.log"))
 # API auth is tested explicitly in test_api_auth.py; other tests run without it.
@@ -98,6 +99,8 @@ def _no_kubectl(monkeypatch):
     from scopeguard import k8s
 
     monkeypatch.setattr(k8s, "remove_leftover_jobs", lambda *a, **k: [])
+    monkeypatch.setattr(k8s, "bootstrap", lambda cfg, **k: {"ready": False, "reason": "no cluster in tests",
+                                                           "actions": []})
     monkeypatch.setattr(k8s, "cluster_status", lambda cfg: (False, "no cluster in tests"))
 
 

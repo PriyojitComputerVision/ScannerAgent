@@ -73,7 +73,7 @@ def _val(x, key):
 def render_html(*, title: str, meta: list[tuple[str, str]], summary: str | None, findings: list,
                 sources: dict[str, dict], red_flags: list[str], blocked: list[str],
                 downloads: list[tuple[str, str]] | None = None, download_base: str | None = None,
-                recommendations: list[dict] | None = None) -> str:
+                recommendations: list[dict] | None = None, guardrails: dict | None = None) -> str:
     """Self-contained HTML report. `findings` may be dicts or pydantic Findings."""
     counts = {s: sum(1 for f in findings if str(_val(f, "severity")).lower() == s) for s in ORDER}
     b = [f"<h1>{_e(title)}</h1>", '<ul class="meta">']
@@ -98,6 +98,15 @@ def render_html(*, title: str, meta: list[tuple[str, str]], summary: str | None,
               f'<td>{_e(r.get("rule"))}<div class="small">{_e(r.get("cwe") or "")} · e.g. {_e(r.get("example") or "")}'
               f'</div></td><td>{_e(r.get("count"))}</td><td>{_e(r.get("recommendation"))}</td></tr>'
               for r in recommendations]
+        b.append("</table>")
+        b += _remediation_html(recommendations)
+    if guardrails:
+        b += ["<h2>Guardrails</h2>", "<table><tr><th>Stage</th><th>Check</th><th>Result</th><th>Detail</th></tr>"]
+        for stage in ("pre", "post"):
+            for c in guardrails.get(stage) or []:
+                ok = "passed" if c.get("passed") else "FAILED"
+                b.append(f"<tr><td>{_e(stage)}</td><td>{_e(c.get('name'))}</td><td>{_e(ok)}</td>"
+                         f"<td>{_e(c.get('detail'))}</td></tr>")
         b.append("</table>")
     b.append("<h2>Detailed findings</h2>")
     ranked = sorted(findings, key=lambda f: ORDER.index(str(_val(f, "severity")).lower())
@@ -136,6 +145,50 @@ def render_html(*, title: str, meta: list[tuple[str, str]], summary: str | None,
     b.append('<p class="small">Generated automatically. Findings can include false positives; '
              "triage before remediation or disclosure.</p>")
     return html_page(title, "".join(b))
+
+
+def _remediation_html(recommendations: list[dict]) -> list[str]:
+    """Per-rule remediation: summary, steps, a before/after fix, OWASP references (all escaped)."""
+    b = ["<h2>Remediation</h2>"]
+    for r in recommendations:
+        rem = r.get("remediation") or {}
+        if not rem.get("steps") and not rem.get("example"):
+            continue
+        group = f' <span class="small">({_e(rem["group"])})</span>' if rem.get("group") else ""
+        b += ['<div class="finding">',
+              (f'<h3><span class="sev {_e(r.get("severity"))}">{_e(r.get("severity"))}</span> '
+              f'{_e(r.get("rule"))}{group}</h3>'), f"<p>{_e(rem.get('summary'))}</p>"]
+        if rem.get("steps"):
+            b += ["<ol>"] + [f"<li>{_e(step)}</li>" for step in rem["steps"]] + ["</ol>"]
+        ex = rem.get("example")
+        if ex:
+            b += [f'<p class="small">Vulnerable ({_e(ex.get("language"))}):</p><pre>{_e(ex.get("before"))}</pre>',
+                  f'<p class="small">Fixed:</p><pre>{_e(ex.get("after"))}</pre>']
+        refs = [u for u in rem.get("references") or [] if str(u).startswith("https://")]
+        if refs:
+            b.append('<p class="small">References: ' + " · ".join(_link(u) for u in refs) + "</p>")
+        b.append("</div>")
+    return b if len(b) > 1 else []
+
+
+def remediation_markdown(recommendations: list[dict]) -> list[str]:
+    L = []
+    for r in recommendations:
+        rem = r.get("remediation") or {}
+        if not rem.get("steps") and not rem.get("example"):
+            continue
+        group = f" ({rem['group']})" if rem.get("group") else ""
+        L += [f"### [{str(r.get('severity', '')).upper()}] {r.get('rule')}{group}", "", str(rem.get("summary") or ""), ""]
+        L += [f"{i}. {step}" for i, step in enumerate(rem.get("steps") or [], 1)] + [""]
+        ex = rem.get("example")
+        if ex:
+            lang = {"js": "js", "py": "python", "php": "php"}.get(ex.get("language"), "")
+            L += [f"Vulnerable ({ex.get('language')}):", "", f"```{lang}", str(ex.get("before")), "```", "",
+                  "Fixed:", "", f"```{lang}", str(ex.get("after")), "```", ""]
+        refs = [u for u in rem.get("references") or [] if str(u).startswith("https://")]
+        if refs:
+            L += ["References: " + ", ".join(refs), ""]
+    return (["", "## Remediation", ""] + L) if L else []
 
 
 def render_markdown(target: str, result: dict, mode: str, sources: dict[str, dict] | None = None) -> str:
@@ -248,7 +301,8 @@ def code_summary(name: str, result: dict, sources: dict[str, dict], top: int = 5
     return text
 
 
-def write_code_reports(out_dir: str, name: str, result: dict, red_flags: list[str] | None = None) -> dict:
+def write_code_reports(out_dir: str, name: str, result: dict, red_flags: list[str] | None = None,
+                       guardrails: dict | None = None) -> dict:
     """report.{md,json,html,docx} for an uploaded-code scan (scopeguard.codescan result)."""
     d = Path(out_dir)
     d.mkdir(parents=True, exist_ok=True)
@@ -280,6 +334,12 @@ def write_code_reports(out_dir: str, name: str, result: dict, red_flags: list[st
         L += ["", "## Recommendations", "", "| Severity | Issue | Count | What to do |", "|---|---|---|---|"]
         L += [f"| {r.get('severity', '').upper()} | {r.get('rule')} ({r.get('cwe') or 'n/a'}) | {r.get('count')} | "
               f"{str(r.get('recommendation') or '').replace('|', '/')} |" for r in recs]
+    L += remediation_markdown(recs)
+    if guardrails:
+        L += ["", "## Guardrails", "", "| Stage | Check | Result | Detail |", "|---|---|---|---|"]
+        L += [f"| {stage} | {c.get('name')} | {'passed' if c.get('passed') else 'FAILED'} | "
+              f"{str(c.get('detail') or '').replace('|', '/')} |"
+              for stage in ("pre", "post") for c in guardrails.get(stage) or []]
     L += ["", "## Detailed findings", ""]
     for x in findings:
         sid = citations.source_for_finding(sources, x)
@@ -295,20 +355,31 @@ def write_code_reports(out_dir: str, name: str, result: dict, red_flags: list[st
     if sources:
         L += ["## Sources", ""] + citations.sources_markdown(sources) + [""]
     paths["md"].write_text("\n".join(L), encoding="utf-8")
-    paths["json"].write_text(json.dumps({**result, "red_flags": red_flags, "sources": sources}, indent=2),
+    paths["json"].write_text(json.dumps({**result, "red_flags": red_flags, "guardrails": guardrails or {},
+                                         "sources": sources}, indent=2),
                              encoding="utf-8")
     paths["html"].write_text(render_html(
         title=f"Code Security Report: {name}", meta=meta, summary=summary, findings=findings, sources=sources,
-        red_flags=red_flags, blocked=[], recommendations=recs,
+        red_flags=red_flags, blocked=[], recommendations=recs, guardrails=guardrails,
         downloads=[("Markdown", "report.md"), ("JSON", "report.json"), ("DOCX", "report.docx")],
         download_base=d.name), encoding="utf-8")
     try:
         from scopeguard.docx_report import build_docx
         build_docx(d / "report.docx", title="Code Security Report", target=name, meta=meta, summary=summary,
                    findings=findings, sources=sources,
-                   red_flags=red_flags + [f"Fix {r['rule']} ({r['count']}x): {r['recommendation']}" for r in recs],
+                   red_flags=red_flags + [_docx_fix_line(r) for r in recs],
                    blocked=[], summary_heading="Summary")
         paths["docx"] = d / "report.docx"
     except ImportError:  # python-docx is optional for the stdlib CLI
         pass
     return {k: str(v) for k, v in paths.items()}
+
+
+def _docx_fix_line(r: dict) -> str:
+    """One remediation line per rule for the DOCX report (steps + the fixed code)."""
+    rem = r.get("remediation") or {}
+    steps = " ".join(f"({i}) {step}" for i, step in enumerate(rem.get("steps") or [], 1))
+    ex = rem.get("example") or {}
+    fix = f" Fixed ({ex.get('language')}): {ex.get('after')}" if ex.get("after") else ""
+    refs = " See " + ", ".join(rem.get("references") or []) + "." if rem.get("references") else ""
+    return f"Fix {r.get('rule')} ({r.get('count')}x): {rem.get('summary') or r.get('recommendation')} {steps}{fix}{refs}"

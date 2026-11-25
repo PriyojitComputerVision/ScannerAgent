@@ -116,7 +116,7 @@ def test_admin_route_without_auth():
     ("a.js", "res.send(escapeHtml(name));"),
     ("a.js", "el.textContent = req;"),
     ("a.py", "return render_template('x.html', n=request.args.get('n'))"),
-    ("a.py", "r = requests.get('https://api.example.com/v1')"),
+    ("a.py", "r = requests.get('https://api.example.com/v1', timeout=(3, 10))"),
     ("a.js", "res.redirect('/home');"),
     ("a.py", "token = secrets.token_urlsafe(32)"),
     ("Dockerfile", "FROM node:20\nUSER node"),
@@ -145,3 +145,58 @@ def test_hardcoded_signing_secret_is_masked():
                           where="source/s.py", ext=".py", js=False, backend=True, name="s.py")
     f = next(x for x in res.findings if x["title"].startswith("HARDCODED_JWT_SECRET"))
     assert "dev-secret-123456" not in f["evidence"] and "dev-" in f["evidence"]
+
+
+@pytest.mark.parametrize("name, code, rule", [
+    # DOM-based attacks
+    ("app.js", "el.innerHTML = decodeURIComponent(location.hash.slice(1));", "DOM_XSS_SOURCE_TO_SINK"),
+    ("app.js", "document.write(document.referrer);", "DOM_XSS_SOURCE_TO_SINK"),
+    ("app.js", "out.innerHTML = event.data.html;", "DOM_XSS_SOURCE_TO_SINK"),
+    ("app.js", "location.href = new URLSearchParams(location.search).get('next');", "DOM_OPEN_REDIRECT"),
+    ("app.js", "link.href = location.hash.slice(1);", "DOM_JS_URL_INJECTION"),
+    ("app.js", "_.merge(config, JSON.parse(body));", "PROTOTYPE_POLLUTION"),
+    ("app.js", "Object.assign(settings, req.body);", "PROTOTYPE_POLLUTION"),
+    ("app.js", "setTimeout('render(' + id + ')', 10);", "STRING_TIMER_EVAL"),
+    # DoS / resource exhaustion
+    ("a.py", r"EMAIL = re.compile(r'^([a-zA-Z0-9]+)*@example\.com$')", "REDOS_NESTED_QUANTIFIER"),
+    ("a.js", r"const re = /^(\w+\s?)*$/;", "REDOS_NESTED_QUANTIFIER"),
+    ("a.js", "const r = new RegExp(req.query.pattern);", "REGEX_FROM_INPUT"),
+    ("a.js", "app.use(express.json({ limit: '500mb' }));", "LARGE_BODY_LIMIT"),
+    ("settings.py", "DATA_UPLOAD_MAX_MEMORY_SIZE = None", "LARGE_BODY_LIMIT"),
+    ("a.py", "r = requests.get(url)", "HTTP_CALL_NO_TIMEOUT"),
+    ("a.py", "for i in range(int(request.args['n'])):", "LOOP_SIZE_FROM_INPUT"),
+    ("a.js", "const buf = new Array(Number(req.query.size));", "LOOP_SIZE_FROM_INPUT"),
+    ("a.py", "root = ET.fromstring(request.data)", "XML_ENTITY_EXPANSION"),
+])
+def test_dom_and_dos_rules_fire(name, code, rule):
+    assert rule in _scan(name, code)
+
+
+@pytest.mark.parametrize("name, code", [
+    ("app.js", "el.textContent = decodeURIComponent(location.hash.slice(1));"),
+    ("app.js", "location.href = '/dashboard';"),
+    ("app.js", "setTimeout(() => render(id), 10);"),
+    ("a.py", r"EMAIL = re.compile(r'^[a-z0-9]+@example\.com$')"),
+    ("a.py", "r = requests.get(url, timeout=5)"),
+    ("a.js", "app.use(express.json({ limit: '100kb' }));"),
+    ("a.py", "for i in range(min(int(n), 100)):"),
+])
+def test_dom_and_dos_safe_variants_are_quiet(name, code):
+    assert _scan(name, code) == set()
+
+
+LOGIN_NO_LIMIT = "app.post('/api/login', async (req, res) => {\n  const u = await User.findOne({ email: req.body.email });\n});\n"
+LOGIN_LIMITED = ("const limiter = rateLimit({ windowMs: 60000, max: 5 });\n"
+                 "app.post('/api/login', limiter, async (req, res) => {\n  const u = 1;\n});\n")
+
+
+def test_login_route_without_rate_limit():
+    assert "LOGIN_ROUTE_NO_RATE_LIMIT" in _scan("auth.js", LOGIN_NO_LIMIT)
+    assert "LOGIN_ROUTE_NO_RATE_LIMIT" not in _scan("auth.js", LOGIN_LIMITED)
+
+
+def test_message_listener_without_origin_check():
+    bad = "window.addEventListener('message', (e) => {\n  run(e.data.cmd);\n});\n"
+    good = "window.addEventListener('message', (e) => {\n  if (e.origin !== 'https://app.example') return;\n  run(e.data.cmd);\n});\n"
+    assert "POSTMESSAGE_NO_ORIGIN_CHECK" in _scan("frame.js", bad)
+    assert "POSTMESSAGE_NO_ORIGIN_CHECK" not in _scan("frame.js", good)

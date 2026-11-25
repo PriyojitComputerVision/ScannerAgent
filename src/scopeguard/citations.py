@@ -282,3 +282,66 @@ def deterministic_summary(target: str, sources: dict[str, dict], pages: int, red
     if red_flags:
         text += f" {red_flags} red flag(s) were raised; see the Red Flags section."
     return text
+
+
+# --------------------------------------------------------------------------- severity grounding
+# Shared by the executive summary (graph.generate_executive_summary: self-check + repair) and the
+# golden drift check (model checks severity_consistent_citations / severity_numbers_grounded).
+# Severity words as an executive summary uses them ("high-severity", "Medium findings",
+# "Lower-severity items", "informational headers") -> the SOURCES severities they cover.
+_SEVERITY_WORDS = {"critical": {"critical"}, "high": {"high"}, "medium": {"medium"}, "moderate": {"medium"},
+                   "low": {"low"}, "lower": {"low", "info"}, "info": {"info"},
+                   "informational": {"info"}}
+_SEVERITY_RE = re.compile(r"\b(" + "|".join(sorted(_SEVERITY_WORDS, key=len, reverse=True)) + r")\b",
+                          re.IGNORECASE)
+# Sentence ends and line breaks: LLM answers often use markdown paragraphs/lists
+# ("items.\n\n**High-severity findings** include ..."), so both end a sentence.
+_SENTENCE_RE = re.compile(r"(?<=[.!?])\s+|\s*\n\s*")
+_NUMBER_WORDS = {w: i for i, w in enumerate((
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven",
+    "twelve", "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
+    "twenty"))} | {"no": 0}
+_COUNT_RE = re.compile(r"\b(\d+|" + "|".join(_NUMBER_WORDS) + r")\s+(critical|high|medium|low|informational|info)\b",
+                       re.IGNORECASE)
+
+
+def _sentences(text: str) -> list[str]:
+    return [s for s in _SENTENCE_RE.split(text.strip()) if s]
+
+
+def severity_mismatches(raw: str, sources: dict[str, dict]) -> list[str]:
+    """A sentence that names severity levels may only cite findings of those levels.
+
+    Catches e.g. "High findings include ... [S16]" where S16 is a medium finding:
+    every citation is a valid id (so the grounding checks pass) but the claim about
+    it is wrong. Sentences that name no severity are not constrained.
+    """
+    out = []
+    for sentence in _sentences(raw):
+        named = set().union(*[_SEVERITY_WORDS[m.lower()] for m in _SEVERITY_RE.findall(sentence)])
+        if not named:
+            continue
+        for m in CITATION_RE.finditer(sentence):
+            for sid in citation_ids(m.group(1)):
+                sev = (sources.get(sid) or {}).get("severity", "").lower()
+                if sev and sev not in named:
+                    out.append(f"{sid} is {sev} but cited in a sentence about {'/'.join(sorted(named))}")
+    return out
+
+
+def severity_number_errors(raw: str, sources: dict[str, dict]) -> list[str]:
+    """Counts like "11 high-severity" / "nine medium" must not exceed the real count
+    for that severity, and "no high" needs zero high findings. (A smaller number
+    may describe a subset, e.g. "four high-severity CORS issues".)"""
+    counts: dict[str, int] = {}
+    for s in sources.values():
+        counts[s["severity"].lower()] = counts.get(s["severity"].lower(), 0) + 1
+    out = []
+    for m in _COUNT_RE.finditer(CITATION_RE.sub("", raw)):
+        word, sev = m.group(1).lower(), m.group(2).lower()
+        sev = "info" if sev.startswith("info") else sev
+        n = int(word) if word.isdigit() else _NUMBER_WORDS[word]
+        real = counts.get(sev, 0)
+        if (n == 0 and real) or n > real:
+            out.append(f"'{m.group(0)}' but SOURCES have {real} {sev}")
+    return out

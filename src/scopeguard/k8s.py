@@ -75,6 +75,9 @@ class K8sConfig:
     cpu: str = "1"
     image_pull_policy: str = "IfNotPresent"
     require_network_policy: bool = True
+    # Prove the policy is enforced (a probe pod must fail to connect out), not just present:
+    # a CNI without NetworkPolicy support (e.g. some kind/Docker Desktop setups) ignores it.
+    verify_network_isolation: bool = True
     request_timeout: int = 20
 
 
@@ -167,9 +170,36 @@ def network_policy_ok(policy: dict) -> tuple[bool, str]:
     return True, "ok"
 
 
+STATUS_TTL_SECONDS = 60
+POLICY_SETTLE_SECONDS = 15  # a just-applied NetworkPolicy can take a few seconds to be enforced
+_STATUS_CACHE: dict[tuple, tuple[float, bool, str]] = {}
+
+
+def _cfg_key(cfg: K8sConfig) -> tuple:
+    return (cfg.kubeconfig, cfg.context, cfg.namespace, cfg.image, cfg.require_network_policy,
+            cfg.verify_network_isolation)
+
+
+def invalidate_status() -> None:
+    _STATUS_CACHE.clear()
+    _PROBE_CACHE.clear()
+
+
 def cluster_status(cfg: K8sConfig) -> tuple[bool, str]:
-    """(usable, reason): kubectl present, cluster reachable, namespace exists, we may run
-    Jobs, attach and read logs, and the default-deny NetworkPolicy is in place."""
+    """(usable, reason), cached for STATUS_TTL_SECONDS so an unreachable cluster does not
+    slow every scan. See :func:`_cluster_status` for what is checked."""
+    key = _cfg_key(cfg)
+    hit = _STATUS_CACHE.get(key)
+    if hit and time.monotonic() - hit[0] < STATUS_TTL_SECONDS:
+        return hit[1], hit[2]
+    ok, why = _cluster_status(cfg)
+    _STATUS_CACHE[key] = (time.monotonic(), ok, why)
+    return ok, why
+
+
+def _cluster_status(cfg: K8sConfig) -> tuple[bool, str]:
+    """kubectl present, cluster reachable, namespace exists, we may run Jobs, attach and
+    read logs, and the default-deny NetworkPolicy is in place and proven enforced."""
     if not _kubectl():
         return False, "kubectl not found"
     base = base_cmd(cfg)
@@ -189,9 +219,85 @@ def cluster_status(cfg: K8sConfig) -> tuple[bool, str]:
             ok, why = network_policy_ok(json.loads(pol.stdout or b"{}"))
             if not ok:
                 return False, why
+            if cfg.verify_network_isolation:
+                ok, why = egress_blocked(cfg)
+                if not ok:
+                    return False, why
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         return False, f"cluster not reachable ({exc.__class__.__name__})"
     return True, "ok"
+
+
+# --------------------------------------------------------------------------- isolation probe
+PROBE_TTL_SECONDS = 600
+_PROBE_CACHE: dict[tuple, tuple[float, bool, str]] = {}
+# Tries the Kubernetes API service (always routable in-cluster, no internet needed) and a
+# public address. Any successful connect means the NetworkPolicy is not enforced.
+# Some CNIs program a NetworkPolicy a moment after a pod starts, so a short-lived pod can get
+# out before enforcement: the probe tries every target from the first instant and again over a
+# few seconds, and ONE successful connection anywhere means "not enforced".
+_PROBE = ("import json,os,socket,time\n"
+          "t=(('api',(os.environ.get('KUBERNETES_SERVICE_HOST','10.96.0.1'),"
+          "int(os.environ.get('KUBERNETES_SERVICE_PORT','443')))),('internet',('1.1.1.1',443)))\n"
+          "r={k:'untested' for k,_ in t}\n"
+          "for d in (0,0.5,1,2):\n"
+          " time.sleep(d)\n"
+          " for k,h in t:\n"
+          "  try:\n   socket.create_connection(h,timeout=3).close(); r[k]='connected'\n"
+          "  except OSError as e:\n   r[k]=r[k] if r[k]=='connected' else 'blocked:'+type(e).__name__\n"
+          "print('SCOPEGUARD_PROBE '+json.dumps(r))")
+
+
+def egress_blocked(cfg: K8sConfig, *, poll: float = 1.0) -> tuple[bool, str]:
+    """Run a throw-away probe Job in the sandbox namespace and check that it cannot open any
+    connection. Cached for PROBE_TTL_SECONDS per cluster/namespace."""
+    key = (cfg.kubeconfig, cfg.context, cfg.namespace, cfg.image)
+    hit = _PROBE_CACHE.get(key)
+    if hit and time.monotonic() - hit[0] < PROBE_TTL_SECONDS:
+        return hit[1], hit[2]
+    import uuid
+
+    name = f"scopeguard-netprobe-{uuid.uuid4().hex[:8]}"
+    base = base_cmd(cfg)
+    manifest = job_manifest(name=name, cfg=cfg, memory_mb=64, timeout=60, args=[],
+                            configmap=ensure_analyzer_configmap(cfg), session_id="netprobe")
+    c = manifest["spec"]["template"]["spec"]["containers"][0]
+    c.update(command=["python", "-I", "-c", _PROBE], args=[], stdin=False, stdinOnce=False)
+    result: tuple[bool, str]
+    try:
+        made = _run([*base, "create", "-f", "-"], input_=json.dumps(manifest).encode(), timeout=cfg.request_timeout + 10)
+        if made.returncode != 0:
+            return False, f"network isolation probe could not start: {made.stderr.decode('utf-8', 'replace')[-200:]}"
+        deadline = time.monotonic() + 90
+        pod: dict = {}
+        while time.monotonic() < deadline:
+            pod = _job_pod(cfg, name)
+            problem = _waiting_problem(pod)
+            if problem:
+                return False, f"network isolation probe could not start ({problem})"
+            if _terminated(pod) is not None:
+                break
+            time.sleep(poll)
+        pod_name = (pod.get("metadata") or {}).get("name", "")
+        logs = _run([*base, "logs", f"pod/{pod_name}", "-c", CONTAINER], timeout=cfg.request_timeout + 10)
+        line = next((x for x in logs.stdout.decode("utf-8", "replace").splitlines()
+                     if x.startswith("SCOPEGUARD_PROBE ")), "")
+        try:
+            probe = json.loads(line.split(" ", 1)[1]) if line else {}
+        except ValueError:
+            probe = {}
+        if not probe:
+            result = (False, "network isolation probe gave no result; refusing to trust the NetworkPolicy")
+        elif any(v == "connected" for v in probe.values()):
+            reached = ", ".join(k for k, v in probe.items() if v == "connected")
+            result = (False, (f"NetworkPolicy {NETWORK_POLICY} is NOT enforced: a sandbox pod reached {reached}. "
+                             "Use a CNI that enforces NetworkPolicy (e.g. Calico or Cilium)"))
+        else:
+            result = (True, "ok")
+    finally:
+        delete_job(cfg, name)
+    _PROBE_CACHE[key] = (time.monotonic(), *result)
+    return result
 
 
 def _labels(session_id: str | None) -> dict:
@@ -373,3 +479,117 @@ def run_job(stdin: bytes, *, cfg: K8sConfig, memory_mb: int, timeout: int, args:
         raise K8sError(f"kubectl failed: {exc.__class__.__name__}: {exc}") from exc
     finally:
         delete_job(cfg, name)
+
+
+# --------------------------------------------------------------------------- bring-up
+def _api_ready(cfg: K8sConfig, timeout: int = 5) -> bool:
+    try:
+        r = _run([*base_cmd(cfg)[:-2], "get", "--raw", "/readyz", f"--request-timeout={timeout}s"],
+                 timeout=timeout + 5)
+        return r.returncode == 0 and b"ok" in (r.stdout or b"")
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _start_kind_node(cluster: str, wait_seconds: int, cfg: K8sConfig) -> str:
+    """Start the stopped node container of a local kind cluster (on the host only)."""
+    node = f"{cluster}-control-plane"
+    docker = shutil.which("docker")
+    if not docker:
+        return "docker CLI not found (cannot start the kind node)"
+    if os.environ.get("KUBERNETES_SERVICE_HOST") or os.path.exists("/.dockerenv"):
+        return "running inside a container: the local kind node is not started from here"
+    try:
+        state = subprocess.run([docker, "inspect", "-f", "{{.State.Running}}", node], capture_output=True,
+                               text=True, timeout=20, check=False)
+        if state.returncode != 0:
+            return f"no kind node container {node!r} (create one: kind create cluster --name {cluster})"
+        if state.stdout.strip() != "true":
+            started = subprocess.run([docker, "start", node], capture_output=True, text=True, timeout=60,
+                                     check=False)
+            if started.returncode != 0:
+                return f"could not start {node}: {started.stderr.strip()[-200:]}"
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"docker failed: {exc.__class__.__name__}"
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        if _api_ready(cfg):
+            return "started"
+        time.sleep(2)
+    return f"{node} started but the API server was not ready within {wait_seconds}s"
+
+
+def bootstrap(cfg: K8sConfig, *, kind_cluster: str = "", manifests: str | None = None,
+              auto_start: bool = True, auto_apply: bool = True, wait_seconds: int = 120) -> dict:
+    """Bring the sandbox up and report what happened. Never raises.
+
+    1. API server unreachable + ``kind_cluster`` + ``auto_start``: start its stopped node container.
+    2. Sandbox namespace missing + ``auto_apply``: ``kubectl apply -f <manifests>``.
+    3. Ship / verify the analyzer ConfigMap.
+    4. Full readiness check (RBAC, NetworkPolicy, isolation probe), cache refreshed.
+    ``ready`` false means scans use the Python process sandbox (unless Kubernetes is required)."""
+    actions: list[str] = []
+    if not _kubectl():
+        return {"ready": False, "reason": "kubectl not found", "actions": actions}
+    try:
+        if not _api_ready(cfg):
+            if auto_start and kind_cluster:
+                outcome = _start_kind_node(kind_cluster, wait_seconds, cfg)
+                actions.append(f"kind node {kind_cluster}-control-plane: {outcome}")
+                if outcome != "started":
+                    return {"ready": False, "reason": f"Kubernetes API not reachable ({outcome})", "actions": actions}
+            else:
+                return {"ready": False, "reason": "Kubernetes API not reachable", "actions": actions}
+        ns = _run([*base_cmd(cfg)[:-2], "get", "namespace", cfg.namespace, "-o", "name"],
+                  timeout=cfg.request_timeout + 5)
+        if ns.returncode != 0:
+            if auto_apply and manifests and os.path.isfile(manifests):
+                applied = _run([*base_cmd(cfg)[:-2], "apply", "-f", manifests], timeout=cfg.request_timeout + 60)
+                actions.append("applied " + os.path.basename(manifests) if applied.returncode == 0 else
+                               f"apply failed: {applied.stderr.decode('utf-8', 'replace').strip()[-200:]}")
+            else:
+                return {"ready": False, "reason": f"namespace {cfg.namespace} missing (apply k8s/sandbox.yaml)",
+                        "actions": actions}
+        try:
+            actions.append(f"analyzer ConfigMap {ensure_analyzer_configmap(cfg)} ready")
+        except K8sError as exc:
+            return {"ready": False, "reason": str(exc), "actions": actions}
+        invalidate_status()
+        ok, why = cluster_status(cfg)
+        if not ok and "NOT enforced" in why and any(a.startswith("applied ") for a in actions):
+            # A NetworkPolicy created seconds ago may not be programmed yet: probe once more.
+            time.sleep(POLICY_SETTLE_SECONDS)
+            invalidate_status()
+            ok, why = cluster_status(cfg)
+            actions.append("re-probed after the NetworkPolicy settled")
+        actions.append("isolation probe passed" if ok else "readiness check failed")
+        return {"ready": ok, "reason": why, "actions": actions}
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"ready": False, "reason": f"kubectl failed ({exc.__class__.__name__})", "actions": actions}
+
+
+def main(argv: list[str] | None = None) -> int:
+    import argparse
+
+    ap = argparse.ArgumentParser(prog="python -m scopeguard.k8s",
+                                 description="Kubernetes Job sandbox: status or bring-up")
+    ap.add_argument("--bootstrap", action="store_true", help="start the kind node / apply manifests / probe")
+    ap.add_argument("--kind-cluster", default="scopeguard")
+    ap.add_argument("--manifests", default="k8s/sandbox.yaml")
+    ap.add_argument("--namespace", default=DEFAULT_NAMESPACE)
+    ap.add_argument("--image", default=DEFAULT_IMAGE)
+    a = ap.parse_args(argv)
+    cfg = K8sConfig(namespace=a.namespace, image=a.image)
+    if a.bootstrap:
+        res = bootstrap(cfg, kind_cluster=a.kind_cluster, manifests=a.manifests)
+        for act in res["actions"]:
+            print(" -", act)
+    else:
+        ok, why = cluster_status(cfg)
+        res = {"ready": ok, "reason": why}
+    print(("READY: " if res["ready"] else "NOT READY (scans use the Python process sandbox): ") + res["reason"])
+    return 0 if res["ready"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
