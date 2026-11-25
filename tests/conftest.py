@@ -34,6 +34,9 @@ os.environ.setdefault("JWT_PRIVATE_KEY_PATH", str(_TMP_ROOT / "keys" / "jwt_priv
 os.environ.setdefault("JWT_PUBLIC_KEY_PATH", str(_TMP_ROOT / "keys" / "jwt_public.pem"))
 os.environ.setdefault("AUTH_CLIENTS_FILE", str(_TMP_ROOT / "keys" / "clients.json"))
 os.environ["AUTH_CLIENT_SECRET"] = ""
+os.environ["CODE_UPLOAD_DIR"] = str(_TMP_ROOT / "uploads")
+# Code checks and uploads use the process sandbox in tests; never a real cluster.
+os.environ["SANDBOX_BACKEND"] = "process"
 os.environ.setdefault("SQUID_CONF_PATH", str(_TMP_ROOT / "squid" / "squid.conf"))
 os.environ.setdefault("SQUID_ACL_TARGET_FILE", str(_TMP_ROOT / "squid" / "allowed_target.acl"))
 
@@ -89,12 +92,13 @@ def _offline_dns(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_docker_sweep(monkeypatch):
-    """The server's startup sweep for leftover sandbox containers must not
-    call a real Docker daemon from tests."""
-    from scopeguard import container
+def _no_kubectl(monkeypatch):
+    """kubectl may be installed on the test machine: tests never reach a real cluster
+    (k8s tests fake ``scopeguard.k8s._run`` / ``cluster_status`` themselves)."""
+    from scopeguard import k8s
 
-    monkeypatch.setattr(container, "remove_leftover_containers", lambda *a, **k: [])
+    monkeypatch.setattr(k8s, "remove_leftover_jobs", lambda *a, **k: [])
+    monkeypatch.setattr(k8s, "cluster_status", lambda cfg: (False, "no cluster in tests"))
 
 
 @pytest.fixture(autouse=True)

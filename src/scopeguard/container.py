@@ -1,17 +1,15 @@
-"""Run ``scopeguard.codecheck`` in a locked-down Docker container. Stdlib only.
+"""Local process sandbox for ``scopeguard.codecheck``, and helpers shared with the
+Kubernetes Job sandbox (scopeguard.k8s). Stdlib only. No Docker is ever used.
 
-Container settings (see :func:`docker_command`):
+The isolated sandbox is a Kubernetes Job (scopeguard.k8s / scopeguard.codescan). This
+module is the local fallback the operator can choose (``SANDBOX_BACKEND=process``) or
+allow (``SANDBOX_REQUIRE_KUBERNETES=false``): an isolated child interpreter (``-I``)
+with a scrubbed environment and throwaway cwd, a hard memory cap (POSIX rlimits /
+Windows Job Object), and the analyzer's own audit hook (no network, DNS, processes or
+writes; reads only under the inputs).
 
-* ``--network none``             no network at all: nothing can be downloaded or searched
-* ``--read-only`` + inputs mounted read-only, small ``noexec`` tmpfs for /tmp
-* ``--cap-drop ALL``, ``no-new-privileges``, non-root user (65534 = nobody)
-* ``--pids-limit``, ``--memory`` (no swap), ``--cpus``, wall-clock timeout (container killed)
-* the analyzer's own audit hook records any attempted network/DNS/process/write
-
-The image (default ``python:3.12-slim``) is never pulled during a scan: run
-``python -m scopeguard.container --setup`` once. When Docker or the image is
-missing, the same analyzer runs in the process sandbox and the result says why
-(``sandbox.fallback_reason``) so the caller can raise a red flag.
+Memory is sized from the content (x5, x10 after an out-of-memory crash) and the retry
+resumes from the checkpoint lines the crashed run printed (scopeguard.checkpoint).
 """
 from __future__ import annotations
 
@@ -19,28 +17,38 @@ import json
 import os
 import re
 import shutil
-import subprocess
-import sys
 import tempfile
-import uuid
 from pathlib import Path
 
+from scopeguard.checkpoint import CheckpointState
+from scopeguard.limits import (
+    MEMORY_CEILING_MB,
+    MEMORY_MULTIPLIER,
+    RETRY_MEMORY_MULTIPLIER,
+    RunResult,
+    directory_content_bytes,
+    looks_oom,
+    memory_for_content,
+    oom_message,
+    run_limited,
+    sandbox_python,
+)
+
 SRC_DIR = str(Path(__file__).resolve().parent.parent)  # folder that contains scopeguard/
-CONTAINER_APP = "/app"
-CONTAINER_SOURCE = "/input/source"
-CONTAINER_SITE = "/input/site"
-DEFAULT_IMAGE = "python:3.12-slim"
-# Every sandbox container carries this label, so leftovers can be found and
-# removed, and cleanup never touches containers that aren't ours.
-CONTAINER_LABEL = "scopeguard.codecheck=1"
-SESSION_LABEL = "scopeguard.session"
-# "<host>:<pid>" of the server process that started the container. The startup sweep
-# removes a container only when that process is gone, so a second server (another
-# console, the chatbot's private scanner, a test client) never kills a running scan.
-OWNER_LABEL = "scopeguard.owner"
+# Same rule as the API's session ids (pentest_agent.schemas.SESSION_ID_RE).
+_SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+_BOOT = ("import sys;sys.path.insert(0,{app!r});"
+         "from scopeguard.codecheck import main;raise SystemExit(main())")
 
 
+class CodecheckError(RuntimeError):
+    pass
+
+
+# --------------------------------------------------------------------------- ownership
 def owner_id() -> str:
+    """``<host>:<pid>`` of this server process, stored on every sandbox Job so the startup
+    sweep removes only Jobs whose server is gone (never another server's running scan)."""
     import socket
 
     return f"{socket.gethostname()}:{os.getpid()}"
@@ -74,9 +82,8 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _orphaned(owner: str) -> bool:
-    """True if the container's owning server process is gone (or the label is missing,
-    i.e. an older version made it). Containers owned by another host are kept: we
-    cannot see that host's processes."""
+    """True if the owning server process is gone (or the owner is missing). Jobs owned by
+    another host are kept: we cannot see that host's processes."""
     import socket
 
     host, _, pid = (owner or "").rpartition(":")
@@ -85,136 +92,13 @@ def _orphaned(owner: str) -> bool:
     if host != socket.gethostname():
         return False
     return int(pid) != os.getpid() and not _pid_alive(int(pid))
-CONTAINER_PREFIX = "scopeguard-"
-# Same rule as the API's session ids (pentest_agent.schemas.SESSION_ID_RE), which
-# is also a valid Docker container name.
-_SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-_BOOT = ("import sys;sys.path.insert(0,{app!r});"
-         "from scopeguard.codecheck import main;raise SystemExit(main())")
 
 
-class CodecheckError(RuntimeError):
-    pass
-
-
-def _docker() -> str | None:
-    return shutil.which("docker")
-
-
-def docker_status(image: str = DEFAULT_IMAGE, timeout: float = 8.0) -> tuple[bool, str]:
-    """(usable, reason). Usable means the daemon answers and the image is present."""
-    exe = _docker()
-    if not exe:
-        return False, "docker CLI not found"
-    try:
-        info = subprocess.run([exe, "info", "--format", "{{.OSType}}"], check=False, capture_output=True, text=True,
-                              timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return False, f"docker daemon not reachable ({exc.__class__.__name__})"
-    if info.returncode != 0:
-        return False, "docker daemon not running"
-    if info.stdout.strip() != "linux":
-        return False, f"docker engine is {info.stdout.strip() or 'unknown'}, need linux containers"
-    img = subprocess.run([exe, "image", "inspect", image], check=False, capture_output=True, text=True, timeout=timeout)
-    if img.returncode != 0:
-        return False, f"image {image} not present (run: python -m scopeguard.container --setup)"
-    return True, "ok"
-
-
-def container_name(session_id: str | None) -> str:
-    """``scopeguard-<session_id>``, so a container maps straight to its scan.
-    Without a usable session id (direct CLI use): ``scopeguard-adhoc-<random>``."""
-    if session_id and _SESSION_RE.fullmatch(session_id) and ".." not in session_id:
-        return f"{CONTAINER_PREFIX}{session_id}"
-    return f"{CONTAINER_PREFIX}adhoc-{uuid.uuid4().hex[:12]}"
-
-
-def remove_container(name: str, timeout: float = 30.0) -> bool:
-    """Force-remove the sandbox container called ``name`` (stopping it if it
-    still runs). Only a container carrying CONTAINER_LABEL is touched, never an
-    unrelated one with the same name. Never raises; True if one was removed."""
-    exe = _docker()
-    if not exe:
-        return False
-    try:
-        listed = subprocess.run([exe, "ps", "-aq", "--filter", f"label={CONTAINER_LABEL}",
-                                 # names are [A-Za-z0-9._-]: only "." needs escaping
-                                 "--filter", f"name=^/{name.replace('.', chr(92) + '.')}$"],
-                                check=False, capture_output=True, text=True, timeout=timeout)
-        ids = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
-        if listed.returncode != 0 or not ids:
-            return False
-        subprocess.run([exe, "rm", "-f", *ids], check=False, capture_output=True, timeout=timeout)
-        return True
-    except (OSError, subprocess.TimeoutExpired):
-        return False
-
-
-def remove_leftover_containers(timeout: float = 30.0) -> list[str]:
-    """Force-remove sandbox containers (labelled ``CONTAINER_LABEL``) left behind by a
-    server that is gone, e.g. killed mid-scan. Containers of a server that is still
-    running (``OWNER_LABEL``) are kept. Returns the removed container ids."""
-    exe = _docker()
-    if not exe:
-        return []
-    try:
-        listed = subprocess.run([exe, "ps", "-a", "--filter", f"label={CONTAINER_LABEL}",
-                                 "--format", "{{.ID}}\t{{.Label \"" + OWNER_LABEL + "\"}}"],
-                                check=False, capture_output=True, text=True, timeout=timeout)
-    except (OSError, subprocess.TimeoutExpired):
-        return []
-    ids = []
-    if listed.returncode == 0:
-        for line in listed.stdout.splitlines():
-            cid, _, owner = line.strip().partition("\t")
-            if cid and _orphaned(owner.strip()):
-                ids.append(cid)
-    if ids:
-        try:
-            subprocess.run([exe, "rm", "-f", *ids], check=False, capture_output=True, timeout=timeout)
-        except (OSError, subprocess.TimeoutExpired):
-            return []
-    return ids
-
-
-def docker_command(*, name: str, image: str, source_dir: str | None, site_dir: str | None,
-                   allowed_hosts: list[str], memory_mb: int = 512, cpus: float = 1.0,
-                   pids: int = 64, extra_args: list[str] | None = None,
-                   session_id: str | None = None) -> list[str]:
-    """The exact ``docker run`` command line (kept separate so tests can assert it)."""
-    cmd = [_docker() or "docker", "run", "--rm", "--name", name,
-           "--label", CONTAINER_LABEL,
-           "--label", f"{SESSION_LABEL}={session_id or ''}",
-           "--label", f"{OWNER_LABEL}={owner_id()}",
-           "--network", "none",
-           "--read-only",
-           "--cap-drop", "ALL",
-           "--security-opt", "no-new-privileges",
-           "--user", "65534:65534",
-           "--pids-limit", str(pids),
-           "--memory", f"{memory_mb}m", "--memory-swap", f"{memory_mb}m",
-           "--cpus", str(cpus),
-           "--ipc", "none",
-           "--tmpfs", "/tmp:rw,noexec,nosuid,nodev,size=16m",
-           "--workdir", "/tmp",
-           "--env", "PYTHONDONTWRITEBYTECODE=1", "--env", "PYTHONIOENCODING=utf-8",
-           "--mount", f"type=bind,src={os.path.join(SRC_DIR, 'scopeguard')},dst={CONTAINER_APP}/scopeguard,readonly"]
-    if source_dir:
-        cmd += ["--mount", f"type=bind,src={source_dir},dst={CONTAINER_SOURCE},readonly"]
-    if site_dir:
-        cmd += ["--mount", f"type=bind,src={site_dir},dst={CONTAINER_SITE},readonly"]
-    cmd += [image, "python", "-I", "-B", "-c", _BOOT.format(app=CONTAINER_APP), "--sandbox-kind", "docker"]
-    if source_dir:
-        cmd += ["--source", CONTAINER_SOURCE]
-    if site_dir:
-        cmd += ["--site", CONTAINER_SITE]
-    for h in allowed_hosts:
-        cmd += ["--allowed-host", h]
-    return cmd + list(extra_args or [])
-
-
+# --------------------------------------------------------------------------- process sandbox
 def _parse(stdout: str, stderr: str, returncode: int) -> dict:
     if returncode != 0:
+        if looks_oom(returncode, stderr):
+            raise CodecheckError(f"analyzer {oom_message(None)} (exit {returncode})")
         raise CodecheckError(f"analyzer exited {returncode}: {stderr.strip()[-500:]}")
     try:
         out = json.loads(stdout)
@@ -225,45 +109,14 @@ def _parse(stdout: str, stderr: str, returncode: int) -> dict:
     return out
 
 
-def run_in_docker(*, source_dir: str | None, site_dir: str | None, allowed_hosts: list[str],
-                  image: str = DEFAULT_IMAGE, timeout: int = 180, memory_mb: int = 512,
-                  extra_args: list[str] | None = None, session_id: str | None = None) -> dict:
-    name = container_name(session_id)
-    # A container of the same session left by a killed earlier attempt would
-    # block the name: remove it first (only ours, see remove_container).
-    remove_container(name)
-    cmd = docker_command(name=name, image=image, source_dir=source_dir, site_dir=site_dir,
-                         allowed_hosts=allowed_hosts, memory_mb=memory_mb, extra_args=extra_args,
-                         session_id=session_id)
-    # ``--rm`` deletes the container when it exits normally. If we leave early
-    # (timeout, Ctrl+C, server shutdown, any error), killing the docker CLI
-    # would NOT stop the container, so it is force-removed here as well.
-    finished = False
-    try:
-        proc = subprocess.run(cmd, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              timeout=timeout)
-        finished = True
-    except subprocess.TimeoutExpired as exc:
-        raise CodecheckError(f"sandbox container exceeded {timeout}s and was killed") from exc
-    finally:
-        if not finished:
-            remove_container(name)
-    out = _parse(proc.stdout, proc.stderr, proc.returncode)
-    out["sandbox"] = {"kind": "docker", "image": image, "network": "none", "read_only": True,
-                      "user": "65534", "memory_mb": memory_mb, "guard": "audit-hook",
-                      "container": name, "removed_after_run": True}
-    return out
-
-
-def run_in_process(*, source_dir: str | None, site_dir: str | None, allowed_hosts: list[str],
-                   timeout: int = 180, extra_args: list[str] | None = None) -> dict:
-    """Fallback: isolated child interpreter, scrubbed env, throwaway cwd, audit hook."""
+def _process_attempt(*, source_dir, site_dir, allowed_hosts, timeout, memory_mb, extra_args) -> RunResult:
+    """Isolated child interpreter, scrubbed env, throwaway cwd, audit hook, hard memory cap."""
     work = tempfile.mkdtemp(prefix="scopeguard-codecheck-")
     env = {"PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1", "PATH": os.environ.get("PATH", "")}
     for k in ("SYSTEMROOT", "SystemRoot", "TEMP", "TMP"):
         if k in os.environ:
             env[k] = os.environ[k]
-    cmd = [sys.executable, "-I", "-B", "-c", _BOOT.format(app=SRC_DIR), "--sandbox-kind", "process"]
+    cmd = [sandbox_python(), "-I", "-B", "-c", _BOOT.format(app=SRC_DIR), "--sandbox-kind", "process"]
     if source_dir:
         cmd += ["--source", source_dir]
     if site_dir:
@@ -272,62 +125,114 @@ def run_in_process(*, source_dir: str | None, site_dir: str | None, allowed_host
         cmd += ["--allowed-host", h]
     cmd += list(extra_args or [])
     try:
-        proc = subprocess.run(cmd, check=False, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                              timeout=timeout, cwd=work, env=env)
-    except subprocess.TimeoutExpired as exc:
-        raise CodecheckError(f"process sandbox exceeded {timeout}s and was killed") from exc
+        return run_limited(cmd, cwd=work, env=env, timeout=timeout, memory_mb=memory_mb)
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    out = _parse(proc.stdout, proc.stderr, proc.returncode)
-    out["sandbox"] = {"kind": "process", "network": "blocked by audit hook", "guard": "audit-hook"}
+
+
+def run_in_process(*, source_dir: str | None, site_dir: str | None, allowed_hosts: list[str],
+                   timeout: int = 180, extra_args: list[str] | None = None, memory_mb: int = 512) -> dict:
+    """One analyzer run in the process sandbox (no retry)."""
+    run = _process_attempt(source_dir=source_dir, site_dir=site_dir, allowed_hosts=allowed_hosts,
+                           timeout=timeout, memory_mb=memory_mb, extra_args=extra_args)
+    if run.timed_out:
+        raise CodecheckError(f"process sandbox exceeded {timeout}s and was killed")
+    out = _parse(run.stdout, run.stderr, run.returncode)
+    out["sandbox"] = process_info(memory_mb)
     return out
+
+
+def process_info(memory_mb: int) -> dict:
+    return {"kind": "process", "network": "blocked by audit hook", "guard": "audit-hook", "memory_mb": memory_mb,
+            "memory_limit": "rlimit" if os.name == "posix" else "job object"}
+
+
+def content_bytes(source_dir: str | None, site_dir: str | None) -> int:
+    """Bytes the analyzer will read: the memory limit is sized from this."""
+    from scopeguard.codecheck import MAX_FILE_BYTES, SKIP_DIRS
+
+    return (directory_content_bytes(source_dir, skip_dirs=SKIP_DIRS, max_file_bytes=MAX_FILE_BYTES)
+            + directory_content_bytes(site_dir, max_file_bytes=MAX_FILE_BYTES))
+
+
+def inputs_fingerprint(source_dir: str | None, site_dir: str | None) -> str:
+    """Changes when any input file is added, removed, resized or modified (checkpoints of
+    other inputs are never resumed)."""
+    import hashlib
+
+    h = hashlib.sha256()
+    for label, root in (("source", source_dir), ("site", site_dir)):
+        if not root or not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            dirnames.sort()
+            for name in sorted(filenames):
+                path = os.path.join(dirpath, name)
+                try:
+                    st = os.stat(path, follow_symlinks=False)
+                except OSError:
+                    continue
+                rel = os.path.relpath(path, root).replace(os.sep, "/")
+                h.update(f"{label}:{rel}:{st.st_size}:{st.st_mtime_ns}\n".encode())
+    return h.hexdigest()
 
 
 def run_codecheck(*, source_dir: str | None, site_dir: str | None, allowed_hosts: list[str],
-                  use_docker: bool = True, image: str = DEFAULT_IMAGE, timeout: int = 180,
-                  memory_mb: int = 512, extra_args: list[str] | None = None,
-                  session_id: str | None = None) -> dict:
-    """Docker first; process sandbox when Docker is off or unavailable.
+                  timeout: int = 180, memory_mb: int = 512, extra_args: list[str] | None = None,
+                  memory_multiplier: int = MEMORY_MULTIPLIER, retry_multiplier: int = RETRY_MEMORY_MULTIPLIER,
+                  ceiling_mb: int = MEMORY_CEILING_MB, checkpoint_path: str | None = None) -> dict:
+    """The code check in the process sandbox, sized from the content.
 
-    ``sandbox.fallback_reason`` (which callers turn into a red flag) is set only when
-    Docker was wanted but could not be used. Turning Docker off on purpose is recorded
-    as ``sandbox.docker_disabled`` instead.
+    Memory = ``memory_multiplier`` (5) x the bytes the analyzer reads, never below
+    ``memory_mb`` nor above ``ceiling_mb``. Out of memory: one retry with
+    ``retry_multiplier`` (10) x that resumes from the checkpoint lines the crashed run
+    printed (files already analysed are skipped). With ``checkpoint_path`` the state is
+    also kept on disk, so a later call resumes too.
     """
-    reason = ""
-    if use_docker:
-        ok, reason = docker_status(image)
-        if ok:
-            return run_in_docker(source_dir=source_dir, site_dir=site_dir, allowed_hosts=allowed_hosts,
-                                 image=image, timeout=timeout, memory_mb=memory_mb, extra_args=extra_args,
-                                 session_id=session_id)
-    out = run_in_process(source_dir=source_dir, site_dir=site_dir, allowed_hosts=allowed_hosts,
-                         timeout=timeout, extra_args=extra_args)
-    if use_docker:
-        out["sandbox"]["fallback_reason"] = f"Docker sandbox unavailable: {reason}"
-    else:
-        out["sandbox"]["docker_disabled"] = True
+    content = content_bytes(source_dir, site_dir)
+    state = CheckpointState.load(checkpoint_path, inputs_fingerprint(source_dir, site_dir))
+    resumed_from = len(state.done)
+    plan = [retry_multiplier] if state.last_attempt_oom else [memory_multiplier, retry_multiplier]
+    resume_dir = tempfile.mkdtemp(prefix="scopeguard-resume-")
+    final = None
+    try:
+        for mult in plan:
+            mem = memory_for_content(content, mult, floor_mb=memory_mb, ceiling_mb=ceiling_mb)
+            args = ["--stream", *list(extra_args or [])]
+            if state.done:
+                resume_file = os.path.join(resume_dir, "resume.json")
+                with open(resume_file, "w", encoding="utf-8") as fh:
+                    json.dump(state.resume_payload(), fh)
+                args += ["--resume-file", resume_file]
+            state.begin_attempt()
+            run = _process_attempt(source_dir=source_dir, site_dir=site_dir, allowed_hosts=allowed_hosts,
+                                   timeout=timeout, memory_mb=mem, extra_args=args)
+            final = state.absorb(run.stdout)
+            attempt = {"memory_mb": mem, "multiplier": mult, "exit_code": run.returncode,
+                       "files_done_total": len(state.done)}
+            if final is not None and run.returncode == 0:
+                state.attempts.append({**attempt, "outcome": "ok"})
+                break
+            final = None
+            outcome = "timeout" if run.timed_out else "oom" if run.oom else "error"
+            state.attempts.append({**attempt, "outcome": outcome})
+            if checkpoint_path:
+                state.save(checkpoint_path)
+            if outcome == "timeout":
+                raise CodecheckError(f"process sandbox exceeded {timeout}s and was killed")
+            if outcome == "error":
+                raise CodecheckError(f"analyzer exited {run.returncode}: {run.stderr.strip()[-500:]}")
+    finally:
+        shutil.rmtree(resume_dir, ignore_errors=True)
+    if final is None:
+        raise CodecheckError(f"analyzer {oom_message(state.attempts[-1]['memory_mb'])} even at "
+                             f"{retry_multiplier}x the content size; {len(state.done)} file(s) are "
+                             "checkpointed")
+    out = state.merged(final)
+    mem = state.attempts[-1]["memory_mb"]
+    out["sandbox"] = process_info(mem)
+    out["sandbox"].update({"content_bytes": content, "attempts": state.attempts, "resumed_files": resumed_from,
+                           "oom_retries": sum(1 for a in state.attempts if a["outcome"] == "oom")})
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        os.remove(checkpoint_path)
     return out
-
-
-def main(argv: list[str] | None = None) -> int:
-    import argparse
-
-    ap = argparse.ArgumentParser(prog="python -m scopeguard.container",
-                                 description="Docker sandbox for backend code / website content checks")
-    ap.add_argument("--setup", action="store_true", help="pull the sandbox image once (not done during scans)")
-    ap.add_argument("--status", action="store_true", help="show whether the Docker sandbox can be used")
-    ap.add_argument("--image", default=os.environ.get("CODECHECK_IMAGE") or DEFAULT_IMAGE)
-    a = ap.parse_args(argv)
-    if a.setup:
-        exe = _docker()
-        if not exe:
-            print("docker CLI not found")
-            return 1
-        return subprocess.run([exe, "pull", a.image], check=False).returncode
-    ok, reason = docker_status(a.image)
-    print(f"Docker sandbox: {'ready' if ok else 'NOT available'} ({reason}); image {a.image}")
-    return 0 if ok else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())

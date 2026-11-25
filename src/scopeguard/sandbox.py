@@ -6,40 +6,27 @@ Layers (all native Python/OS, no containers):
   2. Throwaway working directory; writes anywhere else are blocked.
   3. Audit hook: no subprocess/exec/fork, egress only to allow-listed IPs/ports,
      DNS only for allow-listed names.
-  4. POSIX rlimits: CPU time, address space, file size, open files, processes.
+  4. Hard memory cap: POSIX rlimits (CPU, address space, file size, open files),
+     Windows a Job Object (committed memory, no child processes) - scopeguard.limits.
   5. Hard wall-clock timeout; whole process group is killed on expiry.
   6. In-engine ScopedClient: scope check on every request, budget, size caps.
-On Windows layer 4 is unavailable (no `resource` module); the rest still apply.
+Out of memory ends with a clear SandboxError (the worker exits limits.OOM_EXIT_CODE).
 """
 from __future__ import annotations
 
 import json
 import os
 import shutil
-import subprocess
-import sys
 import tempfile
 from pathlib import Path
+
+from scopeguard.limits import oom_message, run_limited, sandbox_python
 
 SRC_DIR = str(Path(__file__).resolve().parent.parent)
 
 
 class SandboxError(RuntimeError):
     pass
-
-
-def _limits(cpu_seconds: int, mem_bytes: int):
-    def apply():  # runs in the child between fork and exec (POSIX only)
-        import resource
-        for name, val in (("RLIMIT_CPU", cpu_seconds), ("RLIMIT_AS", mem_bytes),
-                          ("RLIMIT_FSIZE", 20 * 1024 * 1024), ("RLIMIT_NOFILE", 256),
-                          ("RLIMIT_CORE", 0)):
-            try:
-                resource.setrlimit(getattr(resource, name), (val, val))
-            except (ValueError, OSError):
-                pass
-        os.setsid()
-    return apply
 
 
 def run_sandboxed_scan(scan_args: dict, wall_timeout: int = 900, memory_mb: int = 1024,
@@ -56,23 +43,20 @@ def run_sandboxed_scan(scan_args: dict, wall_timeout: int = 900, memory_mb: int 
         if k in os.environ:
             env[k] = os.environ[k]
     boot = f"import sys;sys.path.insert(0,{SRC_DIR!r});from scopeguard.worker import main;main()"
-    kwargs = {}
-    if os.name == "posix":
-        kwargs["preexec_fn"] = _limits(wall_timeout + 30, memory_mb * 1024 * 1024)
-    else:
-        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     try:
-        proc = subprocess.run(
-            [sys.executable, "-I", "-c", boot],
-            input=json.dumps({"scan": scan_args, "sandbox_dir": sandbox_dir,
-                              "block_private": bool(block_private)}),
-            capture_output=True, text=True, timeout=wall_timeout, cwd=sandbox_dir, env=env,
-            check=False, **kwargs)  # returncode is checked below
-    except subprocess.TimeoutExpired as exc:
-        raise SandboxError(f"scan exceeded wall-clock limit of {wall_timeout}s") from exc
+        # Hard memory cap on every OS (POSIX rlimits / Windows Job Object), bounded output.
+        proc = run_limited([sandbox_python(), "-I", "-c", boot],
+                           stdin=json.dumps({"scan": scan_args, "sandbox_dir": sandbox_dir,
+                                             "block_private": bool(block_private)}).encode(),
+                           cwd=sandbox_dir, env=env, timeout=wall_timeout, memory_mb=memory_mb,
+                           cpu_seconds=wall_timeout + 30)
     finally:
         shutil.rmtree(sandbox_dir, ignore_errors=True)
-
+    if proc.timed_out:
+        raise SandboxError(f"scan exceeded wall-clock limit of {wall_timeout}s")
+    if proc.oom:
+        raise SandboxError(f"sandbox worker {oom_message(memory_mb)}; lower the profile's page/request "
+                           "budget or raise the limit")
     if proc.returncode != 0:
         raise SandboxError(f"sandbox worker exited {proc.returncode}: {proc.stderr.strip()[-600:]}")
     try:

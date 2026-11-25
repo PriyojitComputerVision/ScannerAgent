@@ -2,7 +2,8 @@
 
 Autonomous, guard-railed **web security scanner agent**. Orchestrated by LangGraph, optional Groq LLM,
 exposed over a WebSocket. **No OWASP ZAP, no Java**: all scanning is pure Python and runs in a
-Docker-free sandbox (a Dockerfile is provided only to package test -> drift check -> server).
+Docker-free sandbox; code checks and uploaded code run in Kubernetes Jobs (a Dockerfile is provided only
+to package test -> drift check -> server).
 
 > Authorization is mandatory. Only scan systems you own or are explicitly authorized to test.
 
@@ -19,8 +20,8 @@ then the server runs the LangGraph pipeline `validate → recon → auth → [au
 and streams progress back. `auth_challenge` runs only when the target needs a human for SSO or MFA
 (see [Sign-in with SSO / MFA](#sign-in-with-sso--mfa-human-in-the-loop)); every route, including
 refused and safety-stopped runs, ends in `audit` (see [Audit log](#audit-log)). `sast` runs only when the sandbox check is off (`SANDBOX_CHECK_ENABLED=false`):
-otherwise `sandbox_check` applies the same JavaScript rules inside its Docker container
-(`scopeguard-<session_id>`, removed after the run). Orange lines mark the only traffic to the target website (in scope only).
+otherwise `sandbox_check` applies the same JavaScript rules inside its Kubernetes Job
+(`scopeguard-job-<session_id>`, deleted after the run). Orange lines mark the only traffic to the target website (in scope only).
 Only `plan_probes` and `summarize` call the LLM, and both have offline fallbacks. Reports,
 SQLite checkpoints (AES-encrypted with `CHECKPOINT_ENCRYPTION_KEY`) and the audit log are written under `data/`.
 The diagrams are rendered from `docs/src/*.html` with `uv run python scripts/render_docs.py`. The same scan engine (`src/scopeguard/`) also runs
@@ -96,7 +97,7 @@ server runs with `--no-browser --no-target`.
 `uv run pentest-agent` also starts two agent endpoints next to the console. Both are listed in the
 startup banner and in the console's **Agent integrations** card:
 
-![MCP tools: the human operator, the MCP chatbot agent and coding assistants call nine MCP tools over Streamable HTTP or stdio, grouped into discover (scan_policy), run (start_scan, start_demo_scan, cancel_scan, each approved by a person), follow (get_scan, list_scans) and read (list_reports, get_report, verify_audit_log); every call goes through the shared ScanService rules before the scan pipeline sends in-scope requests to the target.](docs/mcp-tools.png)
+![MCP tools: the human operator, the MCP chatbot agent and coding assistants call twelve MCP tools over Streamable HTTP or stdio, grouped into discover (scan_policy), run (start_scan, start_demo_scan, cancel_scan, each approved by a person), follow (get_scan, list_scans), read (list_reports, get_report, verify_audit_log) and code (upload_code, start_code_scan, get_code_scan); every call goes through the shared ScanService rules before the scan pipeline sends in-scope requests to the target.](docs/mcp-tools.png)
 
 
 | Endpoint | Who uses it | Auth |
@@ -171,7 +172,7 @@ the allowlist refusing a host), `-h` for all.
 
 For a quick unattended scan without any server, the stdlib CLI needs only the authorization flag:
 `uv run python -m scopeguard.cli --url https://your-app.example/ --profile standard --i-have-authorization`.
-It has no form login (only `--bearer`), no LLM summary and no Docker code check.
+It has no form login (only `--bearer`), no LLM summary and no sandboxed code check.
 
 Usage guides for assistants: [src/pentest_agent/mcp_server/CLAUDE.md](src/pentest_agent/mcp_server/CLAUDE.md)
 and [src/pentest_agent/a2a_server/CLAUDE.md](src/pentest_agent/a2a_server/CLAUDE.md).
@@ -399,12 +400,13 @@ source links in reports are scan metadata and stay.
 Between the JS SAST and the live DAST, the agent runs a **sandbox check** of backend
 source code and the website content it fetched from the target:
 
-* It runs `scopeguard.codecheck` in a **Docker container** with `--network none`, a
-  read-only filesystem, dropped capabilities and a non-root user; the analyzer also
-  installs an audit hook, so any attempt to reach the network, run a process, or
-  write/read outside the inputs is **blocked and reported as a red flag**. If Docker
-  or the image is missing it falls back to the in-process sandbox and flags that.
-  Pull the image once: `python -m scopeguard.container --setup`.
+* It runs `scopeguard.codecheck` in a **Kubernetes Job** (no Docker, no custom image; see
+  [Uploaded code and the Kubernetes Job sandbox](#uploaded-code-and-the-kubernetes-job-sandbox)):
+  deny-all NetworkPolicy, read-only root filesystem, dropped capabilities, non-root user;
+  the analyzer also installs an audit hook, so any attempt to reach the network, run a
+  process, or write/read outside the inputs is **blocked and reported as a red flag**.
+  Without a cluster the check fails with the reason (`SANDBOX_REQUIRE_KUBERNETES=true`,
+  the default) or runs in the local process sandbox with a red flag (`false`).
 * **Website content** is fetched by the agent from the **target only** (scope-checked,
   no redirects followed); links, redirects and `fetch()`/script `src` to other hosts
   are listed and flagged, never downloaded. Page text that tries to steer an AI agent
@@ -441,6 +443,47 @@ same-origin upload endpoints, then checks whether they were accepted, stored or 
 The payloads contain no shells and no real executables — only a unique marker string an
 executing server would echo back — so the control is tested without planting a webshell.
 Confirmed execution is reported CRITICAL (CWE-434).
+
+## Uploaded code and the Kubernetes Job sandbox
+
+Upload a `.zip` of your source and get a static analysis with recommendations. The archive is
+unpacked and read **only inside a Kubernetes Job**; the code is never run.
+
+* **Where**: console card **Code upload** (admin), `POST /api/uploads?filename=src.zip` (raw body,
+  `Content-Type: application/zip`) then `POST /api/uploads/<id>/scan` with
+  `{"authorization_confirmed": true}`, or the MCP tools `upload_code` → `start_code_scan` →
+  `get_code_scan`. `GET /api/uploads/policy` shows the accepted types and Kubernetes readiness.
+* **Type checks**: the name must end in `.zip`, the MIME type must be a zip type
+  (`application/zip`, `application/x-zip-compressed`, `application/x-zip`, `application/octet-stream`),
+  and the first bytes must be a zip signature (a renamed `.exe`/ELF/tarball is refused with 415).
+  Max `CODE_UPLOAD_MAX_MB` (50; MCP `MCP_MAX_UPLOAD_MB`, 10).
+* **Archive safety** (flagged, never extracted): Zip Slip paths, symlinks, setuid bits, encrypted or
+  duplicate entries, zip bombs (ratio and real decompressed bytes), executables/binaries, nested
+  archives, names with control/bidi characters, and committed secrets files (`.env`, private keys,
+  keystores, Terraform state, `.git`).
+* **Checks**: SAST (SQL/NoSQL/command/LDAP injection, eval, deserialization, XXE, weak crypto, JWT,
+  TLS), **XSS** (reflected responses, unescaped templates, `dangerouslySetInnerHTML`, `v-html`,
+  Angular bypass, autoescape off), **IDOR / access control** (lookups by request ids, routes without an
+  ownership check, admin routes without auth, mass assignment, open redirect, path traversal, CSRF off),
+  SSRF, SSTI, insecure cookies, secrets, sensitive logging, obfuscated code / Trojan Source, supply chain
+  (`postinstall`, `curl | sh`), Dockerfile / Kubernetes misconfiguration. Every rule carries a fix; the
+  report has a **Recommendations** table (one row per rule, most severe first).
+* **Sandbox**: one batch/v1 **Job** per scan running a stock image (`K8S_IMAGE`, default
+  `python:3.12-slim`; pin a digest). The analyzer code is an immutable ConfigMap named after its
+  SHA-256 (verified before use) mounted read-only; the zip is streamed into the pod's stdin. Deny-all
+  NetworkPolicy (checked before every run), Pod Security `restricted`, no service-account token, DNS to
+  127.0.0.1, non-root, read-only root, capabilities dropped, seccomp, `activeDeadlineSeconds`,
+  `ttlSecondsAfterFinished`, optional `K8S_RUNTIME_CLASS` (gVisor/Kata). Set up once with
+  `kubectl apply -f k8s/sandbox.yaml`. The same Job runs the agent's code check.
+* **Memory and out-of-memory crashes**: the limit is **5×** the content size
+  (`SANDBOX_MEMORY_MULTIPLIER`; floor 256 MB, ceiling 4 GB). If the pod is OOMKilled (or the analyzer
+  hits `MemoryError`), it is retried **once with 10×** (`SANDBOX_RETRY_MEMORY_MULTIPLIER`) and
+  **resumes from its checkpoint**: the analyzer streams a checkpoint after each batch of finished files,
+  so files already analysed are not run again. A failed scan keeps its checkpoint, and starting it again
+  later resumes too. The local process sandbox enforces the same limits (POSIX rlimits / Windows Job Object).
+* **Afterwards**: report in `/reports/upload-<id>/` (HTML, Markdown, JSON, DOCX), one audit record
+  (`client.via = "upload"`), and the archive is deleted after a successful scan (failed ones expire after
+  `CODE_UPLOAD_TTL_HOURS`).
 
 **Safety stop**: every agent node (and the sub-agents) may run at most
 `AGENT_MAX_ITERATIONS` times per scan (default 5); past that the step is skipped with a
@@ -778,8 +821,8 @@ environment.
   with a hard output cap, so a compression bomb cannot expand.
 - **Nothing from the target is saved as a file.** The one exception is the sandboxed code check, which stages
   the *text* of in-scope HTML pages and JavaScript under fixed names (`pages/0001.html`, `scripts/0001.js`)
-  in a private temp folder. That folder is mounted read-only into a `--network none` container and deleted
-  when the check ends. Reports quote short evidence snippets as text.
+  in a private temp folder, packs that text into the sandbox Job's input (no network there) and deletes the
+  folder when the check ends. Reports quote short evidence snippets as text.
 - **Refused downloads are reported.** The report's attack coverage lists them as "File downloads refused".
 
 ## Layout
