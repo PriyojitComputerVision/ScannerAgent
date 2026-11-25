@@ -506,11 +506,17 @@ unpacked and read **only inside a Kubernetes Job**; the code is never run.
   `kubectl apply -f k8s/sandbox.yaml`. The same Job runs the agent's code check.
   Local cluster with Calico (enforces NetworkPolicy), step by step: [k8s/README.md](k8s/README.md).
 * **Started before the console**: with `kubectl` present, `pentest-agent` / `scopeguard-demo` bring the sandbox
-  up first (start the stopped kind node `K8S_KIND_CLUSTER`, apply `k8s/sandbox.yaml` if missing, ship the
+  up first (start the stopped kind node `K8S_KIND_CLUSTER`; if the cluster does not exist at all, create it from
+  `k8s/kind-calico.yaml` and install the pinned, SHA-256-checked Calico (`K8S_AUTO_CREATE_CLUSTER`, needs the kind
+  CLI; only into context `kind-<cluster>`; the first run takes minutes); apply `k8s/sandbox.yaml` if missing, ship the
   analyzer, run the isolation probe; at most `K8S_STARTUP_WAIT_SECONDS`), then serve the console; the start-up
   banner's **Code sandbox** line says where scans run. No `kubectl`, no Docker, or any step failing: scans run
   in the Python process sandbox (`SANDBOX_REQUIRE_KUBERNETES=false`, the default). By hand:
   `uv run python -m scopeguard.k8s --bootstrap`.
+* **Retried until ready**: while the cluster is down (Docker or the kind node started later), the server retries
+  the bring-up every `K8S_RETRY_SECONDS` (60; 0 = start-up only) and switches new scans to Kubernetes Jobs once
+  it is ready, without a restart. The console's Code upload card refreshes itself (10 s while not ready, 30 s
+  after) and shows the last check and retry.
 * **Network isolation is proven, not assumed** (`K8S_VERIFY_NETWORK_ISOLATION=true`): before trusting a
   cluster, a probe Job in the sandbox namespace tries to reach the Kubernetes API and the internet; if
   either connects, scans are refused ("NetworkPolicy ... is NOT enforced"). Some network plugins (kind's

@@ -8,7 +8,16 @@ A cluster is only used after an **isolation probe** proves that sandbox pods can
 connection (Kubernetes API, internet). The network plugin must therefore enforce
 NetworkPolicy. kind's default plugin does not do that reliably, so use Calico.
 
-## One-time setup (Windows, macOS or Linux, with Docker running)
+## Automatic setup
+
+With Docker running and the kind CLI installed (`winget install Kubernetes.kind`), `uv run pentest-agent`
+does all of the steps below on start-up when the cluster is missing (`K8S_AUTO_CREATE_CLUSTER=true`, the
+default): it creates the cluster, installs the pinned Calico after a SHA-256 check, applies `sandbox.yaml`
+and runs the isolation probe. The first run takes a few minutes; the console starts with the Python
+sandbox meanwhile and switches to Kubernetes Jobs by itself. Same by hand:
+`uv run python -m scopeguard.k8s --bootstrap --create`.
+
+## Manual setup (Windows, macOS or Linux, with Docker running)
 
 ```bash
 # 1. kind and kubectl (Windows: winget install Kubernetes.kind; kubectl ships with Docker Desktop)

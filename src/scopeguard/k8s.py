@@ -491,21 +491,123 @@ def _api_ready(cfg: K8sConfig, timeout: int = 5) -> bool:
         return False
 
 
+# Pinned Calico (NetworkPolicy enforcement for the local kind cluster); the manifest is checked
+# against this SHA-256 before it is applied. Same version as k8s/README.md.
+CALICO_VERSION = "v3.29.1"
+CALICO_URL = f"https://raw.githubusercontent.com/projectcalico/calico/{CALICO_VERSION}/manifests/calico.yaml"
+CALICO_SHA256 = "ef325a26cb4e0a2d386d0e512c0cf4fd0fa935ac25777b41b0d3737153025a1c"
+CALICO_MAX_BYTES = 4 * 1024 * 1024
+KIND_CREATE_TIMEOUT = 600
+CALICO_ROLLOUT_SECONDS = 420
+MISSING_NODE = "no kind node container"
+
+
+def _kind() -> str | None:
+    """The kind CLI: PATH first, then a winget install (its Links dir is not always on PATH)."""
+    found = shutil.which("kind")
+    if found:
+        return found
+    base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Microsoft", "WinGet")
+    if os.environ.get("LOCALAPPDATA"):
+        candidates = [os.path.join(base, "Links", "kind.exe")]
+        pkgs = os.path.join(base, "Packages")
+        if os.path.isdir(pkgs):
+            candidates += [os.path.join(pkgs, d, "kind.exe") for d in sorted(os.listdir(pkgs))
+                           if d.startswith("Kubernetes.kind_")]
+        for path in candidates:
+            if os.path.isfile(path):
+                return path
+    return None
+
+
+def _on_host() -> bool:
+    return not (os.environ.get("KUBERNETES_SERVICE_HOST") or os.path.exists("/.dockerenv"))
+
+
+def _calico_manifest(cache_dir: str) -> str:
+    """Path of the pinned Calico manifest, downloaded once and verified by SHA-256 every time."""
+    import urllib.request
+
+    path = os.path.join(cache_dir, f"calico-{CALICO_VERSION}.yaml")
+    if os.path.isfile(path):
+        with open(path, "rb") as fh:
+            if hashlib.sha256(fh.read()).hexdigest() == CALICO_SHA256:
+                return path
+    with urllib.request.urlopen(CALICO_URL, timeout=60) as resp:  # fixed, pinned https URL
+        data = resp.read(CALICO_MAX_BYTES + 1)
+    if len(data) > CALICO_MAX_BYTES or hashlib.sha256(data).hexdigest() != CALICO_SHA256:
+        raise K8sError(f"Calico {CALICO_VERSION} manifest failed its SHA-256 check; not applied")
+    os.makedirs(cache_dir, exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return path
+
+
+def _current_context(cfg: K8sConfig) -> str:
+    if cfg.context:
+        return cfg.context
+    r = _run([*base_cmd(cfg)[:-2], "config", "current-context"], timeout=15)
+    return (r.stdout or b"").decode("utf-8", "replace").strip() if r.returncode == 0 else ""
+
+
+def _ensure_calico(cfg: K8sConfig, cluster: str, cache_dir: str) -> str:
+    """Install Calico into OUR local kind cluster when it is missing (never into another context)."""
+    if _current_context(cfg) != f"kind-{cluster}":
+        return "skipped (current context is not the local kind cluster)"
+    kc = [*base_cmd(cfg)[:-2], "-n", "kube-system"]
+    if _run([*kc, "get", "daemonset", "calico-node", "-o", "name"], timeout=cfg.request_timeout + 5).returncode == 0:
+        return "present"
+    try:
+        manifest = _calico_manifest(cache_dir)
+    except (OSError, K8sError) as exc:
+        return f"not installed ({exc})"
+    applied = _run([*base_cmd(cfg)[:-2], "apply", "-f", manifest], timeout=cfg.request_timeout + 120)
+    if applied.returncode != 0:
+        return f"apply failed: {applied.stderr.decode('utf-8', 'replace').strip()[-200:]}"
+    rolled = _run([*kc, "rollout", "status", "daemonset/calico-node", f"--timeout={CALICO_ROLLOUT_SECONDS}s"],
+                  timeout=CALICO_ROLLOUT_SECONDS + 30)
+    return f"installed {CALICO_VERSION}" if rolled.returncode == 0 else f"installed {CALICO_VERSION}, not ready yet"
+
+
+def _create_kind_cluster(cluster: str, kind_config: str | None, cfg: K8sConfig, wait_seconds: int) -> str:
+    """Create the local kind cluster (default CNI off; Calico follows). Host only."""
+    kind = _kind()
+    if not kind:
+        return "kind CLI not found (install kind, or create the cluster by hand: k8s/README.md)"
+    if not _on_host():
+        return "running inside a container: the local kind cluster is not created from here"
+    args = [kind, "create", "cluster", "--name", cluster]
+    if kind_config and os.path.isfile(kind_config):
+        args += ["--config", kind_config]
+    try:
+        made = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=KIND_CREATE_TIMEOUT, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"kind create failed: {exc.__class__.__name__}"
+    if made.returncode != 0:
+        return f"kind create failed: {(made.stderr or made.stdout).strip()[-200:]}"
+    deadline = time.monotonic() + wait_seconds
+    while time.monotonic() < deadline:
+        if _api_ready(cfg):
+            return "created"
+        time.sleep(2)
+    return f"created but the API server was not ready within {wait_seconds}s"
+
+
 def _start_kind_node(cluster: str, wait_seconds: int, cfg: K8sConfig) -> str:
     """Start the stopped node container of a local kind cluster (on the host only)."""
     node = f"{cluster}-control-plane"
     docker = shutil.which("docker")
     if not docker:
         return "docker CLI not found (cannot start the kind node)"
-    if os.environ.get("KUBERNETES_SERVICE_HOST") or os.path.exists("/.dockerenv"):
+    if not _on_host():
         return "running inside a container: the local kind node is not started from here"
     try:
         state = subprocess.run([docker, "inspect", "-f", "{{.State.Running}}", node], capture_output=True,
                                text=True, timeout=20, check=False)
         if state.returncode != 0:
-            return f"no kind node container {node!r} (create one: kind create cluster --name {cluster})"
+            return f"{MISSING_NODE} {node!r} (create one: kind create cluster --name {cluster})"
         if state.stdout.strip() != "true":
-            started = subprocess.run([docker, "start", node], capture_output=True, text=True, timeout=60,
+            started = subprocess.run([docker, "start", node], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
                                      check=False)
             if started.returncode != 0:
                 return f"could not start {node}: {started.stderr.strip()[-200:]}"
@@ -520,10 +622,13 @@ def _start_kind_node(cluster: str, wait_seconds: int, cfg: K8sConfig) -> str:
 
 
 def bootstrap(cfg: K8sConfig, *, kind_cluster: str = "", manifests: str | None = None,
-              auto_start: bool = True, auto_apply: bool = True, wait_seconds: int = 120) -> dict:
+              auto_start: bool = True, auto_apply: bool = True, wait_seconds: int = 120,
+              auto_create: bool = False, kind_config: str | None = None, cache_dir: str | None = None) -> dict:
     """Bring the sandbox up and report what happened. Never raises.
 
-    1. API server unreachable + ``kind_cluster`` + ``auto_start``: start its stopped node container.
+    1. API server unreachable + ``kind_cluster`` + ``auto_start``: start its stopped node container;
+       with ``auto_create`` and no such container, create the cluster (``kind_config``) and install
+       the pinned, SHA-checked Calico (only into context ``kind-<cluster>``).
     2. Sandbox namespace missing + ``auto_apply``: ``kubectl apply -f <manifests>``.
     3. Ship / verify the analyzer ConfigMap.
     4. Full readiness check (RBAC, NetworkPolicy, isolation probe), cache refreshed.
@@ -536,10 +641,20 @@ def bootstrap(cfg: K8sConfig, *, kind_cluster: str = "", manifests: str | None =
             if auto_start and kind_cluster:
                 outcome = _start_kind_node(kind_cluster, wait_seconds, cfg)
                 actions.append(f"kind node {kind_cluster}-control-plane: {outcome}")
+                if outcome.startswith(MISSING_NODE) and auto_create:
+                    outcome = _create_kind_cluster(kind_cluster, kind_config, cfg, wait_seconds)
+                    actions.append(f"kind cluster {kind_cluster}: {outcome}")
+                    if outcome == "created":
+                        outcome = "started"
                 if outcome != "started":
                     return {"ready": False, "reason": f"Kubernetes API not reachable ({outcome})", "actions": actions}
             else:
                 return {"ready": False, "reason": "Kubernetes API not reachable", "actions": actions}
+        if auto_create and kind_cluster:
+            calico = _ensure_calico(cfg, kind_cluster, cache_dir or os.path.join(
+                os.path.expanduser("~"), ".cache", "scopeguard"))
+            if calico != "present":
+                actions.append(f"Calico: {calico}")
         ns = _run([*base_cmd(cfg)[:-2], "get", "namespace", cfg.namespace, "-o", "name"],
                   timeout=cfg.request_timeout + 5)
         if ns.returncode != 0:
@@ -576,12 +691,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bootstrap", action="store_true", help="start the kind node / apply manifests / probe")
     ap.add_argument("--kind-cluster", default="scopeguard")
     ap.add_argument("--manifests", default="k8s/sandbox.yaml")
+    ap.add_argument("--create", action="store_true",
+                    help="with --bootstrap: create the kind cluster + Calico when it does not exist")
+    ap.add_argument("--kind-config", default="k8s/kind-calico.yaml")
     ap.add_argument("--namespace", default=DEFAULT_NAMESPACE)
     ap.add_argument("--image", default=DEFAULT_IMAGE)
     a = ap.parse_args(argv)
     cfg = K8sConfig(namespace=a.namespace, image=a.image)
     if a.bootstrap:
-        res = bootstrap(cfg, kind_cluster=a.kind_cluster, manifests=a.manifests)
+        res = bootstrap(cfg, kind_cluster=a.kind_cluster, manifests=a.manifests, auto_create=a.create,
+                        kind_config=a.kind_config)
         for act in res["actions"]:
             print(" -", act)
     else:
