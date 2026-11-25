@@ -7,10 +7,12 @@ and `keys/` from there.
 
 | Client | Config |
 | --- | --- |
-| Claude Code | `.mcp.json` in the repo (approve "scopeguard" once), or `claude mcp add scopeguard -- uv --directory REPO run scopeguard-mcp` |
-| Cursor | `.cursor/mcp.json`: `{"mcpServers": {"scopeguard": {"command": "uv", "args": ["--directory", "REPO", "run", "scopeguard-mcp"]}}}` |
-| VS Code | `.vscode/mcp.json`: `{"servers": {"scopeguard": {"type": "stdio", "command": "uv", "args": ["--directory", "REPO", "run", "scopeguard-mcp"]}}}` |
+| Claude Code | `.mcp.json` in the repo (approve "scopeguard" once), or `claude mcp add scopeguard -- uv --directory REPO run --no-sync python -m pentest_agent.mcp_server.server` |
+| Cursor | `.cursor/mcp.json`: `{"mcpServers": {"scopeguard": {"command": "uv", "args": ["--directory", "REPO", "run", "--no-sync", "python", "-m", "pentest_agent.mcp_server.server"]}}}` |
+| VS Code | `.vscode/mcp.json`: `{"servers": {"scopeguard": {"type": "stdio", "command": "uv", "args": ["--directory", "REPO", "run", "--no-sync", "python", "-m", "pentest_agent.mcp_server.server"]}}}` |
 | HTTP clients | `http://127.0.0.1:8765/mcp` with `Authorization: Bearer <JWT>` (the server starts with `uv run pentest-agent`) |
+
+Launch through `python -m` with `--no-sync`, not the `scopeguard-mcp` script: on Windows a running `scopeguard-mcp.exe` is locked, and every later `uv run`/`uv sync` would fail with os error 32 while the client is open. Run `uv sync` once before the first launch.
 
 Check the effective policy without a client: `uv run scopeguard-mcp --check`.
 
