@@ -32,6 +32,7 @@ from scopeguard.engine import A01, A02, A03, A05, A07, JS_RECOMMENDATIONS, JS_RU
 from scopeguard.limits import OOM_EXIT_CODE
 from scopeguard.textsafe import strip_hyperlinks
 
+A04 = "A04:2021-Insecure Design"
 A08 = "A08:2021-Software and Data Integrity Failures"
 A09 = "A09:2021-Security Logging and Monitoring Failures"
 A10 = "A10:2021-Server-Side Request Forgery"
@@ -64,6 +65,10 @@ _SECRET_RULE_IDS = {"AWS_ACCESS_KEY", "PRIVATE_KEY", "HARDCODED_SECRET", "PASSWO
 REQ = (r"(?:\breq\.(?:query|params|body|headers|cookies)\b|\brequest\.(?:args|form|values|GET|POST|json|data|"
        r"query_params|path_params|cookies|headers|get_json)\b|\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\b|"
        r"\bgetParameter\s*\(|\bctx\.(?:query|params|request\.body)\b)")
+# Browser-side values an attacker controls (DOM sources).
+DOM_SOURCE = (r"(?:location\.(?:hash|search|href)|document\.(?:URL|documentURI|referrer|cookie)|window\.name|"
+              r"\b(?:event|e|evt|msg)\.data\b|URLSearchParams|searchParams\.get)")
+
 BACKEND_RULES = [
     ("PY_EVAL_EXEC", re.compile(r"(?<![\w.])(?:eval|exec)\s*\("), "high", A03,
      "eval()/exec() runs dynamic code.", "CWE-95",
@@ -194,6 +199,14 @@ BACKEND_RULES = [
     ("ADMIN_ROUTE_NO_AUTH", None, "medium", A01,
      "Admin route without a visible authentication/authorization check.", "CWE-862",
      "Protect admin routes with authentication plus a role/permission check enforced on the server.", None),
+    ("LOGIN_ROUTE_NO_RATE_LIMIT", None, "medium", A07,
+     "Login / reset / OTP route without visible rate limiting (credential stuffing, brute force, DoS).", "CWE-307",
+     ("Add per-IP and per-account rate limits (express-rate-limit, Flask-Limiter, django-ratelimit) and lockout "
+     "with backoff; keep the response identical for unknown users."), None),
+    ("POSTMESSAGE_NO_ORIGIN_CHECK", None, "medium", A01,
+     "message event listener without an origin check (any site can send it data).", "CWE-346",
+     "Check event.origin against an exact allow-list before using event.data, and validate the data shape.",
+     None),
     ("IDOR_ROUTE_NO_OWNERSHIP_CHECK", None, "medium", A01,
      "Route loads an object by a path id without a visible ownership/permission check (possible IDOR).", "CWE-639",
      ("After loading the object, verify it belongs to the caller (or the caller's tenant/role allows it); "
@@ -283,6 +296,68 @@ BACKEND_RULES = [
      "high", A05, "Privileged container / host namespaces enabled.", "CWE-250",
      "Drop privileged mode and host namespaces; set allowPrivilegeEscalation: false and drop all capabilities.",
      {".yml", ".yaml", ".json", ".sh", ".bash", ".tf"}),
+    # ---- DOM-based attacks (client-side JavaScript)
+    ("DOM_XSS_SOURCE_TO_SINK", re.compile(
+        r"(?:\.(?:inner|outer)HTML\s*=|document\.write(?:ln)?\s*\(|\.insertAdjacentHTML\s*\(|\beval\s*\(|"
+        r"\$\([^)\n]*\)\.(?:html|append|prepend)\s*\(|dangerouslySetInnerHTML)[^;\n]*" + DOM_SOURCE),
+     "high", XSS, ("Attacker-controlled DOM source (URL, referrer, postMessage data) reaches an HTML/code sink "
+     "(DOM-based XSS)."), "CWE-79",
+     ("Treat URL fragments, query strings, referrer and message data as untrusted: write them with textContent, "
+     "or sanitize with DOMPurify before any HTML sink; never eval them."), JS_EXT | {".html", ".htm"}),
+    ("DOM_OPEN_REDIRECT", re.compile(
+        r"(?:\blocation(?:\.href)?\s*=(?!=)|\blocation\.(?:assign|replace)\s*\(|window\.open\s*\()[^;\n]*"
+        + DOM_SOURCE),
+     "medium", A01, "Navigation target taken from a DOM source (DOM-based open redirect).", "CWE-601",
+     "Navigate only to relative paths or an allow-list of origins; parse with new URL() and compare the origin.",
+     JS_EXT | {".html", ".htm"}),
+    ("DOM_JS_URL_INJECTION", re.compile(
+        r"\.(?:href|src|action|formAction|data)\s*=(?!=)[^;\n]*" + DOM_SOURCE + r"|setAttribute\(\s*['\"]"
+        r"(?:href|src|action)['\"]\s*,[^;\n]*" + DOM_SOURCE),
+     "medium", XSS, "URL attribute set from a DOM source (javascript: URL injection).", "CWE-79",
+     "Allow only http(s) URLs (new URL(v).protocol) before assigning href/src/action.", JS_EXT | {".html", ".htm"}),
+    ("PROTOTYPE_POLLUTION", re.compile(
+        r"(?:_\.(?:merge|mergeWith|defaultsDeep|set|setWith|zipObjectDeep)|\$\.extend\(\s*true|deepmerge|"
+        r"\bmerge|Object\.assign)\s*\([^)\n]*(?:req\.(?:body|query|params)|JSON\.parse|" + DOM_SOURCE[3:-1] + r")"),
+     "high", A08, "Deep merge / assignment of untrusted objects (prototype pollution).", "CWE-1321",
+     ("Reject __proto__/constructor/prototype keys, merge into Object.create(null) or use a Map, and validate the "
+     "shape with a schema first."), JS_EXT),
+    ("STRING_TIMER_EVAL", re.compile(r"\bset(?:Timeout|Interval)\s*\(\s*(?:['\"`][^'\"`\n]*['\"`]\s*\+|`[^`\n]*\$\{)"),
+     "medium", A03, "setTimeout/setInterval with a string evaluates code (like eval).", "CWE-95",
+     "Pass a function: setTimeout(() => doWork(value), ms).", JS_EXT | {".html", ".htm"}),
+
+    # ---- Denial of service / resource exhaustion (code weaknesses; nothing is attacked)
+    ("REDOS_NESTED_QUANTIFIER", re.compile(
+        r"(?:\bre\.(?:compile|match|search|fullmatch|sub|findall)\s*\(|new\s+RegExp\s*\(|[=(:,]\s*/)[^\n]*"
+        r"\((?:[^()\\\n]|\\.)*?(?:[+*]|\\[wdsWDS][+*])(?:[^()\\\n]|\\.)*\)(?:[+*]|\{\d+,\d*\})"),
+     "medium", A04, "Regular expression with nested quantifiers (catastrophic backtracking, ReDoS).", "CWE-1333",
+     ("Rewrite without nested quantifiers (atomic/possessive groups, explicit character classes), bound the input "
+     "length, or use a linear-time engine (RE2 / re2 package)."), CODE_EXT),
+    ("REGEX_FROM_INPUT", re.compile(r"(?:new\s+RegExp|\bre\.(?:compile|match|search|fullmatch))\s*\([^)\n]*" + REQ),
+     "high", A04, "Regular expression built from request input (ReDoS / regex injection).", "CWE-1333",
+     "Escape user text (re.escape / escapeRegExp) or match it literally; never compile user-supplied patterns.",
+     None),
+    ("LARGE_BODY_LIMIT", re.compile(
+        r"(?i)\blimit\s*:\s*['\"]\s*(?:[5-9]\d|\d{3,})\s*mb|\blimit\s*:\s*['\"]\s*\d+\s*gb|"
+        r"\bMAX_CONTENT_LENGTH\s*=\s*None|\bDATA_UPLOAD_MAX_(?:MEMORY_SIZE|NUMBER_FIELDS)\s*=\s*None|"
+        r"\bclient_max_body_size\s+0\b"),
+     "medium", A04, "Request body / upload size limit missing or very large (memory exhaustion).", "CWE-770",
+     ("Set tight per-route body limits (e.g. express.json({ limit: '100kb' }), MAX_CONTENT_LENGTH, "
+     "client_max_body_size) and stream large uploads to disk."), None),
+    ("HTTP_CALL_NO_TIMEOUT", re.compile(
+        r"\brequests\.(?:get|post|put|patch|delete|head|request)\s*\((?![^\n]*\btimeout\s*=)[^\n]*\)\s*$"),
+     "low", A04, "Outbound HTTP call without a timeout (a slow upstream can exhaust workers).", "CWE-400",
+     "Always pass timeout=(connect, read), e.g. requests.get(url, timeout=(3, 10)).", PY_EXT),
+    ("LOOP_SIZE_FROM_INPUT", re.compile(
+        r"(?:\brange\s*\(\s*int\s*\(\s*request\.|new\s+Array\s*\(\s*(?:Number|parseInt)?\(?\s*req\.|"
+        r"\.repeat\s*\(\s*(?:Number|parseInt)?\(?\s*req\.|<\s*(?:Number|parseInt)?\(?\s*req\.(?:query|body|params)\.\w+|"
+        r"\*\s*int\s*\(\s*request\.)"),
+     "medium", A04, "Loop count / allocation size taken from the request (CPU or memory exhaustion).", "CWE-770",
+     "Validate numbers against a hard maximum (e.g. min(int(n), 100)) before looping or allocating.", None),
+    ("XML_ENTITY_EXPANSION", re.compile(
+        r"\b(?:xml\.etree\.ElementTree|ElementTree|ET|minidom|xml\.dom\.minidom|xml\.sax)\.(?:parse|fromstring|"
+        r"parseString|XMLParser)\s*\("),
+     "low", A04, "Stdlib XML parser on possibly untrusted input (billion-laughs entity expansion).", "CWE-776",
+     "Parse untrusted XML with defusedxml (defusedxml.ElementTree.fromstring).", PY_EXT),
     ("WORLD_WRITABLE", re.compile(r"\bchmod\s+(?:-R\s+)?0?777\b|\bos\.chmod\([^)\n]*0o?777"), "medium", A05,
      "World-writable permissions (777).", "CWE-732", "Grant the narrowest permissions needed (e.g. 750/640).", None),
 ]
@@ -302,6 +377,8 @@ _OWNERSHIP = re.compile(
     r"(?i)owner|user_?id\b|userId|req\.user|request\.user|current_?user|currentUser|authorize|permission|\bcan\(|"
     r"policy|tenant|account_?id|session\.user|@PreAuthorize|@Secured|has_perm|abort\(\s*403|status\(\s*403|"
     r"Forbidden|HTTP_403|check_object_permissions|IsOwner|belongs_?to|created_?by|\$this->authorize|Gate::")
+_RATE_LIMIT = re.compile(r"(?i)rate.?limit|limiter|throttl|slow.?down|brute|lockout|captcha|@ratelimit")
+_AUTH_PATHS = re.compile(r"(?i)/(?:log-?in|sign-?in|auth(?:enticate)?|token|password|reset|forgot|otp|mfa|2fa|verify)\b")
 _AUTH = re.compile(
     r"(?i)auth|login_required|isAuthenticated|require_?(?:user|admin|role|login)|passport|jwt|Depends\(|@PreAuthorize|@Secured|"
     r"permission|middleware|guard|protect|verify_?token|session\[|current_user|is_admin|role")
@@ -542,9 +619,9 @@ def scan_routes(res: Results, text: str, *, where: str, ext: str) -> None:
         for rx in _ROUTE_PATTERNS:
             m = rx.search(line[:2000])
             if m:
-                starts.append((i, m.group("p")))
+                starts.append((i, m.group("p"), m.group("m")))
                 break
-    for k, (i, path) in enumerate(starts):
+    for k, (i, path, _method) in enumerate(starts):
         end = min(starts[k + 1][0] if k + 1 < len(starts) else len(lines), i + 60)
         lo = max(0, i - 3)  # decorators / middleware just above the route line
         window = "\n".join(x[:2000] for x in lines[lo:end])
@@ -564,6 +641,14 @@ def scan_routes(res: Results, text: str, *, where: str, ext: str) -> None:
                         where=where, line_no=j + 1, evidence=strip_hyperlinks(lines[j].strip()[:300]) or "",
                         cwe="CWE-639", recommendation=RECOMMENDATIONS["IDOR_ROUTE_NO_OWNERSHIP_CHECK"],
                         confidence="low")
+        if (_method or "").lower() in ("post", "route", "all", "api_route", "request", "any") and \
+                _AUTH_PATHS.search(path) and not _RATE_LIMIT.search(window) and not _RATE_LIMIT.search(text[:4000]):
+            res.add(source="sandbox_source", rid="LOGIN_ROUTE_NO_RATE_LIMIT", severity="medium", category=A07,
+                    title="LOGIN_ROUTE_NO_RATE_LIMIT: login/reset route without visible rate limiting",
+                    description=f"Route {path[:120]} handles credentials or one-time codes and no rate limiter "
+                                "was found near it or in the file.",
+                    where=where, line_no=i + 1, evidence=strip_hyperlinks(lines[i].strip()[:300]) or "",
+                    cwe="CWE-307", recommendation=RECOMMENDATIONS["LOGIN_ROUTE_NO_RATE_LIMIT"], confidence="low")
         if "admin" in path.lower() and not _AUTH.search(window):
             res.add(source="sandbox_source", rid="ADMIN_ROUTE_NO_AUTH", severity="medium", category=A01,
                     title="ADMIN_ROUTE_NO_AUTH: admin route without a visible auth check",
@@ -572,8 +657,23 @@ def scan_routes(res: Results, text: str, *, where: str, ext: str) -> None:
                     cwe="CWE-862", recommendation=RECOMMENDATIONS["ADMIN_ROUTE_NO_AUTH"], confidence="low")
 
 
+_MESSAGE_LISTENER = re.compile(r"""(?:addEventListener\s*\(\s*['"]message['"]|\bonmessage\s*=)""")
+
+
 def scan_file_level(res: Results, text: str, *, where: str, name: str) -> None:
     low = name.lower()
+    if os.path.splitext(low)[1] in JS_EXT | {".html", ".htm"}:
+        lines = text.splitlines()
+        for i, line in enumerate(lines):
+            if _MESSAGE_LISTENER.search(line[:2000]):
+                window = "\n".join(x[:2000] for x in lines[i:i + 15])
+                if not re.search(r"\.origin\b", window):
+                    res.add(source="sandbox_source", rid="POSTMESSAGE_NO_ORIGIN_CHECK", severity="medium",
+                            category=A01, title="POSTMESSAGE_NO_ORIGIN_CHECK: message listener without an origin "
+                            "check", description="A window message listener uses incoming data without checking "
+                            "event.origin.", where=where, line_no=i + 1,
+                            evidence=strip_hyperlinks(line.strip()[:300]) or "", cwe="CWE-346",
+                            recommendation=RECOMMENDATIONS["POSTMESSAGE_NO_ORIGIN_CHECK"], confidence="medium")
     if (low == "dockerfile" or low.endswith(".dockerfile")) and not re.search(r"(?im)^\s*USER\s+\S", text):
         res.add(source="sandbox_source", rid="CONTAINER_RUNS_AS_ROOT", severity="medium", category=A05,
                 title="CONTAINER_RUNS_AS_ROOT: Dockerfile has no USER (runs as root)",

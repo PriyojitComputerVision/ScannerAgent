@@ -18,6 +18,9 @@ from pentest_agent.config import settings
 from pentest_agent.mcp_server import server as mcp_mod
 from scopeguard import audit, codescan, k8s
 
+# The real bring-up, captured before conftest stubs it per test.
+_REAL_BOOTSTRAP = k8s.bootstrap
+
 VULN_JS = ("app.get('/api/orders/:id', async (req, res) => {\n"
            "  const o = await Order.findById(req.params.id);\n"
            "  res.send('<p>' + req.query.q + '</p>');\n});\n")
@@ -162,6 +165,7 @@ async def test_mcp_upload_scan_and_results(mcp_admin):
     f = res["findings"][0]
     assert f["location"].startswith("<<<UNTRUSTED") and (f["evidence"] is None or "UNTRUSTED" in f["evidence"])
     assert "report_files" in res and res["report_files"]["html"].endswith("report.html")
+    assert all(u.startswith(("http://", "https://")) and "/reports/upload-" in u for u in res["report_files"].values())
     policy = await _call("scan_policy", {})
     assert policy["code_uploads"]["allowed"] is True and "kubernetes" in policy["code_uploads"]
 
@@ -326,3 +330,128 @@ def test_kubernetes_required_but_unavailable_is_an_error():
 def test_kubernetes_unavailable_falls_back_only_when_allowed():
     out = codescan.scan_archive(_zip(), backend="kubernetes", require_kubernetes=False, timeout=120)
     assert out["sandbox"]["kind"] == "process" and "no cluster in tests" in out["sandbox"]["fallback_reason"]
+
+
+class FakeProbeCluster:
+    """Answers the isolation probe Job with the given result line."""
+
+    def __init__(self, result):
+        self.result, self.jobs, self.configmaps, self.deleted = result, 0, {}, 0
+
+    def __call__(self, args, input_=None, timeout=60.0):
+        verb = args[args.index("-n") + 2]
+        what = args[args.index("-n") + 3] if len(args) > args.index("-n") + 3 else ""
+        if verb == "get" and what == "configmap":
+            name = args[args.index("configmap") + 1]
+            if name in self.configmaps:
+                return subprocess.CompletedProcess(args, 0, json.dumps({"data": self.configmaps[name]}).encode(), b"")
+            return subprocess.CompletedProcess(args, 1, b"", b"NotFound")
+        if verb == "create":
+            obj = json.loads(input_)
+            if obj["kind"] == "ConfigMap":
+                self.configmaps[obj["metadata"]["name"]] = obj["data"]
+            else:
+                self.jobs += 1
+                assert obj["spec"]["template"]["spec"]["containers"][0]["command"][:3] == ["python", "-I", "-c"]
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+        if verb == "get" and what == "pods":
+            pod = {"metadata": {"name": "probe-pod"}, "status": {"containerStatuses": [
+                {"name": k8s.CONTAINER, "state": {"terminated": {"exitCode": 0, "reason": "Completed"}}}]}}
+            return subprocess.CompletedProcess(args, 0, json.dumps({"items": [pod]}).encode(), b"")
+        if verb == "logs":
+            return subprocess.CompletedProcess(args, 0, f"SCOPEGUARD_PROBE {json.dumps(self.result)}".encode(), b"")
+        if verb == "delete":
+            self.deleted += 1
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+        raise AssertionError(args)
+
+
+@pytest.mark.parametrize("result, ok, text", [
+    ({"api": "blocked:TimeoutError", "internet": "blocked:TimeoutError"}, True, "ok"),
+    ({"api": "connected", "internet": "blocked:TimeoutError"}, False, "NOT enforced: a sandbox pod reached api"),
+    ({"api": "connected", "internet": "connected"}, False, "reached api, internet"),
+])
+def test_isolation_probe_proves_the_policy_is_enforced(monkeypatch, result, ok, text):
+    fake = FakeProbeCluster(result)
+    monkeypatch.setattr(k8s, "_run", fake)
+    monkeypatch.setattr(k8s, "_kubectl", lambda: "kubectl")
+    monkeypatch.setattr(k8s, "_PROBE_CACHE", {})
+    got = k8s.egress_blocked(k8s.K8sConfig(), poll=0)
+    assert got[0] is ok and text in got[1]
+    assert fake.deleted >= 2                               # probe Job (and pods) removed
+    k8s.egress_blocked(k8s.K8sConfig(), poll=0)
+    assert fake.jobs == 1                                  # cached: no second probe
+
+
+def test_isolation_probe_without_a_result_is_not_trusted(monkeypatch):
+    fake = FakeProbeCluster({})
+    monkeypatch.setattr(k8s, "_run", fake)
+    monkeypatch.setattr(k8s, "_kubectl", lambda: "kubectl")
+    monkeypatch.setattr(k8s, "_PROBE_CACHE", {})
+    ok, why = k8s.egress_blocked(k8s.K8sConfig(), poll=0)
+    assert not ok and "refusing to trust" in why
+
+
+class FakeBringUp:
+    """kubectl/docker for bootstrap(): API down until the kind node starts, namespace missing."""
+
+    def __init__(self):
+        self.started, self.applied, self.calls = False, False, []
+
+    def run(self, args, input_=None, timeout=60.0):
+        self.calls.append(args)
+        if "/readyz" in args:
+            return subprocess.CompletedProcess(args, 0 if self.started else 1, b"ok" if self.started else b"", b"")
+        if "namespace" in args:
+            return subprocess.CompletedProcess(args, 0 if self.applied else 1, b"", b"NotFound")
+        if "apply" in args:
+            self.applied = True
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+        if "configmap" in args:
+            return subprocess.CompletedProcess(args, 1, b"", b"NotFound")
+        if "create" in args:
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+        raise AssertionError(args)
+
+    def docker(self, args, **kw):
+        self.calls.append(args)
+        if args[1] == "inspect":
+            return subprocess.CompletedProcess(args, 0, "false\n", "")
+        if args[1] == "start":
+            self.started = True
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(args)
+
+
+def test_bootstrap_starts_the_kind_node_applies_manifests_and_probes(monkeypatch, tmp_path):
+    fake = FakeBringUp()
+    manifests = tmp_path / "sandbox.yaml"
+    manifests.write_text("kind: Namespace", encoding="utf-8")
+    monkeypatch.setattr(k8s, "_run", fake.run)
+    monkeypatch.setattr(k8s, "_kubectl", lambda: "kubectl")
+    monkeypatch.setattr(k8s.shutil, "which", lambda name: name)
+    monkeypatch.setattr(k8s.subprocess, "run", fake.docker)
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    monkeypatch.setattr(k8s, "cluster_status", lambda cfg: (True, "ok"))
+    res = _REAL_BOOTSTRAP(k8s.K8sConfig(), kind_cluster="scopeguard", manifests=str(manifests), wait_seconds=5)
+    assert res["ready"] is True
+    joined = " | ".join(res["actions"])
+    assert "scopeguard-control-plane: started" in joined and "applied sandbox.yaml" in joined
+    assert any(c[:2] == ["docker", "start"] for c in fake.calls)
+
+
+def test_bootstrap_without_kubectl_or_docker_means_python_sandbox(monkeypatch):
+    monkeypatch.setattr(k8s, "_kubectl", lambda: None)
+    assert _REAL_BOOTSTRAP(k8s.K8sConfig())["reason"] == "kubectl not found"
+    monkeypatch.setattr(k8s, "_kubectl", lambda: "kubectl")
+    monkeypatch.setattr(k8s, "_run", lambda args, input_=None, timeout=60.0: subprocess.CompletedProcess(args, 1, b"", b""))
+    monkeypatch.setattr(k8s.shutil, "which", lambda name: None)              # no docker CLI
+    monkeypatch.delenv("KUBERNETES_SERVICE_HOST", raising=False)
+    res = _REAL_BOOTSTRAP(k8s.K8sConfig(), kind_cluster="scopeguard", wait_seconds=1)
+    assert res["ready"] is False and "docker CLI not found" in res["reason"]
+    # default policy: Kubernetes unavailable -> the scan still runs, in the Python process sandbox
+    from pentest_agent.config import Settings
+
+    assert Settings.model_fields["sandbox_require_kubernetes"].default is False
+    out = codescan.scan_archive(_zip(), backend="kubernetes", require_kubernetes=False, timeout=120)
+    assert out["sandbox"]["kind"] == "process" and out["findings"]

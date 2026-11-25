@@ -75,7 +75,8 @@ def test_ungrounded_summary_is_not_cached(monkeypatch):
     monkeypatch.setattr(graph, "invoke_with_backoff", lambda llm, m: calls.append(1) or Msg())
     graph.generate_executive_summary("https://x.test", "quick", 3, _findings(), [])
     graph.generate_executive_summary("https://x.test", "quick", 3, _findings(), [])
-    assert len(calls) == 2
+    # each run: the answer + one grounding repair (it cites nothing); neither result is cached
+    assert len(calls) == 4
 
 
 def test_probe_plan_llm_call_is_cached_across_sessions(monkeypatch):

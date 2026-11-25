@@ -258,7 +258,12 @@ def _dotenv_value(name: str) -> str:
     return ""
 
 
-def log_path() -> str:
+CODE_TRAIL_PATH = "./data/audit/code_audit.jsonl"
+
+
+def log_path(trail: str = "scans") -> str:
+    if trail == "code":
+        return _dotenv_value("CODE_AUDIT_LOG_PATH") or CODE_TRAIL_PATH
     return _dotenv_value("AUDIT_LOG_PATH") or DEFAULT_PATH
 
 
@@ -269,6 +274,9 @@ def hmac_key() -> str:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="pentest-audit", description="Check and read the scan audit log.")
     ap.add_argument("--path", default=None, help="audit log (default AUDIT_LOG_PATH or data/audit/audit.jsonl)")
+    ap.add_argument("--trail", choices=("scans", "code"), default="scans",
+                    help="scans: one record per scan; code: uploads, guardrails, sandbox attempts "
+                         "(CODE_AUDIT_LOG_PATH)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     v = sub.add_parser("verify", help="verify the hash chain (exit 1 if tampered)")
     v.add_argument("--reports-dir", default=None, help="also check report file hashes (e.g. data/reports)")
@@ -277,7 +285,7 @@ def main(argv: list[str] | None = None) -> int:
     sh = sub.add_parser("show", help="all records of one session as JSON")
     sh.add_argument("session_id")
     a = ap.parse_args(argv)
-    path = a.path or log_path()
+    path = a.path or log_path(a.trail)
 
     if a.cmd == "verify":
         res = verify(path, hmac_key() or None, a.reports_dir)
@@ -291,12 +299,19 @@ def main(argv: list[str] | None = None) -> int:
     records = read(path)
     if a.cmd == "list":
         for r in reversed(records[-max(1, a.limit):]):
+            if r.get("trail") == "code":
+                d = r.get("detail") or {}
+                print(f"#{r.get('seq', '?'):<5} {r.get('logged_at', '')[:19]:19}  {r.get('event', '?'):<16} "
+                      f"{r.get('outcome', '?'):<9} {r.get('upload_id') or r.get('session_id') or '':<34} "
+                      f"{(r.get('actor') or {}).get('sub', ''):<12} {r.get('client', {}).get('via', ''):<6} "
+                      f"{d.get('job') or d.get('reason') or d.get('sha256') or ''}"[:200])
+                continue
             res = r.get("results") or {}
             print(f"#{r.get('seq', '?'):<5} {r.get('finished_at', '')[:19]:19}  {r.get('outcome', '?'):<12} "
                   f"{r.get('session_id', ''):<34} {(r.get('actor') or {}).get('sub', ''):<16} "
                   f"{res.get('findings', '-'):>4} findings  {(r.get('target') or {}).get('url', '')}")
         return 0
-    matches = [r for r in records if r.get("session_id") == a.session_id]
+    matches = [r for r in records if a.session_id in (r.get("session_id"), r.get("upload_id"))]
     print(json.dumps(matches, indent=2, ensure_ascii=False))
     return 0 if matches else 1
 

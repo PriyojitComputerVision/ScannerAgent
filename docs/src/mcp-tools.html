@@ -179,7 +179,7 @@ every scan.</p>
           <span class="d">full report text (md / json), wrapped as untrusted content</span>
           <div class="tags"><span class="tag read">read only</span><span class="tag disk">disk</span></div></div>
         <div class="tool"><span class="n">verify_audit_log</span>
-          <span class="d">hash chain + report hashes (admin)</span>
+          <span class="d">hash chain + report hashes (admin); trail = scans | code</span>
           <div class="tags"><span class="tag read">read only</span><span class="tag disk">disk</span></div></div>
       </div>
       <div class="group run">
@@ -191,7 +191,7 @@ every scan.</p>
           <span class="d">Kubernetes Job, no network; SAST, XSS, IDOR, secrets, IaC; memory 5x, 10x on OOM</span>
           <div class="tags"><span class="tag you">you approve</span><span class="tag guard">rules</span></div></div>
         <div class="tool"><span class="n">get_code_scan</span>
-          <span class="d">counts, recommendations per rule, findings (untrusted), report files</span>
+          <span class="d">counts, remediation per rule (steps, before/after code, OWASP), guardrail verdicts, findings (untrusted)</span>
           <div class="tags"><span class="tag read">read only</span></div></div>
       </div>
     </div>

@@ -84,7 +84,7 @@
       },
       "expectations": {
         "min_citations": 3,
-        "must_cite_titles": [
+        "must_report_titles": [
           "Possible SQL injection",
           "Path traversal",
           "Exposed environment file"
@@ -166,7 +166,7 @@
       },
       "expectations": {
         "min_citations": 2,
-        "must_cite_titles": [
+        "must_report_titles": [
           "Exposed environment file"
         ],
         "must_not_mention": [
@@ -237,7 +237,7 @@
       },
       "expectations": {
         "min_citations": 2,
-        "must_cite_titles": [
+        "must_report_titles": [
           "Reflected input without output encoding",
           "Missing X-Content-Type-Options"
         ],
@@ -275,7 +275,7 @@
       },
       "expectations": {
         "min_citations": 0,
-        "must_cite_titles": [],
+        "must_report_titles": [],
         "must_not_mention": [
           "remote code execution",
           "[s1]",

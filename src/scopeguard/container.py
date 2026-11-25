@@ -180,7 +180,8 @@ def inputs_fingerprint(source_dir: str | None, site_dir: str | None) -> str:
 def run_codecheck(*, source_dir: str | None, site_dir: str | None, allowed_hosts: list[str],
                   timeout: int = 180, memory_mb: int = 512, extra_args: list[str] | None = None,
                   memory_multiplier: int = MEMORY_MULTIPLIER, retry_multiplier: int = RETRY_MEMORY_MULTIPLIER,
-                  ceiling_mb: int = MEMORY_CEILING_MB, checkpoint_path: str | None = None) -> dict:
+                  ceiling_mb: int = MEMORY_CEILING_MB, checkpoint_path: str | None = None,
+                  attempt_cb=None) -> dict:
     """The code check in the process sandbox, sized from the content.
 
     Memory = ``memory_multiplier`` (5) x the bytes the analyzer reads, never below
@@ -212,10 +213,12 @@ def run_codecheck(*, source_dir: str | None, site_dir: str | None, allowed_hosts
                        "files_done_total": len(state.done)}
             if final is not None and run.returncode == 0:
                 state.attempts.append({**attempt, "outcome": "ok"})
+                _notify(attempt_cb, state.attempts[-1])
                 break
             final = None
             outcome = "timeout" if run.timed_out else "oom" if run.oom else "error"
             state.attempts.append({**attempt, "outcome": outcome})
+            _notify(attempt_cb, state.attempts[-1])
             if checkpoint_path:
                 state.save(checkpoint_path)
             if outcome == "timeout":
@@ -236,3 +239,12 @@ def run_codecheck(*, source_dir: str | None, site_dir: str | None, allowed_hosts
     if checkpoint_path and os.path.exists(checkpoint_path):
         os.remove(checkpoint_path)
     return out
+
+
+def _notify(attempt_cb, attempt: dict) -> None:
+    """Report one attempt (audit trail); a broken listener never breaks the check."""
+    if attempt_cb:
+        try:
+            attempt_cb(dict(attempt), process_info(int(attempt.get("memory_mb") or 0)))
+        except Exception:  # noqa: BLE001, S110
+            pass

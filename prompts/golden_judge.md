@@ -9,8 +9,10 @@ Ground truth:
 Penalise heavily:
 
 - any claim, number, vulnerability or URL that is not supported by SOURCES or SCAN FACTS;
-- a citation [Sn] that does not support its sentence, including a finding cited under the wrong severity (for example a MEDIUM source in a sentence about high-severity findings);
+- a finding reported under the wrong severity (for example a MEDIUM source described or cited as a high-severity finding), or a citation [Sn] that points at a different finding than its sentence;
 - severity counts that contradict the "Findings" line in SCAN FACTS;
 - omission of high or critical findings or red flags.
 
-In `hallucinations`, put each unsupported claim as an exact short quote from the CANDIDATE, not a source id. Leave it empty when every claim is supported. Base `overall` on faithfulness first, then coverage of the most severe findings, citation accuracy and clarity.
+Judge the RESULTS the candidate reports, not its citation formatting. A candidate that names the right findings at the right severities with correct counts is correct even if it has few or no [Sn] citations; score `citation_accuracy` for information, but never lower `faithfulness`, `coverage` or `overall` because citations are missing. A citation that points at the wrong finding or the wrong severity is still an error in the reported results.
+
+In `hallucinations`, put each unsupported claim as an exact short quote from the CANDIDATE, not a source id. Leave it empty when every claim is supported. Base `overall` on faithfulness first (every reported finding, severity and number is supported), then coverage of the most severe findings, then clarity.

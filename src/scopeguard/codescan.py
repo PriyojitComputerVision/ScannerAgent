@@ -65,7 +65,7 @@ def scan_archive(data: bytes, *, backend: str = "kubernetes", k8s_config: k8s.K8
                  retry_multiplier: int = limits.RETRY_MEMORY_MULTIPLIER,
                  floor_mb: int = limits.MEMORY_FLOOR_MB, ceiling_mb: int = limits.MEMORY_CEILING_MB,
                  session_id: str | None = None, simulate_oom_after: int = 0,
-                 progress_cb=None) -> dict:
+                 progress_cb=None, attempt_cb=None) -> dict:
     """Analyse the zip in ``data``; returns findings, recommendations, archive stats and
     a ``sandbox`` block (backend, attempts with memory used, resume info).
     ``simulate_oom_after`` (tests) makes the *first* attempt die after N files."""
@@ -92,6 +92,17 @@ def scan_archive(data: bytes, *, backend: str = "kubernetes", k8s_config: k8s.K8
     if backend == "process":
         sandbox.setdefault("network", "blocked by audit hook")
 
+    def _record(attempt: dict) -> None:
+        """Keep the attempt in the checkpoint state and report it (audit trail) right away."""
+        if backend == "kubernetes":
+            attempt.setdefault("job", k8s.job_name(session_id))
+        state.attempts.append(attempt)
+        if attempt_cb:
+            try:
+                attempt_cb(dict(attempt), dict(sandbox))
+            except Exception:  # noqa: BLE001, S110 - a broken listener must not break the scan
+                pass
+
     content = archive.archive_content_bytes(data)
     plan = [memory_multiplier, retry_multiplier]
     if state.last_attempt_oom:  # an earlier call already crashed at x5: go straight to x10
@@ -113,7 +124,7 @@ def scan_archive(data: bytes, *, backend: str = "kubernetes", k8s_config: k8s.K8
             else:
                 run = _run_process(stdin, memory_mb=memory_mb, timeout=timeout, args=args)
         except k8s.K8sError as exc:
-            state.attempts.append({"memory_mb": memory_mb, "multiplier": mult, "outcome": "error",
+            _record({"memory_mb": memory_mb, "multiplier": mult, "outcome": "error",
                                    "error": str(exc)[:300]})
             _save(state, checkpoint_path)
             raise CodescanError(f"Kubernetes sandbox failed: {exc}") from exc
@@ -122,26 +133,26 @@ def scan_archive(data: bytes, *, backend: str = "kubernetes", k8s_config: k8s.K8
                    "files_done_total": len(state.done), "exit_code": run.returncode, "reason": run.reason or None}
         if final is not None and final.get("ok"):
             attempt["outcome"] = "ok"
-            state.attempts.append(attempt)
+            _record(attempt)
             break
         if final is not None:  # the worker refused the input (bad zip, limits)
             attempt["outcome"] = "refused"
-            state.attempts.append(attempt)
+            _record(attempt)
             _save(state, checkpoint_path)
             raise CodescanError(str(final.get("error") or "archive refused"))
         if run.timed_out:
             attempt["outcome"] = "timeout"
-            state.attempts.append(attempt)
+            _record(attempt)
             _save(state, checkpoint_path)
             raise CodescanError(f"sandbox exceeded {timeout}s; {len(state.done)} file(s) are checkpointed "
                                 "and a new run resumes from there")
         if run.oom:
             attempt["outcome"] = "oom"
-            state.attempts.append(attempt)
+            _record(attempt)
             _save(state, checkpoint_path)  # survive a server restart too
             continue
         attempt["outcome"] = "error"
-        state.attempts.append(attempt)
+        _record(attempt)
         _save(state, checkpoint_path)
         raise CodescanError(f"analyzer exited {run.returncode}: {run.stderr.strip()[-400:]}")
     if final is None:
