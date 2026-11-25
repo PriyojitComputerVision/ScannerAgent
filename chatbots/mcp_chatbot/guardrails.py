@@ -198,6 +198,9 @@ def _check_url(url) -> str | None:
     return None
 
 
+_UPLOAD_RE = re.compile(r"^[a-f0-9]{32}$")
+
+
 def _check_id(value, field: str) -> str | None:
     if not isinstance(value, str) or not _ID_RE.match(value):
         return f"{field} must be a scan id like mcp-1a2b3c4d5e6f"
@@ -223,6 +226,10 @@ def check_tool_args(name: str, args: dict | None) -> str | None:
         return f"profile must be one of: {', '.join(SCAN_PROFILES)}"
     if name == "start_demo_scan" and not isinstance(args.get("sign_in", False), bool):
         return "sign_in must be true or false"
+    needs_upload = name in ("start_code_scan", "get_code_scan") or (
+        name == "start_scan" and args.get("upload_id") is not None)
+    if needs_upload and not (isinstance(args.get("upload_id"), str) and _UPLOAD_RE.match(args["upload_id"])):
+        return "upload_id must be the 32-character id of an uploaded archive"
     if name in ("get_scan", "cancel_scan", "watch_scan"):
         return _check_id(args.get("scan_id"), "scan_id")
     if name == "get_report":

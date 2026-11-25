@@ -446,9 +446,63 @@ function showLimitNotice(ev) {
   limitTimer = setInterval(tick, 1000);
 }
 
+// ---------------------------------------------------------------- code attachment
+const MAX_ZIP = 10 * 1024 * 1024;
+const fileInput = document.getElementById('file');
+const attachBtn = document.getElementById('attach');
+const attBox = document.getElementById('attachment');
+let attached = null; // {upload_id, filename}: sent with the next message
+
+function showAttachment(att) {
+  attached = att;
+  attBox.hidden = !att;
+  document.getElementById('att-name').textContent = att ? att.filename : '';
+}
+
+async function zipProblem(file) {
+  if (!file) return 'Choose a .zip file.';
+  if (!/\.zip$/i.test(file.name)) return 'Only .zip archives are accepted.';
+  if (file.size === 0 || file.size > MAX_ZIP) return 'The archive must be at most 10 MB.';
+  const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  if (!(head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04)) return 'This is not a zip archive.';
+  return '';
+}
+
+async function uploadZip(file) {
+  const problem = await zipProblem(file);
+  if (problem) { add(el('div', 'line err', problem)); return; }
+  attachBtn.disabled = true;
+  const note = add(el('div', 'line', 'Uploading ' + file.name + ' (' + Math.ceil(file.size / 1024) + ' KB)...'));
+  try {
+    const ctype = ['application/zip', 'application/x-zip-compressed'].includes(file.type) ? file.type : 'application/zip';
+    const res = await fetch('/api/upload?' + new URLSearchParams({ thread_id: threadId, filename: file.name }),
+      { method: 'POST', headers: { 'Content-Type': ctype }, body: file, credentials: 'same-origin' });
+    let data = {};
+    try { data = await res.json(); } catch (e) { data = {}; }
+    if (!res.ok) throw new Error(data.error || ('error ' + res.status));
+    note.textContent = 'Attached ' + data.filename + ' (sha256 ' + String(data.sha256 || '').slice(0, 12) + '). It goes with your next message.';
+    showAttachment(data);
+    input.focus();
+  } catch (e) {
+    note.className = 'line err';
+    note.textContent = 'Upload failed: ' + e.message;
+  } finally {
+    attachBtn.disabled = false;
+    fileInput.value = '';
+  }
+}
+
+attachBtn.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => { if (fileInput.files.length) uploadZip(fileInput.files[0]); });
+document.getElementById('att-remove').addEventListener('click', async () => {
+  await api('POST', 'detach', { thread_id: threadId });
+  showAttachment(null);
+  add(el('div', 'line', 'Attachment removed.'));
+});
+
 async function send(text) {
   stickToBottom = true; // sending always brings you back to the latest
-  add(el('div', 'msg user', text));
+  add(el('div', 'msg user', attached ? text + '\n[attached: ' + attached.filename + ']' : text));
   sendBtn.disabled = true;
   const r = await api('POST', 'send', { thread_id: threadId, message: text });
   if (!r.ok) {
@@ -456,6 +510,7 @@ async function send(text) {
     sendBtn.disabled = sendLocked();
     return;
   }
+  showAttachment(null); // the server attached it to this message
   poll();
 }
 

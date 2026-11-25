@@ -124,6 +124,21 @@ At the approval prompt, answer `a` (approve), `e` (edit the arguments as JSON) o
 (reject). `/new` starts a new conversation; `/quit` exits. Without `--allow`, it uses the
 pentest-agent at `SCOPEGUARD_URL` (default `http://127.0.0.1:8765`).
 
+## Attaching source code
+
+The **+ Code** button next to the message box uploads a `.zip` (max 10 MB; name, MIME type and zip
+signature are checked in the page, the launcher, the backend and again by the scanner). The archive goes
+straight to the scanner's MCP `upload_code` tool, never through the model, and is attached to your next
+message. Then ask for:
+
+- **a web scan with the code**: the agent calls `start_scan` with the `upload_id`; the code is analysed in
+  the scan's SAST step and its findings are in the same report;
+- **the code only**: `start_code_scan`, then `get_code_scan`.
+
+Both need your approval (that is the authorization confirmation) and the `admin` role
+(`CHATBOT_ROLES=admin`, upload needs `scan:source`). **Python only for now**: other languages are only
+partly covered. Remove an attachment with **Remove**.
+
 ## Guardrails
 
 Three deterministic layers in `mcp_chatbot/guardrails.py`. They need no LLM call, so they cost no

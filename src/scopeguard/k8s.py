@@ -81,6 +81,18 @@ class K8sConfig:
     request_timeout: int = 20
 
 
+_NOT_AVAILABLE = ("kubectl not found", "not reachable", "Kubernetes API not reachable", "docker CLI not found",
+                  "kind CLI not found", "no kind node container")
+
+
+def not_available(reason: str) -> bool:
+    """True when Kubernetes is simply absent (no kubectl / Docker / cluster, or it is stopped):
+    the Python process sandbox is then the normal place to run. False for a reachable cluster
+    that is unsafe or misconfigured (RBAC, NetworkPolicy missing or not enforced)."""
+    text = str(reason or "")
+    return any(marker in text for marker in _NOT_AVAILABLE) and "NetworkPolicy" not in text
+
+
 def _kubectl() -> str | None:
     return shutil.which("kubectl")
 

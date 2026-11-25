@@ -452,7 +452,19 @@ Confirmed execution is reported CRITICAL (CWE-434).
 ## Uploaded code and the Kubernetes Job sandbox
 
 Upload a `.zip` of your source and get a static analysis with recommendations. The archive is
-unpacked and read **only inside a Kubernetes Job**; the code is never run.
+unpacked and read **only inside a Kubernetes Job**; the code is never run. **Python only for now**: the code analysis is built and tested for Python projects; other languages are only partly covered, so a clean result for them means little.
+
+Two ways to use an upload:
+
+| Mode | How | Result |
+| --- | --- | --- |
+| **Code only** | console **Scan code only**, `POST /api/uploads/<id>/scan`, MCP `start_code_scan` | its own code report (`upload-<id>`) |
+| **Web scan + code** | console **Attach to web scan**, `upload_id` in the WS request, MCP `start_scan(..., upload_id=...)`, A2A `"upload_id"` | analysed in the scan's SAST / code-check step (same sandbox, guardrails and code audit trail, `via=scan`); findings (`source: code_upload`) go into the same report, which gets an **Attached code upload (SAST)** section with per-rule fixes and guardrail verdicts |
+
+The attached archive is kept until `CODE_UPLOAD_TTL_HOURS` so a resumed scan can analyse it again.
+Without Docker or Kubernetes both modes run in the Python process sandbox (isolated interpreter, scrubbed
+env, memory caps, an audit hook that blocks all egress, subprocesses and writes); that is a normal run,
+reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not enforced, RBAC) stays a red flag.
 
 * **Where**: console card **Code upload** (admin), `POST /api/uploads?filename=src.zip` (raw body,
   `Content-Type: application/zip`) then `POST /api/uploads/<id>/scan` with
