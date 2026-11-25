@@ -1,5 +1,5 @@
-"""Docker sandbox for backend code + website content, egress flagging, and the
-per-node iteration cap. Docker tests run only when Docker and the image are ready."""
+"""Code check of backend code + website content (Kubernetes Job sandbox or process
+sandbox), egress flagging, and the per-node iteration cap. No Docker is used."""
 from __future__ import annotations
 
 import json
@@ -13,14 +13,11 @@ import pytest
 from pentest_agent import graph, rbac
 from pentest_agent.config import settings
 from pentest_agent.tools import sandbox_check as sc
-from scopeguard import container
+from scopeguard import container, k8s
 
 # The real sweep, captured before conftest stubs it per test.
-_REAL_SWEEP = container.remove_leftover_containers
+_REAL_SWEEP = k8s.remove_leftover_jobs
 from scopeguard.simulated_target import SimulatedTarget
-
-DOCKER_OK, DOCKER_WHY = container.docker_status(settings.codecheck_image)
-needs_docker = pytest.mark.skipif(not DOCKER_OK, reason=f"Docker sandbox not available: {DOCKER_WHY}")
 
 BACKEND = '''import os, subprocess, pickle
 DB_PASSWORD = "hunter2secret"
@@ -83,60 +80,10 @@ def test_symlink_outside_source_is_not_read(planted, tmp_path):
     assert any(n["kind"] == "symlink" for n in r["notices"])
 
 
-def test_docker_command_is_locked_down(planted):
-    cmd = container.docker_command(name="t", image="python:3.12-slim", source_dir=str(planted / "backend"),
-                                   site_dir=str(planted / "site"), allowed_hosts=["example.com"])
-    joined = " ".join(cmd)
-    for flag in ("--network none", "--read-only", "--cap-drop ALL", "--security-opt no-new-privileges",
-                 "--user 65534:65534", "--pids-limit", "--memory 512m", "--memory-swap 512m", "--ipc none"):
-        assert flag in joined, flag
-    mounts = [cmd[i + 1] for i, x in enumerate(cmd) if x == "--mount"]
-    assert mounts and all(m.endswith(",readonly") for m in mounts)     # nothing writable mounted
-    assert "--allowed-host" in cmd and "example.com" in cmd
-
-
-def test_falls_back_to_process_sandbox_and_says_why(planted, monkeypatch):
-    monkeypatch.setattr(container, "docker_status", lambda image: (False, "docker daemon not running"))
-    r = container.run_codecheck(source_dir=str(planted / "backend"), site_dir=None, allowed_hosts=[])
-    assert r["sandbox"]["kind"] == "process" and "docker daemon not running" in r["sandbox"]["fallback_reason"]
-    assert any("process sandbox" in f for f in sc.red_flags_from_result(r))
-
-
-def test_docker_disabled_on_purpose_raises_no_red_flag(planted, monkeypatch):
-    def _no_docker_probe(image):
-        raise AssertionError("docker_status must not be called when Docker is disabled")
-
-    monkeypatch.setattr(container, "docker_status", _no_docker_probe)
-    r = container.run_codecheck(source_dir=str(planted / "backend"), site_dir=None, allowed_hosts=[],
-                                use_docker=False)
-    assert r["sandbox"]["kind"] == "process" and r["sandbox"].get("docker_disabled") is True
-    assert "fallback_reason" not in r["sandbox"]
-    assert not any("process sandbox" in f for f in sc.red_flags_from_result(r))
-
-
-@needs_docker
-def test_docker_sandbox_runs_with_no_network(planted):
-    r = container.run_in_docker(source_dir=str(planted / "backend"), site_dir=str(planted / "site"),
-                                allowed_hosts=["127.0.0.1"], extra_args=["--probe-egress"])
-    assert r["sandbox"]["kind"] == "docker" and r["sandbox"]["network"] == "none"
-    assert {"PY_SHELL_TRUE", "SQL_STRING_BUILD"} <= _rids(r)
-    assert {"dns", "process", "filesystem"} <= {v["kind"] for v in r["violations"]}
-
-
-@needs_docker
-def test_container_network_is_off_even_without_the_audit_hook():
-    """OS-level: --network none stops a raw socket even if the analyzer's hook were bypassed."""
-    probe = ("import socket\ntry:\n socket.create_connection(('1.1.1.1', 53), timeout=3); print('CONNECTED')\n"
-             "except OSError as e:\n print('BLOCKED', type(e).__name__)")
-    out = subprocess.run(["docker", "run", "--rm", "--network", "none", settings.codecheck_image, "python", "-c", probe],
-                         check=False, capture_output=True, text=True, timeout=120)
-    assert "BLOCKED" in out.stdout and "CONNECTED" not in out.stdout
-
-
 # --------------------------------------------------------------- agent side
 def test_red_flags_cover_every_incident():
     flags = sc.red_flags_from_result({
-        "sandbox": {"kind": "process", "fallback_reason": "Docker sandbox unavailable: x"},
+        "sandbox": {"kind": "process", "fallback_reason": "Kubernetes sandbox unavailable: x"},
         "violations": [{"kind": "dns", "detail": "socket.getaddrinfo evil.test"}],
         "external_references": [{"host": "cdn.evil", "kind": "script", "risky": True},
                                 {"host": "news.site", "kind": "link", "risky": False}],
@@ -177,7 +124,7 @@ def test_source_path_validation(tmp_path, monkeypatch):
 
 def test_end_to_end_against_local_site(planted, monkeypatch):
     """Real fetch from the loopback target (target only) + process sandbox."""
-    monkeypatch.setattr(settings, "sandbox_use_docker", False)
+    monkeypatch.setattr(settings, "sandbox_backend", "process")
     with SimulatedTarget() as t:
         host = t.url.split("//", 1)[1]
         update = sc.execute_sandbox_check(crawled_pages=[t.url + "/"], allowed_domains=[host],
@@ -187,12 +134,12 @@ def test_end_to_end_against_local_site(planted, monkeypatch):
     flags = " | ".join(update["red_flags"])
     assert "third-party.example.invalid" in flags                       # link to another host flagged
     assert "legacy.example.invalid" in flags                           # fetch() to another host flagged
-    assert "process sandbox" not in flags                              # Docker off on purpose -> no flag
+    assert "process sandbox" not in flags                      # process backend on purpose -> no flag
     assert any(f["source"] == "sandbox_source" for f in update["findings"])
 
 
 def test_source_needs_permission(planted, monkeypatch):
-    monkeypatch.setattr(settings, "sandbox_use_docker", False)
+    monkeypatch.setattr(settings, "sandbox_backend", "process")
     update = sc.execute_sandbox_check(crawled_pages=[], allowed_domains=["x.test"],
                                       source_path=str(planted / "backend"), source_allowed=False)
     assert any("scan:source" in f for f in update["red_flags"])
@@ -243,90 +190,6 @@ def test_iteration_cap_stops_a_node_and_flags_it(monkeypatch):
     assert graph.recursion_limit() == 5 * len(graph.NODE_NAMES) + 5
 
 
-# ---------------------------------------------------------------- container naming + cleanup
-class _FakeDocker:
-    """Records docker CLI calls; `run` behaviour is configurable."""
-
-    def __init__(self, run_effect=None, listed=""):
-        self.calls, self.run_effect, self.listed = [], run_effect, listed
-
-    def __call__(self, cmd, **kw):
-        self.calls.append(cmd)
-        verb = cmd[1]
-        if verb == "run" and self.run_effect is not None:
-            raise self.run_effect
-        if verb == "ps":
-            return subprocess.CompletedProcess(cmd, 0, stdout=self.listed, stderr="")
-        out = '{"ok": true, "findings": [], "violations": [], "stats": {}}' if verb == "run" else ""
-        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
-
-    def verbs(self):
-        return [c[1] for c in self.calls]
-
-
-def test_container_is_named_after_the_session_id():
-    assert container.container_name("ws-1795422976") == "scopeguard-ws-1795422976"
-    for unusable in (None, "", "../x", "a b", "a..b"):
-        assert container.container_name(unusable).startswith("scopeguard-adhoc-")
-    cmd = container.docker_command(name="scopeguard-s1", image="img", source_dir=None, site_dir=None,
-                                   allowed_hosts=[], session_id="s1")
-    assert cmd[cmd.index("--name") + 1] == "scopeguard-s1" and "--rm" in cmd
-    labels = [cmd[i + 1] for i, x in enumerate(cmd) if x == "--label"]
-    assert container.CONTAINER_LABEL in labels and "scopeguard.session=s1" in labels
-    assert f"{container.OWNER_LABEL}={container.owner_id()}" in labels
-
-
-def test_finished_container_is_left_to_docker_rm(monkeypatch):
-    fake = _FakeDocker()
-    monkeypatch.setattr(container, "_docker", lambda: "docker")
-    monkeypatch.setattr(container.subprocess, "run", fake)
-    r = container.run_in_docker(source_dir=None, site_dir=None, allowed_hosts=[], session_id="s2")
-    assert r["sandbox"]["container"] == "scopeguard-s2" and r["sandbox"]["removed_after_run"] is True
-    assert fake.verbs() == ["ps", "run"]  # stale-name check, then the --rm run; nothing left to remove
-
-
-@pytest.mark.parametrize("effect", [subprocess.TimeoutExpired("docker", 1), KeyboardInterrupt(), OSError("boom")])
-def test_container_is_force_removed_on_any_early_exit(monkeypatch, effect):
-    fake = _FakeDocker(run_effect=effect, listed="abc123\n")
-    monkeypatch.setattr(container, "_docker", lambda: "docker")
-    monkeypatch.setattr(container.subprocess, "run", fake)
-    with pytest.raises((container.CodecheckError, KeyboardInterrupt, OSError)):
-        container.run_in_docker(source_dir=None, site_dir=None, allowed_hosts=[], session_id="s3")
-    assert fake.calls[-1] == ["docker", "rm", "-f", "abc123"]
-    ps = fake.calls[-2]
-    assert f"label={container.CONTAINER_LABEL}" in ps and "name=^/scopeguard-s3$" in ps  # only ours
-
-
-def test_cleanup_never_touches_unlabelled_containers(monkeypatch):
-    fake = _FakeDocker(listed="")  # a same-named container without our label is not listed
-    monkeypatch.setattr(container, "_docker", lambda: "docker")
-    monkeypatch.setattr(container.subprocess, "run", fake)
-    assert container.remove_container("scopeguard-s4") is False
-    assert "rm" not in fake.verbs()
-
-
-def test_startup_sweep_removes_only_orphaned_containers(monkeypatch):
-    import socket
-
-    host = socket.gethostname()
-    done = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
-                          capture_output=True, text=True, check=True)
-    dead_pid = int(done.stdout)  # a process that has exited
-    listed = "".join([
-        "old1\t\n",                              # no owner label (older version): leftover
-        f"dead1\t{host}:{dead_pid}\n",           # its server is gone: leftover
-        f"mine1\t{container.owner_id()}\n",      # this server: kept
-        f"live1\t{host}:{os.getppid()}\n",       # another running process on this host: kept
-        "remote1\totherhost:1234\n",             # another host: cannot check, kept
-    ])
-    fake = _FakeDocker(listed=listed)
-    monkeypatch.setattr(container, "_docker", lambda: "docker")
-    monkeypatch.setattr(container.subprocess, "run", fake)
-    assert _REAL_SWEEP() == ["old1", "dead1"]  # conftest stubs the sweep for the server
-    assert f"label={container.CONTAINER_LABEL}" in fake.calls[0]
-    assert fake.calls[-1] == ["docker", "rm", "-f", "old1", "dead1"]
-
-
 def test_pid_check_never_kills_the_process():
     # os.kill(pid, 0) would terminate a process on Windows; _pid_alive must only look.
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
@@ -339,11 +202,72 @@ def test_pid_check_never_kills_the_process():
     assert not container._pid_alive(proc.pid)
 
 
-@needs_docker
-def test_real_container_is_gone_after_the_run(planted):
-    r = container.run_in_docker(source_dir=str(planted / "backend"), site_dir=None, allowed_hosts=[],
-                                session_id="pytest-cleanup-check")
-    assert r["sandbox"]["container"] == "scopeguard-pytest-cleanup-check"
-    left = subprocess.run(["docker", "ps", "-aq", "--filter", "name=^/scopeguard-pytest-cleanup-check$"],
-                          capture_output=True, text=True, check=False).stdout.strip()
-    assert left == ""
+# ------------------------------------------------------------------ Kubernetes Job backend
+def test_kubernetes_required_but_unavailable_fails_the_check_with_a_reason(planted, monkeypatch):
+    monkeypatch.setattr(settings, "sandbox_backend", "kubernetes")
+    monkeypatch.setattr(settings, "sandbox_require_kubernetes", True)
+    update = sc.execute_sandbox_check(crawled_pages=[], allowed_domains=["x.test"],
+                                      source_path=str(planted / "backend"))
+    assert update["phase"] == "sandbox_check_failed"
+    assert any("Kubernetes sandbox unavailable" in f for f in update["red_flags"])
+
+
+def test_kubernetes_unavailable_falls_back_to_process_with_a_red_flag(planted, monkeypatch):
+    monkeypatch.setattr(settings, "sandbox_backend", "kubernetes")
+    monkeypatch.setattr(settings, "sandbox_require_kubernetes", False)
+    update = sc.execute_sandbox_check(crawled_pages=[], allowed_domains=["x.test"],
+                                      source_path=str(planted / "backend"))
+    assert update["phase"] == "sandbox_check_complete"
+    assert update["sandbox_report"]["sandbox"]["kind"] == "process"
+    assert any("Kubernetes sandbox unavailable" in f and "process sandbox" in f for f in update["red_flags"])
+    assert {"PY_SHELL_TRUE", "SQL_STRING_BUILD"} <= {f["title"].split(":")[0] for f in update["findings"]}
+
+
+def test_code_check_inputs_are_packed_without_vendored_or_binary_files(planted):
+    import io
+    import zipfile
+
+    from scopeguard import codescan
+
+    (planted / "backend" / "app" / "logo.png").write_bytes(b"\x89PNG" + b"\0" * 20)
+    names = zipfile.ZipFile(io.BytesIO(codescan.pack_dirs(str(planted / "backend"), str(planted / "site")))).namelist()
+    assert "source/app/server.py" in names and "site/manifest.json" in names and "site/pages/0001.html" in names
+    assert not any("node_modules" in n or n.endswith(".png") for n in names)
+    assert codescan.pack_dirs(str(planted / "backend"), None) == codescan.pack_dirs(str(planted / "backend"), None)
+
+
+def test_code_check_mode_runs_source_and_site_in_the_worker(planted):
+    """The same worker the Job runs: codecheck mode analyses source/ and site/ from one zip."""
+    from scopeguard import codescan
+
+    out = codescan.scan_dirs(str(planted / "backend"), str(planted / "site"), ["127.0.0.1"], backend="process")
+    rids = {f["title"].split(":")[0] for f in out["findings"]}
+    assert {"PY_SHELL_TRUE", "SQL_STRING_BUILD", "PROMPT_INJECTION"} <= rids
+    assert ("evil-cdn.example", "script") in {(r["host"], r["kind"]) for r in out["external_references"]}
+    assert not any(f["source"] == "upload_archive" for f in out["findings"])  # our own staging: no archive flags
+
+
+def test_startup_sweep_removes_only_orphaned_jobs(monkeypatch):
+    import socket
+
+    host = socket.gethostname()
+    done = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                          capture_output=True, text=True, check=True)
+    dead_pid = int(done.stdout)  # a process that has exited
+    owners = {"old1": "", "dead1": f"{host}:{dead_pid}", "mine1": container.owner_id(),
+              "live1": f"{host}:{os.getppid()}", "remote1": "otherhost:1234"}
+    deleted = []
+
+    def fake_run(args, input_=None, timeout=60.0):
+        if "get" in args and "jobs" in args:
+            items = [{"metadata": {"name": n, "annotations": {k8s.OWNER_ANNOTATION: o}}} for n, o in owners.items()]
+            return subprocess.CompletedProcess(args, 0, json.dumps({"items": items}).encode(), b"")
+        if "delete" in args and "jobs" in args:
+            sel = args[args.index("--field-selector") + 1]
+            assert f"{k8s.LABEL}=1" in args  # label-checked: never an unrelated Job
+            deleted.append(sel.split("=", 1)[1])
+        return subprocess.CompletedProcess(args, 0, b"", b"")
+
+    monkeypatch.setattr(k8s, "_run", fake_run)
+    monkeypatch.setattr(k8s, "_kubectl", lambda: "kubectl")
+    assert _REAL_SWEEP(k8s.K8sConfig()) == ["old1", "dead1"] == deleted

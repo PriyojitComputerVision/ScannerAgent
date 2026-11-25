@@ -81,7 +81,7 @@
 </head>
 <body>
 <h1>ScopeGuard MCP tools</h1>
-<p class="sub">Agents reach the scanner through nine MCP tools. Every tool call goes through the same shared rules
+<p class="sub">Agents reach the scanner through twelve MCP tools. Every tool call goes through the same shared rules
 (ScanService) as the console and A2A, so an agent can only do what the operator allowed, and a person approves
 every scan.</p>
 
@@ -182,6 +182,18 @@ every scan.</p>
           <span class="d">hash chain + report hashes (admin)</span>
           <div class="tags"><span class="tag read">read only</span><span class="tag disk">disk</span></div></div>
       </div>
+      <div class="group run">
+        <h3>5 · Code</h3>
+        <div class="tool"><span class="n">upload_code</span>
+          <span class="d">.zip only (name, MIME type, zip signature checked); admin; nothing unpacked here</span>
+          <div class="tags"><span class="tag guard">rules</span><span class="tag disk">disk</span></div></div>
+        <div class="tool"><span class="n">start_code_scan</span>
+          <span class="d">Kubernetes Job, no network; SAST, XSS, IDOR, secrets, IaC; memory 5x, 10x on OOM</span>
+          <div class="tags"><span class="tag you">you approve</span><span class="tag guard">rules</span></div></div>
+        <div class="tool"><span class="n">get_code_scan</span>
+          <span class="d">counts, recommendations per rule, findings (untrusted), report files</span>
+          <div class="tags"><span class="tag read">read only</span></div></div>
+      </div>
     </div>
     <div class="guards">
       <span class="t">Rules on every call · scan_service.py</span>
@@ -195,6 +207,7 @@ every scan.</p>
         <li>output wrapped as untrusted data</li>
         <li>every call logged, every refusal audited</li>
         <li>tools switched off: MCP_DISABLED_TOOLS</li>
+        <li>code uploads: .zip only, scan:source</li>
         <li>site text to the LLM: wrapped, never obeyed</li>
       </ul>
     </div>

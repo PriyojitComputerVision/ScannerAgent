@@ -1,7 +1,7 @@
 """Static checks of backend source code and downloaded website content. Stdlib only.
 
-Runs inside the sandbox (a Docker container with ``--network none``, or the
-process sandbox as a fallback). It only *reads* files and never executes them:
+Runs inside the sandbox (a Kubernetes Job with a deny-all NetworkPolicy, started by
+scopeguard.k8s, or the local process sandbox). It only *reads* files and never executes them:
 
 * ``--source DIR``  backend source code (mounted read-only)
 * ``--site DIR``    website content the agent fetched from the target only
@@ -28,10 +28,13 @@ import sys
 import urllib.parse as up
 from typing import ClassVar
 
-from scopeguard.engine import A02, A03, A05, A07, JS_RECOMMENDATIONS, JS_RULES
+from scopeguard.engine import A01, A02, A03, A05, A07, JS_RECOMMENDATIONS, JS_RULES, XSS
+from scopeguard.limits import OOM_EXIT_CODE
 from scopeguard.textsafe import strip_hyperlinks
 
 A08 = "A08:2021-Software and Data Integrity Failures"
+A09 = "A09:2021-Security Logging and Monitoring Failures"
+A10 = "A10:2021-Server-Side Request Forgery"
 OTHER = "Other"
 
 MAX_FILES = 5000
@@ -48,11 +51,19 @@ TEXT_EXT = {".py", ".pyw", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".php",
 TEXT_NAMES = {"dockerfile", ".env", "makefile", "procfile", ".htaccess", ".npmrc", ".pypirc"}
 PY_EXT = {".py", ".pyw"}
 JS_EXT = {".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".vue", ".svelte"}
+PHP_EXT = {".php", ".phtml"}
+TEMPLATE_EXT = {".html", ".htm", ".jinja", ".j2", ".twig", ".ejs", ".hbs", ".vue", ".svelte", ".php"}
+CODE_EXT = PY_EXT | JS_EXT | PHP_EXT | {".rb", ".go", ".java", ".kt", ".cs", ".scala", ".rs"}
 
 # --------------------------------------------------------------------------- rules
 # (id, regex, severity, category, description, cwe, recommendation, languages or None=all)
+# "languages" holds file extensions and/or lower-case base names (e.g. "package.json").
 _SECRET_RULE_IDS = {"AWS_ACCESS_KEY", "PRIVATE_KEY", "HARDCODED_SECRET", "PASSWORD_LITERAL",
-                    "GENERIC_TOKEN"}
+                    "GENERIC_TOKEN", "HARDCODED_JWT_SECRET"}
+# Untrusted request input, per framework (Express, Flask/Django/FastAPI, PHP, Java servlets).
+REQ = (r"(?:\breq\.(?:query|params|body|headers|cookies)\b|\brequest\.(?:args|form|values|GET|POST|json|data|"
+       r"query_params|path_params|cookies|headers|get_json)\b|\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\b|"
+       r"\bgetParameter\s*\(|\bctx\.(?:query|params|request\.body)\b)")
 BACKEND_RULES = [
     ("PY_EVAL_EXEC", re.compile(r"(?<![\w.])(?:eval|exec)\s*\("), "high", A03,
      "eval()/exec() runs dynamic code.", "CWE-95",
@@ -104,7 +115,198 @@ BACKEND_RULES = [
     ("GENERIC_TOKEN", re.compile(
         r"""\b(?P<v>(?:ghp|gho|github_pat|glpat|xox[baprs]|sk_live|rk_live|gsk|lsv2_pt|lsv2_sk)_[A-Za-z0-9_]{16,})"""),
      "high", A02, "Hardcoded API token.", "CWE-798", "Revoke the token and load it from a secret store.", None),
+    ("HARDCODED_JWT_SECRET", re.compile(
+        r"""(?:\bjwt\.(?:sign|encode)\s*\([^)\n]*,\s*['"](?P<v>[^'"\n]{4,})['"]|\b(?:SECRET_KEY|JWT_SECRET(?:_KEY)?)\s*=\s*['"](?P<v2>[^'"\n]{4,})['"])"""),
+     "high", A02, "Hardcoded signing secret (JWT / session key).", "CWE-798",
+     "Load the signing key from a secret store, make it long and random, and rotate it now.", None),
+
+    # ---- Cross-site scripting (server-rendered and framework escape hatches)
+    ("XSS_REFLECTED_RESPONSE", re.compile(
+        r"(?:\bres\.(?:send|write|end)|\bHttpResponse|\bmake_response|\becho|\bprint|getWriter\(\)\.(?:print|write)"
+        r"|\bResponse)\s*\(?[^;\n]*" + REQ),
+     "high", XSS, "Request input is written straight into the HTTP response (reflected XSS).", "CWE-79",
+     ("Render through an auto-escaping template, or HTML-encode the value for its context; set a strict "
+     "Content-Security-Policy and Content-Type."), None),
+    ("XSS_FSTRING_RESPONSE", re.compile(r"""\breturn\s+f["'][^"'\n]*<[^"'\n]*\{\s*request\."""), "high", XSS,
+     "HTML built with an f-string from request data (reflected XSS).", "CWE-79",
+     "Return a template rendered with autoescape, or escape with markupsafe.escape().", PY_EXT),
+    ("XSS_MARK_SAFE", re.compile(r"\b(?:mark_safe|Markup)\s*\(\s*(?!['\"])"), "medium", XSS,
+     "mark_safe()/Markup() disables escaping for a dynamic value.", "CWE-79",
+     "Only mark constant HTML safe; escape or sanitize (e.g. bleach/nh3) user-controlled values first.", PY_EXT),
+    ("XSS_TEMPLATE_UNESCAPED", re.compile(r"\|\s*safe\b|\{%-?\s*autoescape\s+(?:false|off)|<%-|\{\{\{|\{!!"),
+     "medium", XSS, "Template outputs a value without HTML escaping.", "CWE-79",
+     "Use the escaped form ({{ }}, <%= %>, {{ }} in Blade) and sanitize the rare values that must be HTML.",
+     TEMPLATE_EXT | {".jinja2"}),
+    ("XSS_AUTOESCAPE_OFF", re.compile(r"\bautoescape\s*=\s*False\b|\bnoEscape\s*:\s*true"), "medium", XSS,
+     "Template engine configured without auto-escaping.", "CWE-79",
+     "Turn autoescape on (jinja2.select_autoescape / default Handlebars escaping).", None),
+    ("XSS_REACT_DANGEROUS_HTML", re.compile(r"\bdangerouslySetInnerHTML\s*="), "medium", XSS,
+     "dangerouslySetInnerHTML renders raw HTML.", "CWE-79",
+     "Render text as children, or sanitize with DOMPurify before using dangerouslySetInnerHTML.", JS_EXT),
+    ("XSS_VUE_SVELTE_RAW_HTML", re.compile(r"\bv-html\s*=|\{@html\s"), "medium", XSS,
+     "v-html / {@html} renders raw HTML.", "CWE-79",
+     "Bind text with {{ }} / {expr}, or sanitize with DOMPurify first.", JS_EXT | {".html", ".htm"}),
+    ("XSS_ANGULAR_BYPASS", re.compile(r"\bbypassSecurityTrust(?:Html|Script|Style|Url|ResourceUrl)\s*\("), "medium",
+     XSS, "Angular sanitizer bypassed.", "CWE-79",
+     "Remove bypassSecurityTrust*; let Angular sanitize, or sanitize explicitly before trusting.", JS_EXT),
+    ("XSS_JQUERY_HTML", re.compile(r"\$\([^)\n]*\)\.(?:html|append|prepend|before|after|replaceWith)\(\s*(?!['\"`)])"),
+     "low", XSS, "jQuery inserts a dynamic value as HTML.", "CWE-79",
+     "Use .text() for text, or sanitize the HTML before inserting it.", JS_EXT | {".html", ".htm"}),
+    ("SSTI_TEMPLATE_FROM_INPUT", re.compile(
+        r"\brender_template_string\s*\(\s*(?!['\"])|\b(?:Template|Environment\(\)\.from_string|ejs\.render|"
+        r"pug\.render|nunjucks\.renderString|Handlebars\.compile)\s*\([^)\n]*" + REQ),
+     "high", A03, "Template compiled from dynamic or request data (server-side template injection).", "CWE-1336",
+     "Keep templates static files; pass user data only as template variables.", None),
+
+    # ---- Broken access control: IDOR, mass assignment, open redirect, path traversal, CSRF
+    ("IDOR_DIRECT_OBJECT_LOOKUP", re.compile(
+        r"(?i)(?:findById|findByPk|findOne|findUnique|findFirst|get_object_or_404|objects\.get|getById|query\.get|"
+        r"session\.get|\.find)\s*\([^)\n]*(?:req\.(?:params|query|body)\.\w*id\b|request\.(?:args|GET|POST|"
+        r"query_params|path_params)(?:\.get)?\s*[\[(]\s*['\"]\w*id['\"]|\$_(?:GET|POST|REQUEST)\[\s*['\"]\w*id['\"])"),
+     "medium", A01, "Object fetched by an id taken straight from the request (possible IDOR).", "CWE-639",
+     ("Scope the lookup to the caller (e.g. WHERE id = ? AND owner_id = current_user.id) or check object-level "
+     "authorization after loading; prefer unguessable ids, but never rely on them alone."), None),
+    ("MASS_ASSIGNMENT", re.compile(
+        r"\w+\(\s*\*\*\s*request\.(?:json|form|data|get_json\(\))|Object\.assign\(\s*\w+\s*,\s*req\.body|"
+        r"\.(?:create|update|updateOne|updateMany|findByIdAndUpdate|findOneAndUpdate|insert|build|save|set)\(\s*"
+        r"(?:[^)\n]*,\s*)?(?:\{\s*\.\.\.\s*)?req\.body\s*\}?\s*[,)]|\$(?:fillable|guarded)\s*=\s*\[\s*\]|"
+        r"\.update\(\s*request\.(?:json|form|data)\s*\)"),
+     "medium", A01, "Whole request body bound to a model (mass assignment: users can set role/owner fields).",
+     "CWE-915", "Copy an explicit allow-list of fields (or a validated DTO/schema) instead of the whole body.", None),
+    ("OPEN_REDIRECT", re.compile(
+        r"(?:\bredirect|\bres\.redirect|\bHttpResponseRedirect|\bsendRedirect|\bRedirectResponse|"
+        r"header\s*\(\s*['\"]Location:)\s*\(?[^;\n]*" + REQ),
+     "medium", A01, "Redirect target taken from the request (open redirect).", "CWE-601",
+     "Redirect only to relative paths or an allow-list of hosts; reject absolute and protocol-relative URLs.", None),
+    ("PATH_TRAVERSAL", re.compile(
+        r"(?:\bopen|\bsend_file|\bsend_from_directory|\bFileResponse|\bres\.(?:sendFile|download)|"
+        r"\bfs\.(?:readFile|readFileSync|createReadStream|writeFile|writeFileSync|unlink)|\bpath\.(?:join|resolve)|"
+        r"\bfile_get_contents|\binclude|\brequire_once|\bfopen|\bnew\s+File|\bPaths\.get)\s*\(\s*[^;\n]*" + REQ),
+     "high", A01, "File path built from request input (path traversal / local file inclusion).", "CWE-22",
+     ("Map user input to an allow-listed id, or resolve the path and verify it stays inside the base folder "
+     "(realpath + prefix check); never pass raw input to file APIs."), None),
+    ("CSRF_PROTECTION_DISABLED", re.compile(
+        r"@csrf_exempt\b|\bWTF_CSRF_ENABLED\s*=\s*False|\bcsrf\s*[:=]\s*false|\.csrf\(\s*\)\.disable\(\)|"
+        r"\.csrf\(\s*\w+\s*->\s*\w+\.disable\(\)\)|\bcsrf_protect\s*=\s*False"),
+     "medium", A01, "CSRF protection disabled.", "CWE-352",
+     "Keep CSRF tokens on for cookie-authenticated, state-changing routes; use SameSite cookies as defence in depth.",
+     None),
+    ("ADMIN_ROUTE_NO_AUTH", None, "medium", A01,
+     "Admin route without a visible authentication/authorization check.", "CWE-862",
+     "Protect admin routes with authentication plus a role/permission check enforced on the server.", None),
+    ("IDOR_ROUTE_NO_OWNERSHIP_CHECK", None, "medium", A01,
+     "Route loads an object by a path id without a visible ownership/permission check (possible IDOR).", "CWE-639",
+     ("After loading the object, verify it belongs to the caller (or the caller's tenant/role allows it); "
+     "return 404 for objects the caller may not see."), None),
+
+    # ---- Injection beyond SQL
+    ("SQL_CONCAT_REQUEST", re.compile(r"(?i)\b(?:SELECT|INSERT|UPDATE|DELETE)\b[^\n]*(?:\+|\.\s|%|\$\{|\{)[^\n]*" + REQ),
+     "high", A03, "SQL statement combined with request input (SQL injection).", "CWE-89",
+     "Use parameterised queries / an ORM query builder; never concatenate input into SQL.", None),
+    ("NOSQL_INJECTION", re.compile(
+        r"\.(?:find|findOne|findOneAndUpdate|updateOne|updateMany|deleteOne|deleteMany|countDocuments|aggregate)"
+        r"\(\s*req\.(?:body|query)\s*[,)]|['\"]\$where['\"]"),
+     "high", A03, "Query object taken from the request (NoSQL operator injection).", "CWE-943",
+     "Build the filter from validated scalar fields; reject keys starting with '$' (e.g. mongo-sanitize).", JS_EXT | PY_EXT),
+    ("COMMAND_INJECTION_INPUT", re.compile(
+        r"\b(?:system|exec|shell_exec|passthru|popen|proc_open|Runtime\.getRuntime\(\)\.exec|subprocess\.\w+|"
+        r"os\.(?:system|popen)|child_process\.\w+|execSync|spawnSync)\s*\([^;\n]*" + REQ),
+     "high", A03, "Shell / process command built from request input (command injection).", "CWE-78",
+     "Avoid shells; call the program with a fixed argument list and validate input against an allow-list.", None),
+    ("LDAP_XPATH_INJECTION", re.compile(r"(?:\bsearch_s|\bldap_search|\.search|\bxpath|\.evaluate)\s*\([^;\n]*" + REQ),
+     "medium", A03, "LDAP/XPath query built from request input.", "CWE-90",
+     "Escape input for the query language or use parameterised XPath/LDAP filters.", None),
+
+    # ---- SSRF, XXE, deserialization
+    ("SSRF_REQUEST_URL", re.compile(
+        r"(?:\brequests\.(?:get|post|put|delete|head|request)|\burlopen|\burllib\.request\.Request|\bhttpx\.(?:get|post|"
+        r"request|AsyncClient\(\)\.get)|\bfetch|\baxios(?:\.\w+)?|\bhttps?\.get|\bgot|\bcurl_init|"
+        r"\bfile_get_contents|\bnew\s+URL|\bRestTemplate\(\)\.\w+|\bWebClient)\s*\(\s*[^;\n]*" + REQ),
+     "high", A10, "Server makes a request to a URL taken from the request (SSRF).", "CWE-918",
+     ("Allow-list destination hosts, resolve and block private/link-local/metadata addresses, disable redirects, "
+     "and run outbound fetches from an egress-restricted network."), None),
+    ("XXE_EXTERNAL_ENTITIES", re.compile(
+        r"\bresolve_entities\s*=\s*True|\bnoent\s*:\s*true|\blibxml_disable_entity_loader\s*\(\s*false|"
+        r"\bXMLInputFactory\.newInstance\(\)|\bDocumentBuilderFactory\.newInstance\(\)|\bSAXParserFactory\.newInstance\(\)|"
+        r"\bXmlResolver\s*=\s*new\s+XmlUrlResolver"),
+     "medium", A05, "XML parser may resolve external entities (XXE).", "CWE-611",
+     ("Disable DTDs and external entities (defusedxml in Python; FEATURE_SECURE_PROCESSING / disallow-doctype-decl "
+     "in Java)."), None),
+    ("INSECURE_DESERIALIZATION", re.compile(
+        r"\bunserialize\s*\(\s*\$_|\bObjectInputStream\s*\(|\.readObject\s*\(\s*\)|\bBinaryFormatter\b|"
+        r"\bmarshal\.loads\s*\(|\bjsonpickle\.decode\s*\(|\bnode-serialize\b|\bshelve\.open\s*\(|"
+        r"\bTypeNameHandling\.(?:All|Auto|Objects)"),
+     "high", A08, "Deserialization of data that may be attacker controlled.", "CWE-502",
+     "Exchange plain data (JSON) with schema validation; never deserialize objects from untrusted input.", None),
+
+    # ---- Session / crypto / logging
+    ("INSECURE_COOKIE", re.compile(
+        r"(?i)\bhttp_?only\s*[:=]\s*false\b|\bsecure\s*[:=]\s*false\b|\bSESSION_COOKIE_(?:SECURE|HTTPONLY)\s*=\s*False|"
+        r"\bsame_?site\s*[:=]\s*['\"]?none\b"),
+     "medium", A05, "Cookie set without Secure/HttpOnly or with SameSite=None.", "CWE-614",
+     "Set Secure, HttpOnly and SameSite=Lax/Strict on session cookies.", None),
+    ("WEAK_RANDOM_SECRET", re.compile(
+        r"(?i)\b\w*(?:token|secret|otp|nonce|passw\w*|reset|session|api_?key)\w*\s*=\s*[^=\n]*\brandom\."
+        r"(?:random|randint|choice|choices|getrandbits|randrange)\s*\("),
+     "medium", A02, "Security token generated with a non-cryptographic RNG.", "CWE-338",
+     "Use secrets.token_urlsafe() / secrets.choice() (Python) or crypto.randomBytes (Node).", PY_EXT),
+    ("LOG_SENSITIVE_DATA", re.compile(
+        r"(?i)\b(?:console\.(?:log|info|debug)|logger\.\w+|logging\.\w+|log\.\w+|print)\s*\([^)\n]*\b"
+        r"(?:password|passwd|secret|token|api_?key|authorization|credit_?card|ssn)\b"),
+     "low", A09, "Sensitive value written to logs.", "CWE-532",
+     "Log identifiers, not secrets; add a redaction filter to the logger.", CODE_EXT),
+
+    # ---- Malicious / deceptive code and supply chain
+    ("OBFUSCATED_CODE", re.compile(
+        r"\beval\s*\(\s*(?:atob|unescape|Buffer\.from|decodeURIComponent|base64_decode|gzinflate|str_rot13)\s*\(|"
+        r"\bexec\s*\(\s*(?:base64\.b64decode|zlib\.decompress|codecs\.decode|bytes\.fromhex)\s*\(|"
+        r"(?:\\x[0-9a-fA-F]{2}){24,}|String\.fromCharCode\((?:\s*\d+\s*,){16,}"),
+     "high", A08, "Obfuscated code that decodes and runs a hidden payload (possible backdoor).", "CWE-506",
+     "Find out who added this code and why; decode it in isolation, and remove it unless it is verified.", None),
+    ("TROJAN_SOURCE_BIDI", re.compile("[\u202a-\u202e\u2066-\u2069]"), "high", A08,
+     "Bidirectional control character in source (Trojan Source: code reads differently than it runs).",
+     "CWE-451", "Remove bidi control characters from code; enable the warning in your editor/CI.", None),
+    ("NPM_INSTALL_SCRIPT", re.compile(r"""['"](?:preinstall|install|postinstall)['"]\s*:\s*['"]"""), "medium", A08,
+     "package.json runs a script on install (supply-chain execution hook).", "CWE-829",
+     "Avoid install hooks; review them, and install with --ignore-scripts in CI.", {"package.json"}),
+    ("PIPE_TO_SHELL", re.compile(r"\b(?:curl|wget)\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|z|da)?sh\b"), "high", A08,
+     "Remote script piped straight into a shell.", "CWE-494",
+     "Download, verify a checksum/signature, then run; or install from a package manager.", None),
+    ("UNPINNED_REMOTE_ADD", re.compile(r"(?i)^\s*ADD\s+https?://"), "low", A08,
+     "Dockerfile ADD downloads from a URL without checksum verification.", "CWE-494",
+     "Use ADD --checksum=sha256:... or download + verify in a RUN step.", {"dockerfile", ".dockerfile"}),
+    ("CONTAINER_RUNS_AS_ROOT", re.compile(r"(?i)^\s*USER\s+(?:root|0)\s*$"), "medium", A05,
+     "Container image runs as root.", "CWE-250", "Add a non-root USER to the image.", {"dockerfile", ".dockerfile"}),
+    ("K8S_PRIVILEGED", re.compile(
+        r"\bprivileged\s*:\s*true|\ballowPrivilegeEscalation\s*:\s*true|\bhost(?:Network|PID|IPC)\s*:\s*true|"
+        r"--privileged\b"),
+     "high", A05, "Privileged container / host namespaces enabled.", "CWE-250",
+     "Drop privileged mode and host namespaces; set allowPrivilegeEscalation: false and drop all capabilities.",
+     {".yml", ".yaml", ".json", ".sh", ".bash", ".tf"}),
+    ("WORLD_WRITABLE", re.compile(r"\bchmod\s+(?:-R\s+)?0?777\b|\bos\.chmod\([^)\n]*0o?777"), "medium", A05,
+     "World-writable permissions (777).", "CWE-732", "Grant the narrowest permissions needed (e.g. 750/640).", None),
 ]
+
+# Routes with a path id, per framework: (regex, group with the path, group with the method or None).
+_ROUTE_PATTERNS = [
+    re.compile(r"""\b(?:app|router|api|server)\.(?P<m>get|post|put|patch|delete|all)\s*\(\s*['"`](?P<p>[^'"`]+)['"`]"""),
+    re.compile(r"""@\w+\.(?P<m>route|get|post|put|patch|delete|api_route)\s*\(\s*['"](?P<p>[^'"]+)['"]"""),
+    re.compile(r"""@(?P<m>Get|Post|Put|Patch|Delete|Request)Mapping\s*\(\s*(?:value\s*=\s*|path\s*=\s*)?['"](?P<p>[^'"]+)['"]"""),
+    re.compile(r"""\bRoute::(?P<m>get|post|put|patch|delete|any)\s*\(\s*['"](?P<p>[^'"]+)['"]"""),
+]
+_PATH_PARAM = re.compile(r":(\w+)|<(?:\w+:)?(\w+)>|\{(\w+)(?::[^}]*)?\}")
+_LOOKUP = re.compile(r"(?i)\b(?:findById|findByPk|findOne|findUnique|findFirst|findOrFail|get_object_or_404|"
+                     r"objects\.(?:get|filter)|getById|query\.get|session\.get|\.get|\.find|\.where|"
+                     r"Repository\.\w+|SELECT\b)")
+_OWNERSHIP = re.compile(
+    r"(?i)owner|user_?id\b|userId|req\.user|request\.user|current_?user|currentUser|authorize|permission|\bcan\(|"
+    r"policy|tenant|account_?id|session\.user|@PreAuthorize|@Secured|has_perm|abort\(\s*403|status\(\s*403|"
+    r"Forbidden|HTTP_403|check_object_permissions|IsOwner|belongs_?to|created_?by|\$this->authorize|Gate::")
+_AUTH = re.compile(
+    r"(?i)auth|login_required|isAuthenticated|require_?(?:user|admin|role|login)|passport|jwt|Depends\(|@PreAuthorize|@Secured|"
+    r"permission|middleware|guard|protect|verify_?token|session\[|current_user|is_admin|role")
+RECOMMENDATIONS = {r[0]: r[6] for r in BACKEND_RULES} | dict(JS_RECOMMENDATIONS)
+_SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 # Content steering the scanner / an LLM (prompt injection) in website text.
 PROMPT_INJECTION = re.compile(
@@ -185,7 +387,8 @@ def _mask(value: str) -> str:
 def _excerpt(line: str, rid: str, m: re.Match) -> str:
     line = line.strip()
     if rid in _SECRET_RULE_IDS:  # never copy a secret into the report
-        secret = m.groupdict().get("v") or m.group(0)
+        groups = m.groupdict()
+        secret = groups.get("v") or groups.get("v2") or m.group(0)
         line = line.replace(secret, _mask(secret))
     return strip_hyperlinks(line[:300]) or ""
 
@@ -211,6 +414,14 @@ class Results:
             "description": description, "affected_url": loc, "evidence": evidence or None,
             "cwe": cwe, "confidence": confidence, "recommendation": recommendation})
 
+    def add_raw(self, finding: dict) -> None:
+        """Add an already-built finding (e.g. from scopeguard.archive), de-duplicated."""
+        key = (finding.get("source"), str(finding.get("title", "")).split(":", 1)[0],
+               finding.get("affected_url"), (finding.get("evidence") or "")[:120])
+        if key not in self._seen and len(self.findings) < MAX_FINDINGS:
+            self._seen.add(key)
+            self.findings.append(finding)
+
     def notice(self, kind: str, detail: str) -> None:
         if len(self.notices) < 200:
             self.notices.append({"kind": kind, "detail": detail[:300]})
@@ -231,13 +442,14 @@ def _read_text(path: str) -> str | None:
 
 
 def _scan_lines(res: Results, text: str, *, source: str, where: str, ext: str, js: bool,
-                backend: bool) -> None:
+                backend: bool, name: str = "") -> None:
+    base = name.lower()
     for no, line in enumerate(text.splitlines(), 1):
         if len(line) > 5000:
             line = line[:5000]
         if backend:
             for rid, rx, sev, cat, desc, cwe, rec, langs in BACKEND_RULES:
-                if langs is not None and ext not in langs:
+                if rx is None or (langs is not None and ext not in langs and base not in langs):
                     continue
                 m = rx.search(line)
                 if m:
@@ -266,8 +478,113 @@ def _scan_lines(res: Results, text: str, *, source: str, where: str, ext: str, j
                                 recommendation=JS_RECOMMENDATIONS.get(rid, ""))
 
 
+# --------------------------------------------------------------------------- checkpoints
+class Progress:
+    """Streams JSON-lines checkpoints so a crashed run (e.g. out of memory) can resume.
+
+    Each ``{"type": "checkpoint"}`` line lists the files finished since the previous
+    line and the findings / notices / references they produced. A file is marked done
+    only after its scan completed, so its findings are complete. The caller passes the
+    collected ``done`` keys back (``--resume-file``) and those files are skipped."""
+
+    def __init__(self, *, stream: bool = False, every: int = 25, done: set[str] | None = None,
+                 oom_after: int = 0) -> None:
+        self.stream = stream
+        self.every = max(1, every)
+        self.done = set(done or ())
+        self._pending: list[str] = []
+        self._sent_findings = 0
+        self._sent_notices = 0
+        self._processed = 0
+        self._oom_after = oom_after  # test hook: simulate MemoryError after N files
+
+    def skip(self, key: str) -> bool:
+        return key in self.done
+
+    def before_file(self) -> None:
+        if self._oom_after and self._processed >= self._oom_after:
+            raise MemoryError("simulated out-of-memory (test hook)")
+
+    def mark_sent(self, res: Results) -> None:
+        """Everything in ``res`` so far was already streamed by the caller."""
+        self._sent_findings = len(res.findings)
+        self._sent_notices = len(res.notices)
+
+    def file_done(self, res: Results, key: str) -> None:
+        self._processed += 1
+        self._pending.append(key)
+        if len(self._pending) >= self.every:
+            self.flush(res)
+
+    def flush(self, res: Results, stage: str = "") -> None:
+        if not self.stream or not (self._pending or len(res.findings) > self._sent_findings or stage):
+            return
+        line = {"type": "checkpoint", "stage": stage or None, "done": self._pending,
+                "findings": res.findings[self._sent_findings:], "notices": res.notices[self._sent_notices:],
+                "external_references": list(res.refs.values()), "stats": dict(res.stats)}
+        sys.stdout.write(json.dumps(line) + "\n")
+        sys.stdout.flush()
+        self._pending = []
+        self._sent_findings = len(res.findings)
+        self._sent_notices = len(res.notices)
+
+
+# --------------------------------------------------------------------------- access control
+def scan_routes(res: Results, text: str, *, where: str, ext: str) -> None:
+    """Route-level checks no single line shows: a route with a path id that loads an
+    object without any visible ownership/permission check (IDOR), and admin routes
+    without any visible auth check. Heuristic, so confidence is low."""
+    if ext not in CODE_EXT:
+        return
+    lines = text.splitlines()
+    starts = []
+    for i, line in enumerate(lines):
+        for rx in _ROUTE_PATTERNS:
+            m = rx.search(line[:2000])
+            if m:
+                starts.append((i, m.group("p")))
+                break
+    for k, (i, path) in enumerate(starts):
+        end = min(starts[k + 1][0] if k + 1 < len(starts) else len(lines), i + 60)
+        lo = max(0, i - 3)  # decorators / middleware just above the route line
+        window = "\n".join(x[:2000] for x in lines[lo:end])
+        params = [next(g for g in m.groups() if g) for m in _PATH_PARAM.finditer(path)]
+        id_params = [p for p in params
+                     if p.lower() in ("id", "pk", "uuid", "slug") or p.lower().endswith(("id", "_id"))]
+        if id_params and not _OWNERSHIP.search(window):
+            uses = [j for j in range(i, end) if _LOOKUP.search(lines[j][:2000])
+                    and any(re.search(rf"\b{re.escape(p)}\b", lines[j][:2000]) for p in id_params)]
+            if uses:
+                j = uses[0]
+                res.add(source="sandbox_source", rid="IDOR_ROUTE_NO_OWNERSHIP_CHECK", severity="medium",
+                        category=A01, title="IDOR_ROUTE_NO_OWNERSHIP_CHECK: route loads an object by id "
+                        "without a visible ownership check",
+                        description=f"Route {path[:120]} looks up the object by {', '.join(id_params)} and no "
+                                    "ownership/permission check was found in the handler.",
+                        where=where, line_no=j + 1, evidence=strip_hyperlinks(lines[j].strip()[:300]) or "",
+                        cwe="CWE-639", recommendation=RECOMMENDATIONS["IDOR_ROUTE_NO_OWNERSHIP_CHECK"],
+                        confidence="low")
+        if "admin" in path.lower() and not _AUTH.search(window):
+            res.add(source="sandbox_source", rid="ADMIN_ROUTE_NO_AUTH", severity="medium", category=A01,
+                    title="ADMIN_ROUTE_NO_AUTH: admin route without a visible auth check",
+                    description=f"Route {path[:120]} has no authentication or role check near its handler.",
+                    where=where, line_no=i + 1, evidence=strip_hyperlinks(lines[i].strip()[:300]) or "",
+                    cwe="CWE-862", recommendation=RECOMMENDATIONS["ADMIN_ROUTE_NO_AUTH"], confidence="low")
+
+
+def scan_file_level(res: Results, text: str, *, where: str, name: str) -> None:
+    low = name.lower()
+    if (low == "dockerfile" or low.endswith(".dockerfile")) and not re.search(r"(?im)^\s*USER\s+\S", text):
+        res.add(source="sandbox_source", rid="CONTAINER_RUNS_AS_ROOT", severity="medium", category=A05,
+                title="CONTAINER_RUNS_AS_ROOT: Dockerfile has no USER (runs as root)",
+                description="The image never switches to a non-root user.", where=where, line_no=0,
+                evidence="no USER instruction", cwe="CWE-250",
+                recommendation=RECOMMENDATIONS["CONTAINER_RUNS_AS_ROOT"], confidence="high")
+
+
 # --------------------------------------------------------------------------- backend code
-def scan_source(res: Results, root: str) -> None:
+def scan_source(res: Results, root: str, progress: Progress | None = None) -> None:
+    progress = progress or Progress()
     root_real = _norm(root)
     total = 0
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
@@ -275,6 +592,9 @@ def scan_source(res: Results, root: str) -> None:
         for name in sorted(filenames):
             path = os.path.join(dirpath, name)
             rel = os.path.relpath(path, root).replace(os.sep, "/")
+            key = f"source:{rel}"
+            if progress.skip(key):
+                continue
             if os.path.islink(path) and not _under(path, [root_real]):
                 res.stats["symlinks_outside"] += 1
                 res.notice("symlink", f"source/{rel} points outside the source folder; not read")
@@ -283,7 +603,9 @@ def scan_source(res: Results, root: str) -> None:
                 continue
             if res.stats["source_files"] >= MAX_FILES or total >= MAX_TOTAL_BYTES:
                 res.notice("limit", f"source scan stopped at {MAX_FILES} files / {MAX_TOTAL_BYTES} bytes")
+                progress.flush(res, "source")
                 return
+            progress.before_file()
             try:
                 text = _read_text(path)
             except OSError as exc:
@@ -291,13 +613,20 @@ def scan_source(res: Results, root: str) -> None:
                 continue
             if text is None:
                 res.stats["skipped_files"] += 1
+                progress.file_done(res, key)
                 continue
             res.stats["source_files"] += 1
             total += len(text)
             res.stats["source_bytes"] = total
             ext = os.path.splitext(name.lower())[1]
-            _scan_lines(res, text, source="sandbox_source", where=f"source/{rel}", ext=ext,
-                        js=ext in JS_EXT, backend=True)
+            where = f"source/{rel}"
+            _scan_lines(res, text, source="sandbox_source", where=where, ext=ext,
+                        js=ext in JS_EXT, backend=True, name=name)
+            scan_routes(res, text, where=where, ext=ext)
+            scan_file_level(res, text, where=where, name=name)
+            del text
+            progress.file_done(res, key)
+    progress.flush(res, "source")
 
 
 # --------------------------------------------------------------------------- website content
@@ -370,7 +699,8 @@ def _record_ref(res: Results, kind: str, raw: str, page: str, allowed: set[str])
     item["count"] += 1
 
 
-def scan_site(res: Results, root: str, allowed: set[str]) -> None:
+def scan_site(res: Results, root: str, allowed: set[str], progress: Progress | None = None) -> None:
+    progress = progress or Progress()
     manifest_path = os.path.join(root, "manifest.json")
     try:
         with open(manifest_path, encoding="utf-8") as fh:
@@ -385,44 +715,54 @@ def scan_site(res: Results, root: str, allowed: set[str]) -> None:
         if not rel or not _under(path, [root_real]):
             res.notice("site", f"manifest entry outside the site folder ignored: {rel[:80]}")
             continue
-        try:
-            text = _read_text(path)
-        except OSError as exc:
-            res.notice("read-error", f"site/{rel}: {exc}")
+        key = f"site:{rel}"
+        if progress.skip(key):
             continue
-        if text is None:
-            continue
-        res.stats["site_files"] += 1
-        where = url or f"site/{rel}"
-        if kind == "js":
-            _scan_lines(res, text, source="sandbox_site", where=where, ext=".js", js=True, backend=False)
-            for m in _URL_IN_JS.finditer(text):
-                _record_ref(res, "fetch", m.group(1), url, allowed)
-            continue
-        parser = _RefParser()
-        try:
-            parser.feed(text)
-            parser.close()
-        except Exception as exc:  # noqa: BLE001 - malformed HTML must not stop the scan
-            res.notice("site", f"HTML parse error in {where}: {exc}")
-        for ref_kind, raw in parser.refs:
-            _record_ref(res, ref_kind, raw, url, allowed)
-        for i, script in enumerate(parser.scripts):
-            _scan_lines(res, script, source="sandbox_site", where=f"{where}#inline-script-{i}", ext=".js",
-                        js=True, backend=False)
-            for m in _URL_IN_JS.finditer(script):
-                _record_ref(res, "fetch", m.group(1), url, allowed)
-        _scan_lines(res, text, source="sandbox_site", where=where, ext=".html", js=False, backend=False)
-        visible = " ".join(parser.text)
-        m = PROMPT_INJECTION.search(visible)
-        if m:
-            res.add(source="sandbox_site", rid="PROMPT_INJECTION", severity="medium", category=OTHER,
-                    title="PROMPT_INJECTION: page text tries to instruct automated agents",
-                    description="Page content contains instructions aimed at an AI agent or scanner. "
-                                "It was treated as data and not followed.",
-                    where=where, line_no=0, evidence=strip_hyperlinks(m.group(0))[:200] or "", cwe="CWE-1427",
-                    recommendation="Review where this text comes from (user content, compromised page).",
-                    confidence="low")
+        progress.before_file()
+        _scan_site_file(res, path, rel, url, kind, allowed)
+        progress.file_done(res, key)
+    progress.flush(res, "site")
+
+
+def _scan_site_file(res: Results, path: str, rel: str, url: str, kind: str, allowed: set[str]) -> None:
+    try:
+        text = _read_text(path)
+    except OSError as exc:
+        res.notice("read-error", f"site/{rel}: {exc}")
+        return
+    if text is None:
+        return
+    res.stats["site_files"] += 1
+    where = url or f"site/{rel}"
+    if kind == "js":
+        _scan_lines(res, text, source="sandbox_site", where=where, ext=".js", js=True, backend=False)
+        for m in _URL_IN_JS.finditer(text):
+            _record_ref(res, "fetch", m.group(1), url, allowed)
+        return
+    parser = _RefParser()
+    try:
+        parser.feed(text)
+        parser.close()
+    except Exception as exc:  # noqa: BLE001 - malformed HTML must not stop the scan
+        res.notice("site", f"HTML parse error in {where}: {exc}")
+    for ref_kind, raw in parser.refs:
+        _record_ref(res, ref_kind, raw, url, allowed)
+    for i, script in enumerate(parser.scripts):
+        _scan_lines(res, script, source="sandbox_site", where=f"{where}#inline-script-{i}", ext=".js",
+                    js=True, backend=False)
+        for m in _URL_IN_JS.finditer(script):
+            _record_ref(res, "fetch", m.group(1), url, allowed)
+    _scan_lines(res, text, source="sandbox_site", where=where, ext=".html", js=False, backend=False)
+    visible = " ".join(parser.text)
+    m = PROMPT_INJECTION.search(visible)
+    if m:
+        res.add(source="sandbox_site", rid="PROMPT_INJECTION", severity="medium", category=OTHER,
+                title="PROMPT_INJECTION: page text tries to instruct automated agents",
+                description="Page content contains instructions aimed at an AI agent or scanner. "
+                            "It was treated as data and not followed.",
+                where=where, line_no=0, evidence=strip_hyperlinks(m.group(0))[:200] or "", cwe="CWE-1427",
+                recommendation="Review where this text comes from (user content, compromised page).",
+                confidence="low")
 
 
 # --------------------------------------------------------------------------- self-test
@@ -445,37 +785,95 @@ def probe_egress(out_dir_hint: str) -> None:
             pass
 
 
+# --------------------------------------------------------------------------- recommendations
+def build_recommendations(findings: list[dict]) -> list[dict]:
+    """One entry per rule, most severe first: what to fix, how often, and one example location."""
+    groups: dict[str, dict] = {}
+    for f in findings:
+        rid = str(f.get("title", "")).split(":", 1)[0]
+        g = groups.get(rid)
+        if g is None:
+            groups[rid] = g = {"rule": rid, "severity": f.get("severity"), "category": f.get("category"),
+                               "cwe": f.get("cwe"), "count": 0, "example": f.get("affected_url"),
+                               "recommendation": f.get("recommendation") or RECOMMENDATIONS.get(rid, "")}
+        g["count"] += 1
+        if _SEV_ORDER.get(f.get("severity"), 9) < _SEV_ORDER.get(g["severity"], 9):
+            g["severity"], g["example"] = f.get("severity"), f.get("affected_url")
+    return sorted(groups.values(), key=lambda g: (_SEV_ORDER.get(g["severity"], 9), -g["count"], g["rule"]))
+
+
+def read_resume_file(path: str | None) -> set[str]:
+    if not path:
+        return set()
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return set()
+    return {str(k) for k in data.get("done", []) if isinstance(k, str)}
+
+
+def result_payload(res: Results, sandbox_kind: str, *, stream: bool) -> dict:
+    out = {"ok": True, "findings": res.findings,
+           "external_references": sorted(res.refs.values(), key=lambda r: (not r["risky"], r["host"])),
+           "violations": VIOLATIONS, "notices": res.notices, "stats": res.stats,
+           "recommendations": build_recommendations(res.findings),
+           "sandbox": {"kind": sandbox_kind, "guard": "audit-hook"}}
+    if stream:
+        out["type"] = "result"
+    return out
+
+
+def oom_exit(res: Results, progress: Progress, reserve: list) -> int:
+    """Out of memory: release the reserve, emit the last checkpoint (files completed so far)
+    and exit with OOM_EXIT_CODE so the caller retries with more memory and resumes."""
+    reserve.clear()
+    try:
+        progress.flush(res, "oom")
+        sys.stdout.write(json.dumps({"type": "oom", "error": "out of memory"}) + "\n")
+        sys.stdout.flush()
+    except MemoryError:
+        pass
+    return OOM_EXIT_CODE
+
+
 # --------------------------------------------------------------------------- main
 def main(argv: list[str] | None = None) -> int:
+    reserve = [bytearray(4 * 1024 * 1024)]  # freed on MemoryError so the handler can still write
     ap = argparse.ArgumentParser(prog="scopeguard-codecheck")
     ap.add_argument("--source", help="backend source folder (read-only)")
     ap.add_argument("--site", help="website content folder with manifest.json (read-only)")
     ap.add_argument("--allowed-host", action="append", default=[], help="target host(s)")
     ap.add_argument("--sandbox-kind", default="process")
+    ap.add_argument("--stream", action="store_true", help="JSON-lines checkpoints, then the result line")
+    ap.add_argument("--resume-file", help="JSON {done: [...]} of files finished by an earlier attempt")
+    ap.add_argument("--checkpoint-every", type=int, default=25)
     ap.add_argument("--probe-egress", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--simulate-oom-after", type=int, default=0, help=argparse.SUPPRESS)
     a = ap.parse_args(argv)
 
+    done = read_resume_file(a.resume_file)  # read before the guard: it may live outside the inputs
     roots = [r for r in (a.source, a.site) if r and os.path.isdir(r)]
     runtime = [sys.prefix, sys.base_prefix, os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
     install_guard(roots + runtime)
 
     res = Results()
+    progress = Progress(stream=a.stream, every=a.checkpoint_every, done=done, oom_after=a.simulate_oom_after)
     allowed = {h.lower().strip() for h in a.allowed_host if h.strip()}
-    if a.probe_egress:
-        probe_egress(a.site or a.source or os.getcwd())
-    if a.source:
-        if os.path.isdir(a.source):
-            scan_source(res, a.source)
-        else:
-            res.notice("source", "source folder not found")
-    if a.site and os.path.isdir(a.site):
-        scan_site(res, a.site, allowed)
-
-    out = {"ok": True, "findings": res.findings,
-           "external_references": sorted(res.refs.values(), key=lambda r: (not r["risky"], r["host"])),
-           "violations": VIOLATIONS, "notices": res.notices, "stats": res.stats,
-           "sandbox": {"kind": a.sandbox_kind, "guard": "audit-hook"}}
-    sys.stdout.write(json.dumps(out))
+    try:
+        if a.probe_egress:
+            probe_egress(a.site or a.source or os.getcwd())
+        if a.source:
+            if os.path.isdir(a.source):
+                scan_source(res, a.source, progress)
+            else:
+                res.notice("source", "source folder not found")
+        if a.site and os.path.isdir(a.site):
+            scan_site(res, a.site, allowed, progress)
+        out = result_payload(res, a.sandbox_kind, stream=a.stream)
+    except MemoryError:
+        return oom_exit(res, progress, reserve)
+    sys.stdout.write(json.dumps(out) + ("\n" if a.stream else ""))
     sys.stdout.flush()
     return 0
 

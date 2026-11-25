@@ -72,7 +72,8 @@ def _val(x, key):
 
 def render_html(*, title: str, meta: list[tuple[str, str]], summary: str | None, findings: list,
                 sources: dict[str, dict], red_flags: list[str], blocked: list[str],
-                downloads: list[tuple[str, str]] | None = None, download_base: str | None = None) -> str:
+                downloads: list[tuple[str, str]] | None = None, download_base: str | None = None,
+                recommendations: list[dict] | None = None) -> str:
     """Self-contained HTML report. `findings` may be dicts or pydantic Findings."""
     counts = {s: sum(1 for f in findings if str(_val(f, "severity")).lower() == s) for s in ORDER}
     b = [f"<h1>{_e(title)}</h1>", '<ul class="meta">']
@@ -90,6 +91,14 @@ def render_html(*, title: str, meta: list[tuple[str, str]], summary: str | None,
     b.append("</table>")
     if red_flags:
         b += ["<h2>Red flags</h2>", "<ul>"] + [f"<li>{_e(r)}</li>" for r in red_flags] + ["</ul>"]
+    if recommendations:
+        b += ["<h2>Recommendations</h2>",
+              "<table><tr><th>Severity</th><th>Issue</th><th>Count</th><th>What to do</th></tr>"]
+        b += [f'<tr><td><span class="sev {_e(r.get("severity"))}">{_e(r.get("severity"))}</span></td>'
+              f'<td>{_e(r.get("rule"))}<div class="small">{_e(r.get("cwe") or "")} · e.g. {_e(r.get("example") or "")}'
+              f'</div></td><td>{_e(r.get("count"))}</td><td>{_e(r.get("recommendation"))}</td></tr>'
+              for r in recommendations]
+        b.append("</table>")
     b.append("<h2>Detailed findings</h2>")
     ranked = sorted(findings, key=lambda f: ORDER.index(str(_val(f, "severity")).lower())
                     if str(_val(f, "severity")).lower() in ORDER else 9)
@@ -222,3 +231,84 @@ def render_index(reports_dir: str | Path) -> str:
                     f'<span class="small">{when} {("· " + others) if others else ""}</span></li>')
     body = "<h1>Scan reports</h1>" + (f"<ul>{''.join(rows)}</ul>" if rows else "<p>No reports yet.</p>")
     return html_page("Scan reports", body)
+
+
+def code_summary(name: str, result: dict, sources: dict[str, dict], top: int = 5) -> str:
+    """Fact-only summary of a code scan, citing its sources."""
+    counts: dict[str, int] = {}
+    for s in sources.values():
+        counts[s["severity"]] = counts.get(s["severity"], 0) + 1
+    tally = ", ".join(f"{counts[k]} {k}" for k in ORDER if counts.get(k)) or "no findings"
+    files = (result.get("stats") or {}).get("source_files", 0)
+    text = (f"Sandboxed static analysis of {name} read {files} source file(s) without running them and "
+            f"produced {len(sources)} finding(s) ({tally}).")
+    head = list(sources.items())[:top]
+    if head:
+        text += " Most severe: " + "; ".join(f"{s['title']} [{sid}]" for sid, s in head) + "."
+    return text
+
+
+def write_code_reports(out_dir: str, name: str, result: dict, red_flags: list[str] | None = None) -> dict:
+    """report.{md,json,html,docx} for an uploaded-code scan (scopeguard.codescan result)."""
+    d = Path(out_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    findings = result.get("findings") or []
+    red_flags = list(red_flags or [])
+    sources = citations.build_sources(findings)
+    summary = code_summary(name, result, sources)
+    sandbox = result.get("sandbox") or {}
+    attempts = sandbox.get("attempts") or []
+    arch = (result.get("archive") or {}).get("stats") or {}
+    meta = [("Generated", dt.datetime.now(dt.UTC).isoformat(timespec="seconds")),
+            ("Upload", name), ("SHA-256", str(result.get("archive_sha256") or "n/a")),
+            ("Sandbox", f"{sandbox.get('kind')} ({sandbox.get('network') or 'no network'})"),
+            ("Memory", " -> ".join(f"{a.get('memory_mb')} MB ({a.get('multiplier')}x, {a.get('outcome')})"
+                                    for a in attempts) or "n/a"),
+            ("Archive entries", (f"{arch.get('entries', 0)} ({arch.get('extracted_files', 0)} text files analysed, "
+                                f"{arch.get('refused', 0)} refused)")),
+            ("Source files analysed", str((result.get("stats") or {}).get("source_files", 0)))]
+    recs = result.get("recommendations") or []
+    paths = {"md": d / "report.md", "json": d / "report.json", "html": d / "report.html"}
+    counts = {s: sum(1 for x in findings if x.get("severity") == s) for s in ORDER}
+    L = [f"# Code Security Report: {name}", ""] + [f"- **{k}:** {v}" for k, v in meta]
+    L += ["", "## Summary", "", citations.to_markdown(summary, sources),
+          "", "## Findings by severity", "", "| Severity | Count |", "|---|---|"]
+    L += [f"| {s.upper()} | {counts[s]} |" for s in ORDER]
+    if red_flags:
+        L += ["", "## Red flags", ""] + [f"- {x}" for x in red_flags]
+    if recs:
+        L += ["", "## Recommendations", "", "| Severity | Issue | Count | What to do |", "|---|---|---|---|"]
+        L += [f"| {r.get('severity', '').upper()} | {r.get('rule')} ({r.get('cwe') or 'n/a'}) | {r.get('count')} | "
+              f"{str(r.get('recommendation') or '').replace('|', '/')} |" for r in recs]
+    L += ["", "## Detailed findings", ""]
+    for x in findings:
+        sid = citations.source_for_finding(sources, x)
+        ref = f" [{sid}](#src-{sid})" if sid else ""
+        L += [f"### [{str(x.get('severity')).upper()}] {x.get('title')}{ref}", "",
+              (f"- **Category:** {x.get('category')}  |  **CWE:** {x.get('cwe') or 'n/a'}  |  "
+               f"**Confidence:** {x.get('confidence')}  |  **Source:** {x.get('source')}"),
+              f"- **Location:** {x.get('affected_url') or 'n/a'}", "", str(x.get("description") or ""), ""]
+        if x.get("evidence"):
+            L += ["```", str(x["evidence"]).replace("```", "'''"), "```", ""]
+        if x.get("recommendation"):
+            L += [f"**Fix:** {x['recommendation']}", ""]
+    if sources:
+        L += ["## Sources", ""] + citations.sources_markdown(sources) + [""]
+    paths["md"].write_text("\n".join(L), encoding="utf-8")
+    paths["json"].write_text(json.dumps({**result, "red_flags": red_flags, "sources": sources}, indent=2),
+                             encoding="utf-8")
+    paths["html"].write_text(render_html(
+        title=f"Code Security Report: {name}", meta=meta, summary=summary, findings=findings, sources=sources,
+        red_flags=red_flags, blocked=[], recommendations=recs,
+        downloads=[("Markdown", "report.md"), ("JSON", "report.json"), ("DOCX", "report.docx")],
+        download_base=d.name), encoding="utf-8")
+    try:
+        from scopeguard.docx_report import build_docx
+        build_docx(d / "report.docx", title="Code Security Report", target=name, meta=meta, summary=summary,
+                   findings=findings, sources=sources,
+                   red_flags=red_flags + [f"Fix {r['rule']} ({r['count']}x): {r['recommendation']}" for r in recs],
+                   blocked=[], summary_heading="Summary")
+        paths["docx"] = d / "report.docx"
+    except ImportError:  # python-docx is optional for the stdlib CLI
+        pass
+    return {k: str(v) for k, v in paths.items()}

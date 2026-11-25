@@ -20,6 +20,7 @@ import sys
 import urllib.parse as up
 
 from scopeguard import netpolicy
+from scopeguard.limits import OOM_EXIT_CODE
 
 
 def _install_audit_hook(allowed_hosts: set[str], allowed_ips: set[str], allowed_ports: set[int],
@@ -182,10 +183,16 @@ def main() -> None:
     os.chdir(sandbox_dir)
     _install_audit_hook(hosts, ips, ports, sandbox_dir)
 
+    reserve = bytearray(4 * 1024 * 1024)  # released on MemoryError so the error can still be written
     try:
         result = engine.run_scan(**scan)
         out = {"ok": True, "result": result, "sandbox": {
             "egress_ips": sorted(ips), "egress_ports": sorted(ports)}}
+    except MemoryError:
+        del reserve
+        sys.stdout.write(json.dumps({"ok": False, "error": "out of memory"}))
+        sys.stdout.flush()
+        raise SystemExit(OOM_EXIT_CODE) from None
     except Exception as exc:  # noqa: BLE001 - report, never crash silently
         out = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     sys.stdout.write(json.dumps(out))

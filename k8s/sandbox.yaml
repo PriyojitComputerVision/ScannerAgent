@@ -1,0 +1,143 @@
+# Kubernetes Job sandbox for code checks and uploaded-code scans (scopeguard/k8s.py).
+# No Docker and no custom image: each scan is a batch/v1 Job running a stock Python
+# image (K8S_IMAGE, default python:3.12-slim; pin a digest). The analyzer code is put
+# into an immutable ConfigMap (sha256-named, verified before use) and mounted read-only.
+#
+#   kubectl apply -f k8s/sandbox.yaml
+#
+# Creates:
+#   * namespace scopeguard-sandbox, Pod Security "restricted" enforced
+#   * NetworkPolicy scopeguard-deny-all: no ingress, no egress for every pod there
+#     (scopeguard refuses to run a pod when it is missing or allows traffic; your CNI
+#     must enforce NetworkPolicy, e.g. Calico/Cilium)
+#   * ResourceQuota + LimitRange: caps total sandbox memory/CPU and pod count
+#   * ServiceAccount scopeguard-scanner (namespace scopeguard) + Role/RoleBinding that
+#     allow ONLY running/deleting Jobs, finding/deleting their pods, attaching to them,
+#     reading their logs and creating the analyzer ConfigMap in scopeguard-sandbox. Run the API server with that service account (or
+#     give its kubeconfig user the same Role).
+# Optional: a RuntimeClass such as gVisor (runsc) or Kata, then K8S_RUNTIME_CLASS=gvisor.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: scopeguard-sandbox
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: scopeguard-deny-all
+  namespace: scopeguard-sandbox
+spec:
+  podSelector: {}
+  policyTypes: ["Ingress", "Egress"]
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: scopeguard-sandbox-quota
+  namespace: scopeguard-sandbox
+spec:
+  hard:
+    pods: "4"
+    limits.memory: 16Gi
+    limits.cpu: "4"
+    limits.ephemeral-storage: 2Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: scopeguard-sandbox-limits
+  namespace: scopeguard-sandbox
+spec:
+  limits:
+    - type: Container
+      max:
+        memory: 4Gi            # = SANDBOX_MEMORY_CEILING_MB
+        cpu: "2"
+      default:
+        memory: 256Mi
+        cpu: 500m
+        ephemeral-storage: 256Mi
+      defaultRequest:
+        memory: 256Mi
+        cpu: 250m
+        ephemeral-storage: 64Mi
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: scopeguard
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: scopeguard-scanner
+  namespace: scopeguard
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: scopeguard-sandbox-runner
+  namespace: scopeguard-sandbox
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods"]                 # the Job's pod: find it, force-delete it on timeout
+    verbs: ["get", "list", "delete"]
+  - apiGroups: [""]
+    resources: ["pods/attach"]          # stream the input zip into the analyzer's stdin
+    verbs: ["create", "get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]           # the analyzer code (immutable, sha256-named)
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get"]              # pre-flight check of scopeguard-deny-all
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: scopeguard-sandbox-runner
+  namespace: scopeguard-sandbox
+subjects:
+  - kind: ServiceAccount
+    name: scopeguard-scanner
+    namespace: scopeguard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: scopeguard-sandbox-runner
+---
+# cluster_status() reads the namespace object: allow just that one.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: scopeguard-sandbox-namespace-reader
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: ["scopeguard-sandbox"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: scopeguard-sandbox-namespace-reader
+subjects:
+  - kind: ServiceAccount
+    name: scopeguard-scanner
+    namespace: scopeguard
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: scopeguard-sandbox-namespace-reader
