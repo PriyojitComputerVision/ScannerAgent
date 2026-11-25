@@ -154,6 +154,9 @@ function short(obj) {
 const PROFILE_NAMES = { quick: 'Quick', standard: 'Standard', aggressive: 'Aggressive', auth_deep: 'Auth deep' };
 let scannerProfiles = Object.keys(PROFILE_NAMES).map((p) => ({ profile: p, allowed: true, description: '' }));
 let allowedHosts = []; // filled by the Allowed targets bar
+let chatRoles = [];    // the chatbot's token roles (from /api/info): admin unlocks sign-in and code uploads
+const isAdmin = () => chatRoles.includes('admin');
+const ADMIN_HINT = 'needs the chatbot to run as admin: set CHATBOT_ROLES=admin in chatbots/mcp_chatbot/.env and restart';
 
 async function loadProfiles() {
   for (let i = 0; i < 60; i++) {
@@ -264,11 +267,15 @@ function approvalForm(req) {
   }
   if (req.name === 'start_demo_scan') {
     const profile = profileSelect(args.profile || 'quick');
-    const signIn = checkbox('Sign in with the demo app\'s fake account (admin role)', !!args.sign_in);
+    // Signing in is an authenticated scan (scan:authenticated): only offered when the chatbot is admin.
+    const signIn = checkbox(isAdmin() ? 'Also sign in with the demo app\'s public, fake account (authenticated scan)'
+      : 'Sign in with the demo app\'s fake account: ' + ADMIN_HINT, isAdmin() && !!args.sign_in);
+    signIn.box.disabled = !isAdmin();
+    if (!isAdmin()) signIn.wrap.classList.add('disabled');
     node.append(el('p', 'hint', 'The built-in, deliberately vulnerable demo app on this machine.'),
       profileField(profile), signIn.wrap);
     return { node, run: 'Run demo scan', ready: () => profileOk(profile), watch: [profile],
-      collect: () => ({ ...args, profile: profile.value, sign_in: signIn.box.checked }) };
+      collect: () => ({ ...args, profile: profile.value, sign_in: isAdmin() && signIn.box.checked }) };
   }
   if (req.name === 'cancel_scan') {
     node.append(el('p', null, 'Stop scan ' + (args.scan_id || '') + ' after its current step?'));
@@ -487,7 +494,7 @@ async function uploadZip(file) {
     note.className = 'line err';
     note.textContent = 'Upload failed: ' + e.message;
   } finally {
-    attachBtn.disabled = false;
+    attachBtn.disabled = !isAdmin();
     fileInput.value = '';
   }
 }
@@ -605,6 +612,10 @@ async function info() {
       const d = r.data;
       conn.className = 'conn ok';
       conn.textContent = 'MCP ' + d.endpoint + ' · roles ' + (d.roles || []).join(',');
+      chatRoles = Array.isArray(d.roles) ? d.roles.map(String) : [];
+      attachBtn.disabled = !isAdmin();
+      attachBtn.title = isAdmin() ? 'Attach source code (.zip, max 10 MB, Python only for now)'
+        : 'Code uploads ' + ADMIN_HINT;
       const tools = d.tools || {};
       conn.title = 'Allowlisted: ' + (Array.isArray(d.allowlisted) ? d.allowlisted.join(', ') : d.allowlisted)
         + (d.scanner_llm === false ? ' · scanner without LLM steps' : '')

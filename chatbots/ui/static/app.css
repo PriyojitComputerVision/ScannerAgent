@@ -247,3 +247,6 @@ details.line pre { white-space: pre-wrap; color: var(--text-2); margin: 4px 0 6p
   box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
 }
 .jump[hidden] { display: none; }
+
+.check.disabled { opacity: .6; cursor: not-allowed; }
+.attach-btn:disabled { opacity: .5; cursor: not-allowed; }
