@@ -538,3 +538,81 @@ def test_bootstrap_without_kubectl_or_docker_means_python_sandbox(monkeypatch):
     assert Settings.model_fields["sandbox_require_kubernetes"].default is False
     out = codescan.scan_archive(_zip(), backend="kubernetes", require_kubernetes=False, timeout=120)
     assert out["sandbox"]["kind"] == "process" and out["findings"]
+
+
+# ------------------------------------------------------------------ web scan + attached code (SAST step)
+_ADMIN = rbac.Principal(sub="op", roles=["admin"])
+
+
+def test_attached_upload_is_analysed_in_the_scans_sast_step():
+    from pentest_agent import code_audit
+    from pentest_agent.tools.sandbox_check import execute_upload_analysis
+
+    meta = code_upload.store_bytes(_ADMIN, "app.zip", "application/zip", _zip())
+    out = execute_upload_analysis(upload_id=meta["upload_id"], principal=_ADMIN.state_dict(), session_id="web-1")
+    rules = {f["title"].split(":", 1)[0] for f in out["findings"]}
+    assert {"XSS_REFLECTED_RESPONSE", "IDOR_DIRECT_OBJECT_LOOKUP"} <= rules, rules
+    assert all(f["source"] == "code_upload" for f in out["findings"])
+    assert "Python only for now" in out["notes"] and out["upload"]["filename"] == "app.zip"
+    assert out["upload"]["recommendations"] and out["upload"]["guardrails"]["post"]
+    after = code_upload.get_upload(meta["upload_id"], _ADMIN)
+    assert after["status"] == "done" and after["report"]["folder"] == "web-1"
+    assert (code_upload.uploads_root() / meta["upload_id"] / "archive.zip").exists()  # kept for a resume
+    trail = json.dumps(code_audit.view(limit=20), default=str)
+    assert "scan.completed" in trail and '"via": "scan"' in trail
+
+
+def test_someone_elses_upload_is_not_analysed_in_a_scan():
+    from pentest_agent.tools.sandbox_check import execute_upload_analysis
+
+    meta = code_upload.store_bytes(_ADMIN, "app.zip", "application/zip", _zip())
+    out = execute_upload_analysis(upload_id=meta["upload_id"], principal={"sub": "eve", "roles": ["scanner"]},
+                                  session_id="web-2")
+    assert not out.get("findings") and "not analysed" in out["red_flags"][0]
+    out = execute_upload_analysis(upload_id=meta["upload_id"], principal=_ADMIN.state_dict(), session_id="web-3",
+                                  allowed=False)
+    assert "scan:source" in out["red_flags"][0]
+    with pytest.raises(code_upload.UploadError):
+        code_upload.check_attachable("0" * 32, _ADMIN)
+
+
+def test_graph_node_merges_the_upload_and_the_report_shows_it(monkeypatch, tmp_path):
+    from pentest_agent import graph
+    from pentest_agent.schemas import FinalReport, TargetInput
+    from pentest_agent.tools.report_tool import _render_markdown, render_report_html
+
+    with pytest.raises(ValueError):
+        TargetInput.model_validate({"url": "https://a.example/", "upload_id": "../../etc"})
+    meta = code_upload.store_bytes(_ADMIN, "app.zip", "application/zip", _zip())
+    monkeypatch.setattr(settings, "sandbox_check_enabled", False)
+    state = {"session_id": "web-4", "principal": _ADMIN.state_dict(), "allowed_domains": ["a.example"],
+             "target": {"url": "https://a.example/", "upload_id": meta["upload_id"], "authorization_confirmed": True},
+             "findings": []}
+    cmd = graph.sandbox_check_node(state)
+    up = cmd.update["sandbox_report"]["upload"]
+    assert cmd.goto == "dast" and cmd.update["findings"] and up["findings"] == len(cmd.update["findings"])
+    import datetime as dt
+
+    now = dt.datetime.now(dt.UTC)
+    report = FinalReport(session_id="web-4", target_url="https://a.example/", profile="standard", jwt_provided=False,
+                         auth_tested=False, pages_crawled=1, started_at=now, finished_at=now,
+                         findings=cmd.update["findings"], executive_summary="x", code_upload=up)
+    md = _render_markdown(report)
+    assert "Attached code upload (SAST)" in md and "Python only for now" in md and "app.zip" in md
+    html = render_report_html(report)
+    assert "Code upload (SAST)" in html and "<script" not in html.lower()
+
+
+def test_missing_kubernetes_is_a_normal_python_sandbox_run_not_a_red_flag():
+    assert k8s.not_available("kubectl not found")
+    assert k8s.not_available("namespace scopeguard-sandbox not reachable (Unable to connect to the server)")
+    assert not k8s.not_available("NetworkPolicy scopeguard-deny-all present but NOT enforced (egress reached)")
+    assert not k8s.not_available("not allowed to create jobs in scopeguard-sandbox")
+    from pentest_agent.tools.sandbox_check import red_flags_from_result
+
+    quiet = {"sandbox": {"kind": "process", "fallback_reason": "Kubernetes sandbox unavailable: kubectl not found",
+                         "fallback_expected": True}}
+    loud = {"sandbox": {"kind": "process", "fallback_reason": "Kubernetes sandbox unavailable: NOT enforced",
+                        "fallback_expected": False}}
+    assert red_flags_from_result(quiet) == [] and red_flags_from_result(loud)
+    assert code_upload.red_flags(quiet) == [] and code_upload.red_flags(loud)

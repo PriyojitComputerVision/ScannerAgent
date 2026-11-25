@@ -109,7 +109,7 @@
     <div class="card you"><span class="n">07</span><h3>You, when asked</h3><code>auth_challenge</code><span class="chip c-you">asks you</span>
       <p>Only if you ticked "pause for SSO / MFA": the scan waits and asks you. For a one-time code you type it in; for single sign-on you sign in in your own browser and hand over just the session. Your password and second factor never reach the agent. No answer in time: the scan continues as a visitor.</p></div>
     <div class="card"><span class="n">08</span><h3>The Code reader</h3><code>sandbox_check</code><span class="chip c-box">sealed box</span><span class="chip c-web">reads your pages</span>
-      <p>Copies the text of your pages and scripts into a sealed box with no internet and reads the code for risky patterns. It never runs anything; the box is destroyed when it's done.</p></div>
+      <p>Copies the text of your pages and scripts, plus any source code you attached (Python only for now), into a sealed box with no internet and reads the code for risky patterns. It never runs anything; the box is destroyed when it's done, and its findings join the same report.</p></div>
     <div class="card"><span class="n">09</span><h3>The Scanner</h3><code>dast</code><span class="chip c-web">visits your website</span><span class="chip c-box">isolated</span>
       <p>Runs the main security tests from an isolated helper that may only make reading requests, only inside the fence, only to the addresses it checked at the start, and never downloads files.</p></div>
     <div class="card"><span class="n">10</span><h3>The AI planner</h3><code>plan_probes</code><span class="chip c-ai">uses the AI</span>

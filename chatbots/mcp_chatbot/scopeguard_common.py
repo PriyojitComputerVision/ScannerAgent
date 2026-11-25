@@ -17,6 +17,7 @@ approved call itself, so the model never confirms authorization on its own.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
@@ -44,7 +45,10 @@ HERE = Path(__file__).resolve().parent
 REPO = Path(os.environ.get("SCOPEGUARD_HOME") or HERE.parents[1]).resolve()
 
 # Tools that start or stop real network activity: a human approves every call.
-APPROVAL_TOOLS = ("start_scan", "start_demo_scan", "cancel_scan")
+APPROVAL_TOOLS = ("start_scan", "start_demo_scan", "cancel_scan", "start_code_scan")
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # the scanner's MCP_MAX_UPLOAD_MB default
+UPLOAD_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+LANGUAGE_NOTICE = "Python only for now: other languages are only partly covered."
 # Groq's on_demand tier allows 8,000 tokens per request (prompt + reply budget), so tool
 # results are kept compact and old tool outputs are cleared from the history.
 MAX_TOOL_TEXT = 9_000      # chars of one tool result shown to the model
@@ -285,9 +289,15 @@ def host_of(target: str) -> str:
 def approval_description(tool_call: dict, state: Any = None, runtime: Any = None) -> str:
     name, args = tool_call["name"], tool_call.get("args") or {}
     if name == "start_scan":
+        code = (" The attached source code is analysed in its SAST step and reported with the web findings."
+                if args.get("upload_id") else "")
         return (f"Scan {args.get('target_url')} with the {args.get('profile', 'standard')} profile. "
                 "It sends real HTTP requests to that site. Approve only if you own the site or are "
-                "authorized to test it: your approval is the authorization confirmation.")
+                f"authorized to test it: your approval is the authorization confirmation.{code}")
+    if name == "start_code_scan":
+        return ("Analyse the attached source code in the sandbox (static analysis; nothing is run). Approve only "
+                f"if you own this code or may analyse it: your approval is the authorization confirmation. "
+                f"{LANGUAGE_NOTICE}")
     if name == "start_demo_scan":
         return (f"Scan the built-in, deliberately vulnerable demo app ({args.get('profile', 'quick')} "
                 "profile, loopback only).")
@@ -537,7 +547,7 @@ def decisions_from_answers(requests: list[dict], answers: list[dict]) -> list[di
             args = dict(ans.get("args") or args)
         elif kind != "approve":
             raise ValueError(f"unknown decision {kind!r}")
-        if name == "start_scan":
+        if name in ("start_scan", "start_code_scan"):
             args["authorization_confirmed"] = True
             out.append({"type": "edit", "edited_action": {"name": name, "args": args}})
         elif kind == "edit":
@@ -611,13 +621,16 @@ class Engine:
         self.recursion_limit = recursion_limit
         self.pending: dict[str, list[dict]] = {}  # thread -> action requests awaiting review
         self.policy = None  # optional async () -> dict: the scanner's scan_policy (no LLM)
+        # optional async (filename, base64) -> dict: MCP upload_code, called by the UI directly (the
+        # archive never passes through the model)
+        self.upload = None
         # What the output guardrail checks answers against (no prompt leakage).
         self.prompts = [load_prompt(), load_prompt("summary_prompt")]
 
     def _config(self, thread_id: str) -> dict:
         return {"configurable": {"thread_id": thread_id}, "recursion_limit": self.recursion_limit}
 
-    async def send(self, thread_id: str, text: str, emit: Emit) -> None:
+    async def send(self, thread_id: str, text: str, emit: Emit, attachment: dict | None = None) -> None:
         if self.pending.get(thread_id):
             emit({"type": "error", "text": "Answer the pending approval first."})
             return
@@ -628,7 +641,13 @@ class Engine:
             emit({"type": "guardrail", "stage": "input", "category": verdict.category, "text": verdict.message})
             emit({"type": "done", "waiting_for_approval": False})
             return
-        await self._stream({"messages": [{"role": "user", "content": verdict.text}]}, thread_id, emit)
+        content = verdict.text
+        if attachment:  # added after the input guardrail: these values come from the server, not the user
+            content += (f"\n\n[Attached source code: {attachment['filename']} (upload_id {attachment['upload_id']}). "
+                        "For a web scan plus this code call start_scan with this upload_id (analysed in the SAST "
+                        "step, one report); for the code alone call start_code_scan, then get_code_scan. "
+                        f"{LANGUAGE_NOTICE}]")
+        await self._stream({"messages": [{"role": "user", "content": content}]}, thread_id, emit)
 
     async def decide(self, thread_id: str, answers: list[dict], emit: Emit) -> None:
         from langgraph.types import Command
@@ -793,7 +812,8 @@ async def console_loop(engine: Engine, title: str) -> None:
 # =============================================================================
 class ApiServer:
     """POST /api/send {thread_id, message}, POST /api/decide {thread_id, answers},
-    GET /api/events?thread_id=..&after=N, GET /api/info.
+    POST /api/upload?thread_id=..&filename=x.zip (raw .zip body; attached to the thread's next
+    message), POST /api/detach {thread_id}, GET /api/events?thread_id=..&after=N, GET /api/info.
 
     Every request needs the header X-Chatbot-Key (CHATBOT_API_KEY, set by the UI
     launcher). Turns run in the background; the UI polls /api/events."""
@@ -805,6 +825,7 @@ class ApiServer:
             raise SystemExit("--serve needs CHATBOT_API_KEY (32+ chars); chatbots/ui/serve_ui.py sets it.")
         self.events: dict[str, list[dict]] = {}
         self.busy: set[str] = set()
+        self.attachments: dict[str, dict] = {}  # thread -> uploaded archive for its next message
         self.lock = threading.Lock()
 
     def _emitter(self, thread_id: str) -> Emit:
@@ -882,8 +903,49 @@ class ApiServer:
                 else:
                     self._reply(404, {"error": "not found"})
 
+            def _upload(self) -> None:
+                """Raw .zip -> MCP upload_code (checks again on the server: name, MIME, signature)."""
+                from urllib.parse import parse_qs, urlsplit
+
+                q = parse_qs(urlsplit(self.path).query)
+                tid = (q.get("thread_id") or [""])[0][:64]
+                name = (q.get("filename") or [""])[0][:120]
+                length = int(self.headers.get("Content-Length") or 0)
+                if not tid or not name.lower().endswith(".zip"):
+                    self._reply(400, {"error": "thread_id and a .zip filename are required"})
+                    return
+                if length <= 0 or length > MAX_UPLOAD_BYTES:
+                    self._reply(413, {"error": f"the archive must be 1 byte to {MAX_UPLOAD_BYTES // 1048576} MB"})
+                    return
+                data = self.rfile.read(length)
+                if not data.startswith(b"PK\x03\x04"):
+                    self._reply(415, {"error": "not a zip archive"})
+                    return
+                if api.engine.upload is None:
+                    self._reply(404, {"error": "the scanner does not offer upload_code (admin role needed, or "
+                                               "the tool is switched off)"})
+                    return
+                try:
+                    meta = asyncio.run_coroutine_threadsafe(
+                        api.engine.upload(name, base64.b64encode(data).decode()), api.loop).result(120)
+                except Exception as exc:  # noqa: BLE001 - reported to the UI
+                    self._reply(502, {"error": f"upload failed: {str(exc)[:300]}"})
+                    return
+                if not isinstance(meta, dict) or not UPLOAD_ID_RE.match(str(meta.get("upload_id") or "")):
+                    self._reply(502, {"error": str((meta or {}).get("error") or "upload refused")[:300]})
+                    return
+                att = {"upload_id": meta["upload_id"], "filename": str(meta.get("filename") or name)[:120],
+                       "sha256": str(meta.get("sha256") or "")[:64], "size": length,
+                       "language_notice": LANGUAGE_NOTICE}
+                with api.lock:
+                    api.attachments[tid] = att
+                self._reply(201, att)
+
             def do_POST(self):
                 if not self._authorized():
+                    return
+                if self.path.startswith("/api/upload?"):
+                    self._upload()
                     return
                 try:
                     length = min(int(self.headers.get("Content-Length") or 0), 64_000)
@@ -900,7 +962,16 @@ class ApiServer:
                     if not text:
                         self._reply(400, {"error": "message required"})
                         return
-                    err = api.start_turn(tid, lambda emit: api.engine.send(tid, text, emit))
+                    with api.lock:
+                        att = api.attachments.pop(tid, None)  # one message per attachment
+                    err = api.start_turn(tid, lambda emit: api.engine.send(tid, text, emit, att))
+                    if err and att:
+                        with api.lock:
+                            api.attachments.setdefault(tid, att)
+                elif self.path == "/api/detach":
+                    with api.lock:
+                        api.attachments.pop(tid, None)
+                    err = None
                 elif self.path == "/api/decide":
                     answers = body.get("answers")
                     if not isinstance(answers, list) or len(answers) != len(api.engine.pending.get(tid) or []):

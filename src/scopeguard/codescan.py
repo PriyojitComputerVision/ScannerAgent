@@ -85,7 +85,10 @@ def scan_archive(data: bytes, *, backend: str = "kubernetes", k8s_config: k8s.K8
             if require_kubernetes:
                 raise CodescanError(f"Kubernetes sandbox unavailable: {why}")
             backend = "process"
-            sandbox = {"kind": "process", "fallback_reason": f"Kubernetes sandbox unavailable: {why}"}
+            sandbox = {"kind": "process", "fallback_reason": f"Kubernetes sandbox unavailable: {why}",
+                       # not installed / not running = a normal run in the Python sandbox (a note);
+                       # a reachable but unsafe cluster (RBAC, NetworkPolicy, probe) stays a red flag
+                       "fallback_expected": k8s.not_available(why)}
         else:
             sandbox.update({"namespace": cfg.namespace, "image": cfg.image, "network": "deny-all NetworkPolicy",
                             "runtime_class": cfg.runtime_class or None, "workload": "Job"})

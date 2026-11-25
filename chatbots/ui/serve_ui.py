@@ -62,7 +62,9 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self';
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 COOKIE = "sg_chatbot"
 API_GET = ("info", "events", "policy")
-API_POST = ("send", "decide")
+API_POST = ("send", "decide", "detach")
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+ZIP_TYPES = ("application/zip", "application/x-zip-compressed")
 MAX_ALLOWED_HOSTS = 20
 _LABEL = r"(?!-)[a-z0-9-]{1,63}(?<!-)"
 HOST_RE = re.compile(rf"^(?=.{{1,253}}(?::\d+)?$){_LABEL}(?:\.{_LABEL})*(?::(\d{{1,5}}))?$")
@@ -240,11 +242,12 @@ def start_backend(state: State, scanner_url: str, roles: str | None,
                             stdout=log, stderr=subprocess.STDOUT, **POPEN_GROUP)
 
 
-def backend_call(state: State, method: str, path: str, body: bytes | None = None) -> tuple[int, dict]:
+def backend_call(state: State, method: str, path: str, body: bytes | None = None,
+                 content_type: str = "application/json", timeout: float = 30) -> tuple[int, dict]:
     req = urllib.request.Request(f"http://127.0.0.1:{state.backend_port}{path}", data=body, method=method,
-                                 headers={"X-Chatbot-Key": state.api_key, "Content-Type": "application/json"})
+                                 headers={"X-Chatbot-Key": state.api_key, "Content-Type": content_type})
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as exc:
         with contextlib.suppress(ValueError):
@@ -325,6 +328,9 @@ def make_handler(state: State):
             if self.headers.get("Origin", "") not in allowed_origins:
                 self._json(403, {"error": "cross-origin request refused"})
                 return
+            if self.path.startswith("/api/upload?"):
+                self._upload()
+                return
             if not self.headers.get("Content-Type", "").startswith("application/json"):
                 self._json(415, {"error": "JSON only"})
                 return
@@ -338,6 +344,25 @@ def make_handler(state: State):
                 self._json(404, {"error": "not found"})
                 return
             self._json(*backend_call(state, "POST", f"/api/{name}", raw))
+
+        def _upload(self) -> None:
+            """Raw .zip (MIME + size + signature checked here, again in the backend and on the
+            scanner), forwarded with ?thread_id=&filename=."""
+            from urllib.parse import parse_qs, urlencode, urlsplit
+
+            ctype = self.headers.get("Content-Type", "").split(";")[0].strip().lower()
+            if ctype not in ZIP_TYPES:
+                self._json(415, {"error": "only .zip archives (application/zip) are accepted"})
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0 or length > MAX_UPLOAD_BYTES:
+                self._json(413, {"error": f"the archive must be at most {MAX_UPLOAD_BYTES // 1048576} MB"})
+                return
+            q = parse_qs(urlsplit(self.path).query)
+            query = urlencode({"thread_id": (q.get("thread_id") or [""])[0][:64],
+                               "filename": (q.get("filename") or [""])[0][:120]})
+            self._json(*backend_call(state, "POST", f"/api/upload?{query}", self.rfile.read(length),
+                                     content_type=ctype, timeout=150))
 
         def _allowlist(self, raw: bytes) -> None:
             """{"add": "host or URL"} or {"remove": "host"}: restarts the scanner with the new list."""

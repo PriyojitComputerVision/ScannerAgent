@@ -262,7 +262,41 @@ def test_tools_can_be_switched_off_here_and_on_the_server():
     assert "watch_scan" not in names and "scan_policy" not in names
     assert {"watch_scan", "scan_policy"} <= set(report["not_offered_by_server"])
     assert set(CHATBOT_TOOL_NAMES) == {"scan_policy", "start_scan", "start_demo_scan", "cancel_scan",
-                                       "list_scans", "list_reports", "get_report", "watch_scan"}
+                                       "list_scans", "list_reports", "get_report", "start_code_scan",
+                                       "get_code_scan", "watch_scan"}
+
+
+def test_code_scans_need_approval_and_a_valid_upload_id():
+    from guardrails import check_tool_args
+    from scopeguard_common import APPROVAL_TOOLS, decisions_from_answers
+
+    assert "start_code_scan" in APPROVAL_TOOLS
+    uid = "a" * 32
+    out = decisions_from_answers([{"name": "start_code_scan", "args": {"upload_id": uid}}], [{"type": "approve"}])
+    assert out[0]["edited_action"]["args"] == {"upload_id": uid, "authorization_confirmed": True}
+    assert check_tool_args("start_code_scan", {"upload_id": uid}) is None
+    assert check_tool_args("start_code_scan", {"upload_id": "../x"})
+    assert check_tool_args("start_scan", {"target_url": "https://app.example.test/", "upload_id": "nope"})
+    assert check_tool_args("start_scan", {"target_url": "https://app.example.test/", "upload_id": uid}) is None
+
+
+async def test_an_attachment_reaches_the_model_after_the_input_guardrail():
+    from scopeguard_common import Engine
+
+    seen = []
+
+    class Agent:
+        pass
+
+    eng = Engine(Agent())
+
+    async def stream(payload, thread_id, emit):
+        seen.append(payload["messages"][0]["content"])
+
+    eng._stream = stream
+    await eng.send("t1", "scan my site with this code", lambda ev: None,
+                   {"upload_id": "b" * 32, "filename": "app.zip"})
+    assert seen and "upload_id " + "b" * 32 in seen[0] and "Python only for now" in seen[0]
 
 
 async def test_the_model_is_told_which_tools_are_on():

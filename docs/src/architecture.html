@@ -81,7 +81,7 @@
       <div class="box"><span class="t mono">/auth/token · /refresh</span><span>RS256 JWT, single-use refresh, roles per client (RBAC)</span></div>
       <div class="box"><span class="t mono">/ws?session_id=…</span><span>verify JWT · same-origin only · strict input · RBAC · cache · sign-in pauses</span></div>
       <div class="box"><span class="t mono">/ · /ui/* · /api/*</span><span>whitelisted console files; /api/info, /api/reports, /api/audit?trail=scans|code (audit:read)</span></div>
-      <div class="box"><span class="t mono">/api/uploads</span><span>code upload (.zip: name, MIME, signature) · pre-guardrails · Kubernetes Job (Python sandbox fallback) · post-guardrails · remediation</span></div>
+      <div class="box"><span class="t mono">/api/uploads</span><span>code upload (.zip: name, MIME, signature; Python only for now) · code only, or attached to a web scan (upload_id → SAST step, one report) · pre-guardrails · Kubernetes Job (Python sandbox fallback, egress blocked) · post-guardrails · remediation</span></div>
       <div class="box"><span class="t mono">/reports/…</span><span>no-script CSP viewer; HttpOnly cookie, never a token in the URL</span></div>
       <div class="box"><span class="t mono">/mcp · /a2a</span><span>agent endpoints (scan_service.py): operator allowlist · JWT principal · task owner · untrusted output</span></div>
       <div class="box wide"><b>Admission queues · admission.py</b><span>1 scan and 1 HTTP call at a time (server-wide), 50 more wait in order, then 429; queued clients get their position every 5 s. Requests rejected before the graph are still audited.</span></div>
@@ -112,7 +112,7 @@
         <div class="mod"><b>subagents/sast_subagent.py (subgraph)</b><span>skipped while sandbox_check runs the same JavaScript rules</span></div>
         <div class="tags"><i class="tag web">target</i></div>
 
-        <div class="node"><span class="t">sandbox_check</span><span>also does the JS SAST</span></div>
+        <div class="node"><span class="t">sandbox_check</span><span>also does the JS SAST + attached code upload</span></div>
         <div class="mod"><b>Kubernetes Job scopeguard-job-&lt;session_id&gt;</b><span>source + page/script text as a zip on stdin; deny-all NetworkPolicy; memory 5x, 10x on OOM retry (resumes from checkpoint); deleted after</span></div>
         <div class="tags"><i class="tag web">target</i><i class="tag box">sandbox</i></div>
 

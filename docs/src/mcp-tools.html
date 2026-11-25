@@ -151,7 +151,7 @@ every scan.</p>
         <h3>2 · Run</h3>
         <div class="tool"><span class="n">start_scan</span>
           <span class="d">target_url, authorization_confirmed, profile (quick / standard / aggressive / auth_deep),
-            credentials by name</span>
+            credentials by name, optional upload_id (code analysed in the SAST step, same report)</span>
           <div class="tags"><span class="tag you">you approve</span><span class="tag web">target</span><span class="tag guard">rules</span></div></div>
         <div class="tool"><span class="n">start_demo_scan</span>
           <span class="d">built-in vulnerable app on loopback; no allowlist entry needed</span>
@@ -185,7 +185,7 @@ every scan.</p>
       <div class="group run">
         <h3>5 · Code</h3>
         <div class="tool"><span class="n">upload_code</span>
-          <span class="d">.zip only (name, MIME type, zip signature checked); admin; nothing unpacked here</span>
+          <span class="d">.zip only (name, MIME type, zip signature checked); admin; nothing unpacked here; Python only for now</span>
           <div class="tags"><span class="tag guard">rules</span><span class="tag disk">disk</span></div></div>
         <div class="tool"><span class="n">start_code_scan</span>
           <span class="d">Kubernetes Job, no network; SAST, XSS, IDOR, secrets, IaC; memory 5x, 10x on OOM</span>

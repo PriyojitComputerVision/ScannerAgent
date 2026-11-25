@@ -171,8 +171,11 @@ When the user wants their own code reviewed (not a running site), send it as a `
    upload it in the console's **Code upload** card or with `POST /api/uploads` instead.
 2. `upload_code(filename="src.zip", content_base64=...)`. Only `.zip` is accepted (name, MIME type and zip
    signature are checked); it needs the admin role (`scan:source`).
-3. Ask the user to confirm they own the code or may analyse it, then
-   `start_code_scan(upload_id, authorization_confirmed=true)`.
+3. Ask the user to confirm they own the code or may analyse it, then either
+   `start_code_scan(upload_id, authorization_confirmed=true)` (code only, its own report) or, to test the
+   running app and its code together, `start_scan(target_url, authorization_confirmed=true, upload_id=...)`:
+   the code is analysed in the scan's SAST step and its findings (`source: code_upload`) are in the same
+   report. Tell the user the code analysis covers **Python projects only for now**.
 4. `get_code_scan(upload_id, wait_seconds=55)` until `status` is `done` or `failed`. It runs in a Kubernetes
    Job with no network; `sandbox.attempts` shows the memory used (5x the code, 10x on an out-of-memory retry
    that resumes from the checkpoint). `failed` with "Kubernetes sandbox unavailable" means the operator
