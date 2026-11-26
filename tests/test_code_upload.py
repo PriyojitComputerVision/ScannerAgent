@@ -546,11 +546,14 @@ def test_attached_upload_is_analysed_in_the_scans_sast_step():
     assert "No Python files" in out["notes"] and out["upload"]["filename"] == "app.zip"
     assert any("not a Python project" in f for f in out["red_flags"])
     assert out["upload"]["recommendations"] and out["upload"]["guardrails"]["post"]
-    after = code_upload.get_upload(meta["upload_id"], _ADMIN)
-    assert after["status"] == "done" and after["report"]["folder"] == "web-1"
-    assert (code_upload.uploads_root() / meta["upload_id"] / "archive.zip").exists()  # kept for a resume
+    # analysed: the whole upload folder (archive, checkpoint, meta) is gone, audited as such
+    assert not (code_upload.uploads_root() / meta["upload_id"]).exists()
+    with pytest.raises(code_upload.UploadError) as gone:
+        code_upload.get_upload(meta["upload_id"], _ADMIN)
+    assert gone.value.status == 404
     trail = json.dumps(code_audit.view(limit=20), default=str)
     assert "scan.completed" in trail and '"via": "scan"' in trail
+    assert '"upload.deleted"' in trail and "code analysis done" in trail
 
 
 def test_someone_elses_upload_is_not_analysed_in_a_scan():

@@ -511,7 +511,10 @@ LFS, hooks or redirects (`git -c protocol.allow=never -c protocol.https.allow=al
 and `GIT_CLONE_MAX_MB` caps; `.git` is dropped and only the text files are stored, as an upload. The
 `git` binary must be installed (the Docker image installs it).
 
-The stored code is kept until `CODE_UPLOAD_TTL_HOURS` so a resumed scan can analyse it again.
+**The upload folder is deleted as soon as the code analysis is done** (archive, checkpoint and metadata; audited as
+`upload.deleted`): the findings live in the scan's report, so your code is kept no longer than needed. Only a
+failed analysis keeps the folder, until `CODE_UPLOAD_TTL_HOURS`, so a resumed scan can retry it from its checkpoint.
+An upload id is therefore good for one scan.
 Without Docker or Kubernetes it runs in the Python process sandbox (isolated interpreter, scrubbed
 env, memory caps, an audit hook that blocks all egress, subprocesses and writes); that is a normal run,
 reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not enforced, RBAC) stays a red flag.
@@ -598,8 +601,8 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
   so files already analysed are not run again. A failed scan keeps its checkpoint, and starting it again
   later resumes too. The local process sandbox enforces the same limits (POSIX rlimits / Windows Job Object).
 * **Afterwards**: the findings are in the web scan's report (`/reports/<session_id>/`), its audit record has a
-  `code` block (source kind, upload id, archive hash, git URL and commit; never code), and the stored code
-  expires after `CODE_UPLOAD_TTL_HOURS`.
+  `code` block (source kind, upload id, archive hash, git URL and commit; never code), and the upload folder
+  is already deleted (a failed analysis keeps it until `CODE_UPLOAD_TTL_HOURS` for a retry).
 
 **Safety stop**: every agent node (and the sub-agents) may run at most
 `AGENT_MAX_ITERATIONS` times per scan (default 5); past that the step is skipped with a

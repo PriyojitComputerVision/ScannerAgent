@@ -139,25 +139,24 @@ def test_post_guardrails_flag_sandbox_violations_and_partial_results():
 # ------------------------------------------------------------------ end to end + separate trail
 def test_end_to_end_scan_writes_a_separate_verified_trail():
     meta = code_upload.store_bytes(ADMIN, "app.zip", "application/zip", _zip([("app/server.js", VULN)]))
-    code_upload.analyse_for_scan(meta["upload_id"], ADMIN, session_id="web-e2e")
-    done = code_upload.get_upload(meta["upload_id"], ADMIN)
-    assert done["status"] == "done"
+    done = code_upload.analyse_for_scan(meta["upload_id"], ADMIN, session_id="web-e2e")
     g = done["guardrails"]
     assert g["pre"] and all(c["passed"] for c in g["pre"]) and g["post"]
     events = [e for e, _ in _events()]
     assert events == ["upload.stored", "guardrail.pre", "scan.started", "sandbox.attempt", "guardrail.post",
-                      "scan.completed"]
-    completed = audit.read(settings.code_audit_log_path)[-1]
+                      "scan.completed", "upload.deleted"]  # the folder is removed once analysed
+    assert not (code_upload.uploads_root() / meta["upload_id"]).exists()
+    completed = [r for r in audit.read(settings.code_audit_log_path) if r["event"] == "scan.completed"][-1]
     assert completed["session_id"] == "web-e2e" and completed["client"]["via"] == "scan"
+    assert completed["detail"]["report"] == "/reports/web-e2e/"  # the web scan's own report holds the findings
     assert audit.verify(settings.code_audit_log_path, None, settings.reports_dir)["ok"]
     # separate trails: the code events never go into the scan log (its graph audit node writes that)
     assert not audit.read(settings.audit_log_path)
-    recs = {r["rule"]: r for r in done["summary"]["recommendations"]}
+    recs = {r["rule"]: r for r in done["result"]["recommendations"]}
     assert recs["IDOR_DIRECT_OBJECT_LOOKUP"]["remediation"]["group"] == "IDOR / access control"
     assert recs["XSS_REFLECTED_RESPONSE"]["remediation"]["example"]["language"] == "js"
     assert recs["DOM_XSS_SOURCE_TO_SINK"]["remediation"]["group"] == "DOM"
     assert recs["REDOS_NESTED_QUANTIFIER"]["remediation"]["group"] == "DoS / resource exhaustion"
-    assert done["report"]["folder"] == "web-e2e"  # the web scan's own report holds the code findings
 
 
 def test_audit_api_mcp_and_cli_read_the_code_trail(monkeypatch, capsys):
