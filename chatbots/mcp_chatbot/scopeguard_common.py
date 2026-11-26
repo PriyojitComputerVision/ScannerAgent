@@ -465,9 +465,12 @@ def _code_sast_markdown(code: dict | None) -> list[str]:
     for name in langs.get("not_python") or []:  # file names from the upload, shown as code
         clean = " ".join(_MARKER_RE.sub("", str(name)).split()).replace("`", "")[:200]
         out.append(f"  - not Python, partial coverage: `{clean}`")
-    for name in langs.get("warnings") or []:  # executables / scripts: always a warning
+    for name in langs.get("warnings") or []:  # executables / scripts; "...; note)" = a shell script
         clean = " ".join(_MARKER_RE.sub("", str(name)).split()).replace("`", "")[:200]
-        out.append(f"  - **WARNING** executable / script file, review it: `{clean}`")
+        if clean.endswith("; note)"):
+            out.append(f"  - Note: shell script, review it if unexpected: `{clean}`")
+        else:
+            out.append(f"  - **WARNING** executable / script file, review it: `{clean}`")
     if not by and code.get("language_notice"):
         out.append(f"- {code['language_notice']}")
     std = code.get("coding_standard") or {}
@@ -533,7 +536,8 @@ def compact_scan_result(r: dict) -> str:
             lines.append(f"coding standard (PEP 8; STYLE_* findings are info/low): "
                          f"{std.get('files_with_issues') or 0} file(s) with issues, by rule: {std.get('files_by_rule')}")
         if langs.get("warnings"):
-            lines.append("WARNING executable / script files (tell the user to review them): "
+            lines.append("executable / script files (level warning: tell the user to review them; "
+                         "level note: shell scripts, mention briefly): "
                          + "; ".join(str(n) for n in langs["warnings"][:20]))
     for flag in r.get("red_flags") or []:
         lines.append(f"red flag: {flag}")

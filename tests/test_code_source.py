@@ -579,11 +579,27 @@ def test_executables_and_scripts_are_flagged_as_warnings():
     rep = code_languages.language_report(path)
     assert [(w["file"], w["kind"], w["level"]) for w in rep["warnings"]] == [
         ("deploy.cmd", "Windows batch script", "warning"), ("run.bat", "Windows batch script", "warning"),
-        ("scripts/build.sh", "shell script", "warning"), ("tools/setup.exe", "Windows executable", "warning")]
-    (flag,) = code_languages.red_flags(rep)
-    assert flag.startswith("Warning: 4 executable / script file(s)")
+        ("tools/setup.exe", "Windows executable", "warning"), ("scripts/build.sh", "shell script", "note")]
+    (flag,) = code_languages.red_flags(rep)  # the shell script is not part of the red flag
+    assert flag.startswith("Warning: 3 executable / script file(s)") and "shell script" not in flag
+    assert code_languages.notes(rep) == [("Note: 1 shell script(s) in the source code; review them if you did not "
+                                         "expect them (ScopeGuard never runs them).")]
     md = "\n".join(code_languages.report_lines(rep))
-    assert "### Warnings: executable and script files" in md and "| `tools/setup.exe` | Windows executable | WARNING |" in md
+    assert "### Executable and script files" in md and "| `tools/setup.exe` | Windows executable | WARNING |" in md
+    assert "| `scripts/build.sh` | shell script | NOTE |" in md
+
+
+def test_a_shell_script_alone_is_a_note_not_a_red_flag():
+    from pentest_agent import code_languages
+    from pentest_agent.tools.sandbox_check import execute_upload_analysis
+
+    meta = code_source.store_files(ADMIN, [{"name": "app/views.py", "content": VULN_PY},
+                                           {"name": "scripts/deploy.sh", "content": "#!/bin/sh\necho hi\n"}])
+    out = execute_upload_analysis(upload_id=meta["upload_id"], principal=ADMIN.state_dict(), session_id="sh-1")
+    assert not any("executable / script" in f for f in out["red_flags"])
+    assert "Note: 1 shell script(s)" in out["notes"]
+    assert [(w["file"], w["level"]) for w in out["upload"]["languages"]["warnings"]] == [("scripts/deploy.sh", "note")]
+    assert code_languages.red_flags(out["upload"]["languages"]) == []
 
 
 def test_batch_files_can_be_sent_as_code_files_and_are_warned_about():

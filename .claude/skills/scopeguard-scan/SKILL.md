@@ -189,7 +189,8 @@ the admin role (`scan:source`) and covers **Python projects only for now** (tell
    flag such as "Code from git not analysed: pre-guardrail git_reachable failed (...)" explains a problem.
    `languages.not_python` lists files that are only partly covered (their findings say
    "[<language>, not Python: partial coverage]" and have low confidence) and `languages.warnings` lists
-   executable / script files (.exe, .bat, .cmd, .sh): point those out and ask the user to review them.
+   executable / script files with a `level`: `warning` for .exe/.bat/.cmd (point them out, ask the user to
+   review them), `note` for .sh shell scripts (mention briefly).
    The report's Guardrails table has the code step's pre- and post-guardrail verdicts.
    Python files are also checked against PEP 8: `STYLE_*` findings (info, or low for bare `except`,
    mutable defaults and wildcard imports), one per rule and file, summarised in

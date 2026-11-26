@@ -476,9 +476,10 @@ unpacked on the server): every program file that is not Python is listed in the 
 partial coverage", its findings get a `[<language>, not Python: partial coverage]` prefix and `low`
 confidence, and code with no (or mostly no) Python raises a red flag. The console's source-code dialog
 marks such files before you send them, and MCP `get_scan.code_sast.languages` returns the same verdict.
-**Executables and scripts are warnings.** `.exe`, `.bat`, `.cmd` and `.sh` files in the code (zip, files
-or git) are always listed under **Warnings: executable and script files** with a red flag; ScopeGuard
-never runs them, but someone should review them. `.bat`/`.cmd` can be sent as code files; an `.exe`
+**Executables and scripts are listed.** `.exe`, `.bat` and `.cmd` files are **warnings** (with a red flag),
+`.sh` shell scripts only a **note** (most projects ship harmless build/deploy scripts). Files in the code (zip, files
+or git) are listed under **Executable and script files** with their level; ScopeGuard never runs them,
+but someone should review them. `.bat`/`.cmd` can be sent as code files; an `.exe`
 only inside a `.zip`.
 **Guardrails before and after.** The code step's **pre-guardrails** (authorization confirmed, the
 `scan:source` permission, uploads enabled, a valid answer, then the upload's owner/archive or the git
