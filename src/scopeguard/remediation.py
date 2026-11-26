@@ -578,6 +578,8 @@ def language_of(location: str | None) -> str | None:
 def for_rule(rule: str, *, location: str | None = None, recommendation: str = "",
              category: str | None = None) -> dict:
     """The remediation block for one rule; the example matches the file's language when one exists."""
+    if rule.startswith("STYLE_"):
+        return _style_remediation(rule, recommendation)
     entry = REMEDIATIONS.get(rule)
     if entry is None:
         ref = CATEGORY_REF.get(category or "")
@@ -591,6 +593,19 @@ def for_rule(rule: str, *, location: str | None = None, recommendation: str = ""
              else "XSS" if rule in XSS_RULES else "DoS / resource exhaustion" if rule in DOS_RULES else None)
     return {"summary": entry["summary"], "steps": list(entry["steps"]), "example": example,
             "references": list(entry["references"]), "group": group}
+
+
+def _style_remediation(rule: str, recommendation: str) -> dict:
+    """Coding standard (PEP 8): the rule's advice, a Python before/after where one helps, PEP 8 link."""
+    from scopeguard import codestyle
+
+    advice = codestyle.RECOMMENDATIONS.get(rule) or recommendation
+    before_after = codestyle.EXAMPLES.get(rule)
+    example = {"language": "py", "before": before_after[0], "after": before_after[1]} if before_after else None
+    steps = [advice, ("Run a formatter / linter (e.g. ruff check --select E,W,N,F or black) in CI so the "
+                     "standard is kept automatically.")]
+    return {"summary": advice, "steps": steps, "example": example, "references": [codestyle.PEP8_URL],
+            "group": "Coding standard (PEP 8)"}
 
 
 def enrich(recommendations: list[dict]) -> list[dict]:

@@ -27,6 +27,11 @@ WORKDIR /app
 
 RUN useradd --create-home --uid 10001 app
 
+# git: source code from a git link at the SAST step (pentest_agent/code_source.py: hardened shallow clone).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
 # Dependencies first (cached layer), including the dev group for pytest.
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-install-project

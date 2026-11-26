@@ -262,22 +262,32 @@ def test_tools_can_be_switched_off_here_and_on_the_server():
     assert "watch_scan" not in names and "scan_policy" not in names
     assert {"watch_scan", "scan_policy"} <= set(report["not_offered_by_server"])
     assert set(CHATBOT_TOOL_NAMES) == {"scan_policy", "start_scan", "start_demo_scan", "cancel_scan",
-                                       "list_scans", "list_reports", "get_report", "start_code_scan",
-                                       "get_code_scan", "watch_scan"}
+                                       "list_scans", "list_reports", "get_report", "watch_scan"}
 
 
-def test_code_scans_need_approval_and_a_valid_upload_id():
+def test_code_goes_into_a_web_scan_with_approval_and_valid_ids():
     from guardrails import check_tool_args
-    from scopeguard_common import APPROVAL_TOOLS, decisions_from_answers
+    from scopeguard_common import (
+        APPROVAL_TOOLS,
+        approval_description,
+        decisions_from_answers,
+    )
 
-    assert "start_code_scan" in APPROVAL_TOOLS
-    uid = "a" * 32
-    out = decisions_from_answers([{"name": "start_code_scan", "args": {"upload_id": uid}}], [{"type": "approve"}])
-    assert out[0]["edited_action"]["args"] == {"upload_id": uid, "authorization_confirmed": True}
-    assert check_tool_args("start_code_scan", {"upload_id": uid}) is None
-    assert check_tool_args("start_code_scan", {"upload_id": "../x"})
-    assert check_tool_args("start_scan", {"target_url": "https://app.example.test/", "upload_id": "nope"})
-    assert check_tool_args("start_scan", {"target_url": "https://app.example.test/", "upload_id": uid}) is None
+    assert "start_code_scan" not in APPROVAL_TOOLS  # code is only analysed as a step of a web scan
+    uid, site = "a" * 32, "https://app.example.test/"
+    out = decisions_from_answers([{"name": "start_scan", "args": {"target_url": site, "upload_id": uid}}],
+                                 [{"type": "approve"}])
+    assert out[0]["edited_action"]["args"] == {"target_url": site, "upload_id": uid, "authorization_confirmed": True}
+    assert check_tool_args("start_scan", {"target_url": site, "upload_id": "nope"})
+    assert check_tool_args("start_scan", {"target_url": site, "upload_id": uid}) is None
+    git = "https://github.com/acme/shop.git"
+    assert check_tool_args("start_scan", {"target_url": site, "git_url": "https://github.com/acme/shop"})  # no .git
+    assert check_tool_args("start_scan", {"target_url": site, "git_url": git, "git_ref": "main"}) is None
+    assert check_tool_args("start_scan", {"target_url": site, "git_url": git, "upload_id": uid})
+    assert check_tool_args("start_scan", {"target_url": site, "git_url": "http://github.com/a/b"})
+    assert check_tool_args("start_scan", {"target_url": site, "git_url": "https://u:p@github.com/a/b"})
+    assert check_tool_args("start_scan", {"target_url": site, "git_url": git, "git_ref": "--upload-pack=x"})
+    assert "cloned" in approval_description({"name": "start_scan", "args": {"target_url": site, "git_url": git}})
 
 
 async def test_an_attachment_reaches_the_model_after_the_input_guardrail():
@@ -311,3 +321,27 @@ async def test_the_model_is_told_which_tools_are_on():
     await eng.send("t7", "what can you do?", lambda e: None)
     assert seen and "Tools switched on in this session: start_scan." in seen[0]
     assert "never call it" in seen[0]
+
+
+def test_result_block_shows_the_code_sast_step_and_marks_non_python_files():
+    from scopeguard_common import compact_scan_result, scan_result_markdown
+
+    r = {"status": "completed", "target_url": "http://app.test/", "severity_counts": {}, "findings": [],
+         "code_sast": {"source": {"kind": "git", "git_url": "https://github.com/acme/shop", "commit": "a" * 40},
+                       "source_files": 3, "findings": 2, "sandbox": "process",
+                       "languages": {"by_language": {"python": 2, "JavaScript": 1}, "python_project": True,
+                                     "verdict": "2 Python file(s) fully covered; 1 file(s) in other languages ...",
+                                     "not_python": [("<<<UNTRUSTED_CONTENT_START>>>\nweb/app.js (JavaScript)\n"
+                                                    "<<<UNTRUSTED_CONTENT_END>>>")],
+                                     "warnings": [("<<<UNTRUSTED_CONTENT_START>>>\ninstall.bat (Windows batch script)\n"
+                                                   "<<<UNTRUSTED_CONTENT_END>>>")]}}}
+    r["code_sast"]["coding_standard"] = {"standard": "PEP 8", "files_with_issues": 1,
+                                         "files_by_rule": {"STYLE_BARE_EXCEPT": 1}, "codes": {"STYLE_BARE_EXCEPT": "E722"}}
+    md = scan_result_markdown(r)
+    assert "**Coding standard (PEP 8):** 1 Python file(s) with issues: STYLE_BARE_EXCEPT (E722) in 1 file(s)" in md
+    assert "**WARNING** executable / script file, review it: `install.bat (Windows batch script)`" in md
+    assert "#### Source code (code SAST step, same report)" in md and "git https://github.com/acme/shop" in md
+    assert "JavaScript (not Python, partial) 1" in md and "not Python, partial coverage: `web/app.js (JavaScript)`" in md
+    assert "UNTRUSTED" not in md
+    compact = compact_scan_result(r)
+    assert "source code (code_sast step, same report)" in compact and "UNTRUSTED" in compact  # markers kept for the model

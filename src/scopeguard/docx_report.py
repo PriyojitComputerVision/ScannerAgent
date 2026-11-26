@@ -376,8 +376,12 @@ class _Builder:
 
 def build_docx(path: str | Path, *, title: str, target: str, meta: list[tuple[str, str]],
                summary: str | None, findings: list, sources: dict[str, dict], red_flags: list[str],
-               blocked: list[str], summary_heading: str = "Executive Summary") -> Path:
-    """Write a formatted report to ``path``. Raises ImportError without python-docx."""
+               blocked: list[str], summary_heading: str = "Executive Summary",
+               recommendations: list[dict] | None = None, guardrails: dict | None = None) -> Path:
+    """Write a formatted report to ``path``. Raises ImportError without python-docx.
+
+    ``recommendations`` / ``guardrails``: the source-code SAST step's per-rule fixes and pre/post
+    guardrail verdicts, so the scan's one report also holds everything about the code."""
     b = _Builder(title)
     doc = b.doc
     counts = {s: sum(1 for f in findings if _sev(f) == s) for s in ORDER}
@@ -449,6 +453,32 @@ def build_docx(path: str | Path, *, title: str, target: str, meta: list[tuple[st
             p = doc.add_paragraph(style="List Bullet")
             r = p.add_run(_clean(rf))
             r.font.color.rgb = b.RGB.from_string("9B2C2C")
+
+    if recommendations:
+        doc.add_heading("Source Code: How to Fix (per rule)", level=2)
+        for rec in recommendations[:40]:
+            rem = rec.get("remediation") or {}
+            p = b.para(space_after=2)
+            b.badge(p, str(rec.get("severity") or "info").lower() if str(rec.get("severity") or "").lower()
+                    in ORDER else "info")
+            r = p.add_run(f"{_clean(rec.get('rule'))} x{int(rec.get('count') or 0)}"
+                          + (f"  ({_clean(rec.get('cwe'))})" if rec.get("cwe") else ""))
+            r.bold = True
+            b.para(_clean(rem.get("summary") or rec.get("recommendation") or ""), size=9.5, space_after=2)
+            for step in (rem.get("steps") or [])[:10]:
+                doc.add_paragraph(_clean(step), style="List Number")
+            example = rem.get("example") or {}
+            if example.get("after"):
+                b.para(f"Fixed ({_clean(example.get('language'))}):", italic=True, color=MUTED, size=8.5,
+                       space_after=0)
+                b.para(_clean(example["after"])[:2000], size=8.5, space_after=4)
+            for ref in (rem.get("references") or [])[:4]:
+                b.link_or_text(b.para(space_after=0), ref, size=8.5)
+    if guardrails:
+        doc.add_heading("Source Code: Guardrails", level=2)
+        b.kv_table([(f"{stage} · {_clean(c.get('name'))}",
+                     f"{'passed' if c.get('passed') else 'FAILED'}: {_clean(c.get('detail'))}")
+                    for stage in ("pre", "post") for c in (guardrails.get(stage) or [])][:40])
 
     # ---- detailed findings
     doc.add_page_break()

@@ -12,13 +12,16 @@ to package test -> drift check -> server).
 New to ScopeGuard? Start with **[How a scan works, told as a story](docs/scan-story.png)**: every
 agent as a character with one job, from your request to your report, in plain language.
 
-![Architecture: the browser console or a WebSocket client signs in and sends a scan request to the FastAPI server; the request waits in a server-wide queue, then runs the 13-step LangGraph pipeline; the auth_challenge step can pause for the operator (SSO / MFA), several steps send in-scope requests to the target, two call the Groq LLM, the report step writes files and the audit step appends a tamper-evident record.](docs/architecture.png)
+![Architecture: the browser console or a WebSocket client signs in and sends a scan request to the FastAPI server; the request waits in a server-wide queue, then runs the 15-step LangGraph pipeline; the auth_challenge and code_source steps can pause for the operator (SSO / MFA sign-in; source code at the SAST step), several steps send in-scope requests to the target, two call the Groq LLM, the report step writes files and the audit step appends a tamper-evident record.](docs/architecture.png)
 
 A client signs in at `/auth/token` and sends the scan request over `/ws`. The request waits in the
 server-wide queue (1 scan runs at a time, up to 50 wait; see [API management](#api-management-queues)),
-then the server runs the LangGraph pipeline `validate → recon → auth → [auth_challenge] → sast → sandbox_check → dast → plan_probes → run_probes → aggregate → summarize → report → audit`
+then the server runs the LangGraph pipeline `validate → recon → auth → [auth_challenge] → code_source → [code_sast] → sast → sandbox_check → dast → plan_probes → run_probes → aggregate → summarize → report → audit`
 and streams progress back. `auth_challenge` runs only when the target needs a human for SSO or MFA
-(see [Sign-in with SSO / MFA](#sign-in-with-sso--mfa-human-in-the-loop)); every route, including
+(see [Sign-in with SSO / MFA](#sign-in-with-sso--mfa-human-in-the-loop)); `code_source` is the SAST step's
+human in the loop: it pauses and asks you for code files, a .zip or a public repository's `.git` link (or skip), and
+`code_sast` analyses that code in the sandbox (see [Source code at the SAST step](#source-code-at-the-sast-step-human-in-the-loop));
+every route, including
 refused and safety-stopped runs, ends in `audit` (see [Audit log](#audit-log)). `sast` runs only when the sandbox check is off (`SANDBOX_CHECK_ENABLED=false`):
 otherwise `sandbox_check` applies the same JavaScript rules inside its Kubernetes Job
 (`scopeguard-job-<session_id>`, deleted after the run). Orange lines mark the only traffic to the target website (in scope only).
@@ -29,11 +32,12 @@ standalone through `python -m scopeguard.cli`.
 
 ### Agent graph
 
-<img src="docs/agent-tree.png" alt="LangGraph agent graph: validate, recon, auth, the sast subgraph (run_sast), sandbox_check, dast, plan_probes, run_probes, aggregate, summarize, report; dashed edges are Command routes, including each step's safety stop to aggregate." width="360">
+<img src="docs/agent-tree.png" alt="LangGraph agent graph: validate, recon, auth, auth_challenge, code_source (asks you for source code at the SAST step), code_sast, the sast subgraph (run_sast), sandbox_check, dast, plan_probes, run_probes, aggregate, summarize, report, audit; dashed edges are Command routes, including each step's safety stop to aggregate." width="360">
 
 Drawn by LangGraph itself (`get_graph(xray=True).draw_mermaid()`). Solid edges are fixed, dashed
 edges are `Command(goto=...)` routes declared in each node's return annotation, and the `sast` box
-is the SAST sub-agent running as a subgraph. The LLM steps (`plan_probes`, `summarize`) are their own
+is the SAST sub-agent running as a subgraph. `code_source` and `auth_challenge` are the human-in-the-loop
+steps (LangGraph `interrupt`); `code_sast` analyses your source code in the sandbox. The LLM steps (`plan_probes`, `summarize`) are their own
 nodes, so their results are checkpointed and a resumed run doesn't call the LLM again. Regenerate
 after changing the graph with `uv run python scripts/draw_graph.py` (writes
 [docs/agent-graph.mmd](docs/agent-graph.mmd) and the PNG; rendered locally, nothing is sent to a
@@ -71,7 +75,7 @@ uv run scopeguard-demo        # same, but always loopback-only and on a free por
 ```
 
 The console is served by the agent server itself at `http://127.0.0.1:8765/`: a live view of the
-13-step pipeline, an event stream, a findings radar, severity mix and risk grade, the cited executive
+15-step pipeline, an event stream, a findings radar, severity mix and risk grade, the cited executive
 summary (each `[Sn]` jumps to its finding), attack coverage, a findings explorer and all saved
 reports with html/docx/md/json downloads, and the **agent integrations** (MCP and A2A endpoints,
 see below). Admins also see the **audit trail** (live chain check) and
@@ -102,7 +106,7 @@ server runs with `--no-browser --no-target`.
 `uv run pentest-agent` also starts two agent endpoints next to the console. Both are listed in the
 startup banner and in the console's **Agent integrations** card:
 
-![MCP tools: the human operator, the MCP chatbot agent and coding assistants call twelve MCP tools over Streamable HTTP or stdio, grouped into discover (scan_policy), run (start_scan, start_demo_scan, cancel_scan, each approved by a person), follow (get_scan, list_scans), read (list_reports, get_report, verify_audit_log) and code (upload_code, start_code_scan, get_code_scan); every call goes through the shared ScanService rules before the scan pipeline sends in-scope requests to the target.](docs/mcp-tools.png)
+![MCP tools: the human operator, the MCP chatbot agent and coding assistants call ten MCP tools over Streamable HTTP or stdio, grouped into discover (scan_policy), run (start_scan, start_demo_scan, cancel_scan, each approved by a person), follow (get_scan, list_scans), read (list_reports, get_report, verify_audit_log) and code (upload_code: a .zip or code files for a scan's code SAST step); every call goes through the shared ScanService rules before the scan pipeline sends in-scope requests to the target.](docs/mcp-tools.png)
 
 
 | Endpoint | Who uses it | Auth |
@@ -406,7 +410,7 @@ Between the JS SAST and the live DAST, the agent runs a **sandbox check** of bac
 source code and the website content it fetched from the target:
 
 * It runs `scopeguard.codecheck` in a **Kubernetes Job** (no Docker, no custom image; see
-  [Uploaded code and the Kubernetes Job sandbox](#uploaded-code-and-the-kubernetes-job-sandbox)):
+  [Source code at the SAST step](#source-code-at-the-sast-step-human-in-the-loop)):
   deny-all NetworkPolicy, read-only root filesystem, dropped capabilities, non-root user;
   the analyzer also installs an audit hook, so any attempt to reach the network, run a
   process, or write/read outside the inputs is **blocked and reported as a red flag**.
@@ -449,27 +453,73 @@ The payloads contain no shells and no real executables — only a unique marker 
 executing server would echo back — so the control is tested without planting a webshell.
 Confirmed execution is reported CRITICAL (CWE-434).
 
-## Uploaded code and the Kubernetes Job sandbox
+## Source code at the SAST step (human in the loop)
 
-Upload a `.zip` of your source and get a static analysis with recommendations. The archive is
-unpacked and read **only inside a Kubernetes Job**; the code is never run. **Python only for now**: the code analysis is built and tested for Python projects; other languages are only partly covered, so a clean result for them means little.
+Source code is analysed **only as a step of the agent graph**, never on its own. You give a link to
+scan; when the scan reaches the SAST step, its `code_source` node pauses (a LangGraph `interrupt`,
+checkpointed) and asks you for the app's source code:
 
-Two ways to use an upload:
+* **code files** (select several; packed into a zip on the server) or **one `.zip`**, or
+* a **public git repository**: its `.git` clone link (`https://github.com/owner/repo.git`), optional
+  branch or tag (empty = the default branch), on `GIT_ALLOWED_HOSTS` (default GitHub, GitLab,
+  Bitbucket), or
+* **skip** (website only). No answer within `CODE_INPUT_TIMEOUT_SECONDS` (600) also means skip.
 
-| Mode | How | Result |
-| --- | --- | --- |
-| **Code only** | console **Scan code only**, `POST /api/uploads/<id>/scan`, MCP `start_code_scan` | its own code report (`upload-<id>`) |
-| **Web scan + code** | console **Attach to web scan**, `upload_id` in the WS request, MCP `start_scan(..., upload_id=...)`, A2A `"upload_id"` | analysed in the scan's SAST / code-check step (same sandbox, guardrails and code audit trail, `via=scan`); findings (`source: code_upload`) go into the same report, which gets an **Attached code upload (SAST)** section with per-rule fixes and guardrail verdicts |
+`code_sast` then unpacks and reads the code **only inside a Kubernetes Job** (or the process sandbox);
+the code is never run. Its findings (`source: code_upload`) go into the scan's own report, which gets a
+**Source code (code SAST step)** section (where the code came from, per-rule fixes, guardrail verdicts).
+**One document per scan**: the website findings, the JavaScript SAST, the source-code findings, the
+code's per-rule fixes and its guardrail verdicts are all in the same report (HTML, Markdown, JSON and
+DOCX); there is no separate code report.
+**Non-Python files are marked.** The code's files are classified from the zip's file list (nothing is
+unpacked on the server): every program file that is not Python is listed in the report as "not Python,
+partial coverage", its findings get a `[<language>, not Python: partial coverage]` prefix and `low`
+confidence, and code with no (or mostly no) Python raises a red flag. The console's source-code dialog
+marks such files before you send them, and MCP `get_scan.code_sast.languages` returns the same verdict.
+**Executables and scripts are warnings.** `.exe`, `.bat`, `.cmd` and `.sh` files in the code (zip, files
+or git) are always listed under **Warnings: executable and script files** with a red flag; ScopeGuard
+never runs them, but someone should review them. `.bat`/`.cmd` can be sent as code files; an `.exe`
+only inside a `.zip`.
+**Guardrails before and after.** The code step's **pre-guardrails** (authorization confirmed, the
+`scan:source` permission, uploads enabled, a valid answer, then the upload's owner/archive or the git
+checks below) and the sandbox's own pre-checks, and its **post-guardrails** (the sandbox output
+re-validated, then the step's own: findings confined to the upload with our source tag, non-Python
+findings marked, file names cleaned / secret-masked / withheld if they address AI agents, the git origin
+re-validated) are all printed in the report's **Guardrails** table, in MCP and in the code audit trail
+(`guardrail.pre` / `guardrail.post`, `stage: code_step`). Code refused by a pre-guardrail still gets a
+report section that says which check failed.
+**Python only for now**: the code analysis is built and tested for Python projects; other languages are only partly covered, so a clean result for them means little.
 
-The attached archive is kept until `CODE_UPLOAD_TTL_HOURS` so a resumed scan can analyse it again.
-Without Docker or Kubernetes both modes run in the Python process sandbox (isolated interpreter, scrubbed
+| How you answer | Console | WebSocket / API | MCP / A2A |
+| --- | --- | --- | --- |
+| Pause and ask (human in the loop) | **Ask me for source code at the SAST step** (on by default for admins), then the **source code** dialog | `"ask_for_code": true`; on `input_required` with `request.type == "code_source"` reply `{"type": "code_response", "action": "upload", "upload_id": ...}`, `{"action": "git", "git_url": "https://.../repo.git", "git_ref": <optional>}` or `{"action": "skip"}` | agents cannot answer a pause: name the code up front |
+| Name the code up front | — | `upload_id` or `git_url` (+ `git_ref`) in the scan request | MCP `upload_code` → `start_scan(upload_id=...)`, or `start_scan(git_url=...)`; A2A `"upload_id"` / `"git_url"` |
+
+Store code first with `POST /api/uploads?filename=src.zip` (raw `.zip`) or `POST /api/uploads/files`
+with `{"files": [{"name": "app/main.py", "content": "..."}]}` (relative paths of source/text files the
+analyzer reads, plus `.bat`/`.cmd`, at most `CODE_FILES_MAX_COUNT`, 1 MB each).
+
+Git links are checked step by step, each a **pre-guardrail** verdict in the report: only the
+repository's **`.git` clone link** is accepted (`https://github.com/owner/repo.git`, validated by the
+Pydantic `GitLink` model: https, no credentials, port, query or fragment), the host must be on
+`GIT_ALLOWED_HOSTS` and pass the network policy (never private/loopback/metadata), then a hardened
+`git ls-remote` proves the repository is **reachable, public and not empty** and that the branch/tag
+exists (one retry on a transient network error; nothing is downloaded yet). The console asks you to
+fix the link while the scan waits. Only then the clone runs: https only, no credentials, submodules,
+LFS, hooks or redirects (`git -c protocol.allow=never -c protocol.https.allow=always ... clone --depth 1
+--single-branch [--branch <ref>] -- <url>`), one retry on a transient error, `GIT_CLONE_TIMEOUT_SECONDS`
+and `GIT_CLONE_MAX_MB` caps; `.git` is dropped and only the text files are stored, as an upload. The
+`git` binary must be installed (the Docker image installs it).
+
+The stored code is kept until `CODE_UPLOAD_TTL_HOURS` so a resumed scan can analyse it again.
+Without Docker or Kubernetes it runs in the Python process sandbox (isolated interpreter, scrubbed
 env, memory caps, an audit hook that blocks all egress, subprocesses and writes); that is a normal run,
 reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not enforced, RBAC) stays a red flag.
 
-* **Where**: console card **Code upload** (admin), `POST /api/uploads?filename=src.zip` (raw body,
-  `Content-Type: application/zip`) then `POST /api/uploads/<id>/scan` with
-  `{"authorization_confirmed": true}`, or the MCP tools `upload_code` → `start_code_scan` →
-  `get_code_scan`. `GET /api/uploads/policy` shows the accepted types and Kubernetes readiness.
+* **Where**: the console's **source code** dialog at the SAST step (admin; the **Source code SAST** card
+  shows the sandbox status), `POST /api/uploads` / `POST /api/uploads/files` / a git link, or MCP
+  `upload_code` → `start_scan(upload_id=...)`. `GET /api/uploads/policy` shows the accepted types, the git
+  hosts and Kubernetes readiness.
 * **Type checks**: the name must end in `.zip`, the MIME type must be a zip type
   (`application/zip`, `application/x-zip-compressed`, `application/x-zip`, `application/octet-stream`),
   and the first bytes must be a zip signature (a renamed `.exe`/ELF/tarball is refused with 415).
@@ -489,11 +539,19 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
   in the code (ReDoS, regexes from input, unbounded body/upload sizes, HTTP calls without timeouts,
   loop/allocation sizes from input, XML entity expansion, login/reset/OTP routes without rate limiting).
   ScopeGuard only *detects* DoS weaknesses statically; it never sends denial-of-service traffic.
+* **Coding standard (PEP 8)** for Python files (`scopeguard/codestyle.py`, stdlib, runs in the same sandbox):
+  line length (79), tabs / indentation not a multiple of four, trailing whitespace, missing final newline,
+  several imports on one line, wildcard imports, bare `except`, `== None` / `== True`, lambdas assigned to
+  names, mutable default arguments (flake8-bugbear B006), CapWords classes and snake_case functions, and
+  files that do not parse. Each rule is **one finding per file** (count + first line numbers), `info`, or
+  `low` for the ones that hide bugs; at most 150 per scan so they never crowd out security findings. The
+  report gets a **Coding standard (PEP 8)** table with a fix per rule and the PEP 8 link; MCP
+  `get_scan.code_sast.coding_standard`, the console and the chatbot show the same summary.
 * **Remediation**: every rule carries a fix, and the IDOR, XSS, DOM, DoS, injection and SSRF rules carry
   structured guidance (`scopeguard/remediation.py`): a summary, ordered steps, a **before/after code fix in
   the language of the affected file** (JS/TS, Python or PHP) and OWASP Cheat Sheet links. Reports have a
-  **Recommendations** table (one row per rule) and a **Remediation** section; the console and
-  `get_code_scan` show the same.
+  **Recommendations** table (one row per rule) and a **Remediation** section in the scan report;
+  MCP `get_scan` returns a `code_sast` summary.
 * **Pre-guardrails** (before anything reaches the sandbox; a failure refuses the scan): `.zip` name, MIME
   type and zip signature, size cap, per-user upload rate (`CODE_UPLOAD_MAX_PER_HOUR`), the
   `authorization_confirmed` flag, archive integrity (SHA-256 unchanged since the upload), a metadata-only
@@ -527,7 +585,7 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
   `uv run python -m scopeguard.k8s --bootstrap`.
 * **Retried until ready**: while the cluster is down (Docker or the kind node started later), the server retries
   the bring-up every `K8S_RETRY_SECONDS` (60; 0 = start-up only) and switches new scans to Kubernetes Jobs once
-  it is ready, without a restart. The console's Code upload card refreshes itself (10 s while not ready, 30 s
+  it is ready, without a restart. The console's Source code SAST card refreshes itself (10 s while not ready, 30 s
   after) and shows the last check and retry.
 * **Network isolation is proven, not assumed** (`K8S_VERIFY_NETWORK_ISOLATION=true`): before trusting a
   cluster, a probe Job in the sandbox namespace tries to reach the Kubernetes API and the internet; if
@@ -539,9 +597,9 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
   **resumes from its checkpoint**: the analyzer streams a checkpoint after each batch of finished files,
   so files already analysed are not run again. A failed scan keeps its checkpoint, and starting it again
   later resumes too. The local process sandbox enforces the same limits (POSIX rlimits / Windows Job Object).
-* **Afterwards**: report in `/reports/upload-<id>/` (HTML, Markdown, JSON, DOCX), one audit record
-  (`client.via = "upload"`), and the archive is deleted after a successful scan (failed ones expire after
-  `CODE_UPLOAD_TTL_HOURS`).
+* **Afterwards**: the findings are in the web scan's report (`/reports/<session_id>/`), its audit record has a
+  `code` block (source kind, upload id, archive hash, git URL and commit; never code), and the stored code
+  expires after `CODE_UPLOAD_TTL_HOURS`.
 
 **Safety stop**: every agent node (and the sub-agents) may run at most
 `AGENT_MAX_ITERATIONS` times per scan (default 5); past that the step is skipped with a

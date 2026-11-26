@@ -28,6 +28,8 @@ import sys
 import urllib.parse as up
 from typing import ClassVar
 
+# codestyle: PEP 8 coding standard (stdlib; imported here, so before the sandbox audit hook)
+from scopeguard import codestyle
 from scopeguard.engine import A01, A02, A03, A05, A07, JS_RECOMMENDATIONS, JS_RULES, XSS
 from scopeguard.limits import OOM_EXIT_CODE
 from scopeguard.textsafe import strip_hyperlinks
@@ -382,7 +384,7 @@ _AUTH_PATHS = re.compile(r"(?i)/(?:log-?in|sign-?in|auth(?:enticate)?|token|pass
 _AUTH = re.compile(
     r"(?i)auth|login_required|isAuthenticated|require_?(?:user|admin|role|login)|passport|jwt|Depends\(|@PreAuthorize|@Secured|"
     r"permission|middleware|guard|protect|verify_?token|session\[|current_user|is_admin|role")
-RECOMMENDATIONS = {r[0]: r[6] for r in BACKEND_RULES} | dict(JS_RECOMMENDATIONS)
+RECOMMENDATIONS = {r[0]: r[6] for r in BACKEND_RULES} | dict(JS_RECOMMENDATIONS) | dict(codestyle.RECOMMENDATIONS)
 _SEV_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 
 # Content steering the scanner / an LLM (prompt injection) in website text.
@@ -478,6 +480,7 @@ class Results:
         self.stats = {"source_files": 0, "source_bytes": 0, "site_files": 0, "skipped_files": 0,
                       "symlinks_outside": 0}
         self._seen: set[tuple] = set()
+        self.style_findings = 0  # coding-standard findings, capped at codestyle.MAX_STYLE_FINDINGS
 
     def add(self, *, source, rid, severity, category, title, description, where, line_no, evidence,
             cwe, recommendation, confidence="medium") -> None:
@@ -683,6 +686,21 @@ def scan_file_level(res: Results, text: str, *, where: str, name: str) -> None:
 
 
 # --------------------------------------------------------------------------- backend code
+def scan_style(res: Results, text: str, *, where: str) -> None:
+    """Coding standard (PEP 8) for one Python file: one finding per rule, capped per scan so style
+    issues never crowd out security findings."""
+    for f in codestyle.findings_for_file(text, where):
+        if res.style_findings >= codestyle.MAX_STYLE_FINDINGS:
+            if res.style_findings == codestyle.MAX_STYLE_FINDINGS:
+                res.notice("limit", f"coding-standard (PEP 8) findings stopped at {codestyle.MAX_STYLE_FINDINGS}")
+                res.style_findings += 1
+            return
+        res.add(source="sandbox_source", rid=f["rid"], severity=f["severity"], category=f["category"],
+                title=f["title"], description=f["description"], where=where, line_no=f["line"],
+                evidence=f["evidence"], cwe=f["cwe"], recommendation=f["recommendation"], confidence="high")
+        res.style_findings += 1
+
+
 def scan_source(res: Results, root: str, progress: Progress | None = None) -> None:
     progress = progress or Progress()
     root_real = _norm(root)
@@ -724,6 +742,8 @@ def scan_source(res: Results, root: str, progress: Progress | None = None) -> No
                         js=ext in JS_EXT, backend=True, name=name)
             scan_routes(res, text, where=where, ext=ext)
             scan_file_level(res, text, where=where, name=name)
+            if ext in PY_EXT:
+                scan_style(res, text, where=where)
             del text
             progress.file_done(res, key)
     progress.flush(res, "source")

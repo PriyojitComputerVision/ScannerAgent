@@ -37,7 +37,6 @@ def _zip(entries) -> bytes:
 
 @pytest.fixture(autouse=True)
 def _env(monkeypatch, tmp_path):
-    monkeypatch.setattr(code_upload, "_spawn", lambda fn, *args: fn(*args))
     monkeypatch.setattr(settings, "code_upload_dir", str(tmp_path / "uploads"))
     monkeypatch.setattr(settings, "reports_dir", str(tmp_path / "reports"))
     monkeypatch.setattr(settings, "code_audit_log_path", str(tmp_path / "audit" / "code_audit.jsonl"))
@@ -72,7 +71,7 @@ def test_preflight_refuses_archives_with_nothing_to_analyse():
     meta = code_upload.store_bytes(ADMIN, "bin.zip", "application/zip",
                                    _zip([("tool.exe", b"MZ" + b"\0" * 50), ("node_modules/x.js", "a")]))
     with pytest.raises(code_upload.UploadError) as e:
-        code_upload.start_scan(meta["upload_id"], ADMIN, authorization_confirmed=True)
+        code_upload.analyse_for_scan(meta["upload_id"], ADMIN, session_id="web-g")
     assert e.value.status == 422 and "archive_preflight" in str(e.value)
     after = code_upload.get_upload(meta["upload_id"], ADMIN)
     failed = [c for c in after["guardrails"]["pre"] if not c["passed"]]
@@ -85,7 +84,7 @@ def test_tampered_archive_is_refused():
     path = code_upload.uploads_root() / meta["upload_id"] / "archive.zip"
     path.write_bytes(_zip([("a.py", "import os; os.system(input())")]))
     with pytest.raises(code_upload.UploadError, match="archive_integrity"):
-        code_upload.start_scan(meta["upload_id"], ADMIN, authorization_confirmed=True)
+        code_upload.analyse_for_scan(meta["upload_id"], ADMIN, session_id="web-g")
 
 
 def test_kubernetes_not_ready_is_a_pre_guardrail_failure(monkeypatch):
@@ -93,7 +92,7 @@ def test_kubernetes_not_ready_is_a_pre_guardrail_failure(monkeypatch):
     monkeypatch.setattr(settings, "sandbox_require_kubernetes", True)
     meta = code_upload.store_bytes(ADMIN, "a.zip", "application/zip", _zip([("a.py", "x = 1")]))
     with pytest.raises(code_upload.UploadError, match="sandbox_ready"):
-        code_upload.start_scan(meta["upload_id"], ADMIN, authorization_confirmed=True)
+        code_upload.analyse_for_scan(meta["upload_id"], ADMIN, session_id="web-g")
 
 
 # ------------------------------------------------------------------ post-guardrails
@@ -140,7 +139,7 @@ def test_post_guardrails_flag_sandbox_violations_and_partial_results():
 # ------------------------------------------------------------------ end to end + separate trail
 def test_end_to_end_scan_writes_a_separate_verified_trail():
     meta = code_upload.store_bytes(ADMIN, "app.zip", "application/zip", _zip([("app/server.js", VULN)]))
-    code_upload.start_scan(meta["upload_id"], ADMIN, authorization_confirmed=True)
+    code_upload.analyse_for_scan(meta["upload_id"], ADMIN, session_id="web-e2e")
     done = code_upload.get_upload(meta["upload_id"], ADMIN)
     assert done["status"] == "done"
     g = done["guardrails"]
@@ -149,19 +148,16 @@ def test_end_to_end_scan_writes_a_separate_verified_trail():
     assert events == ["upload.stored", "guardrail.pre", "scan.started", "sandbox.attempt", "guardrail.post",
                       "scan.completed"]
     completed = audit.read(settings.code_audit_log_path)[-1]
-    assert completed["report"]["files"]["report.html"]
+    assert completed["session_id"] == "web-e2e" and completed["client"]["via"] == "scan"
     assert audit.verify(settings.code_audit_log_path, None, settings.reports_dir)["ok"]
-    # separate trails: the scan log has one scan record, no code events
-    scan_log = audit.read(settings.audit_log_path)
-    assert len(scan_log) == 1 and "trail" not in scan_log[0]
+    # separate trails: the code events never go into the scan log (its graph audit node writes that)
+    assert not audit.read(settings.audit_log_path)
     recs = {r["rule"]: r for r in done["summary"]["recommendations"]}
     assert recs["IDOR_DIRECT_OBJECT_LOOKUP"]["remediation"]["group"] == "IDOR / access control"
     assert recs["XSS_REFLECTED_RESPONSE"]["remediation"]["example"]["language"] == "js"
     assert recs["DOM_XSS_SOURCE_TO_SINK"]["remediation"]["group"] == "DOM"
     assert recs["REDOS_NESTED_QUANTIFIER"]["remediation"]["group"] == "DoS / resource exhaustion"
-    html = (code_upload.Path(settings.reports_dir) / done["report"]["folder"] / "report.html").read_text("utf-8")
-    assert "<h2>Remediation</h2>" in html and "<h2>Guardrails</h2>" in html and "Fixed:" in html
-    assert "<script" not in html.lower()
+    assert done["report"]["folder"] == "web-e2e"  # the web scan's own report holds the code findings
 
 
 def test_audit_api_mcp_and_cli_read_the_code_trail(monkeypatch, capsys):
@@ -216,19 +212,18 @@ def test_every_analyzer_rule_has_some_remediation():
         assert block["summary"], rid
 
 
-def test_mcp_returns_guardrails_and_remediation(monkeypatch):
-    import asyncio
-
+def test_mcp_code_goes_through_a_web_scan(monkeypatch):
     monkeypatch.setattr(settings, "mcp_role", "admin")
     mcp_mod.reset_service()
     try:
         svc = mcp_mod.service()
         up = svc.upload_code("app.zip", base64.b64encode(_zip([("app/server.js", VULN)])).decode())
-        asyncio.run(svc.start_code_scan(up["upload_id"], authorization_confirmed=True))
-        res = asyncio.run(svc.get_code_scan(up["upload_id"]))
+        assert not hasattr(svc, "start_code_scan") and not hasattr(svc, "get_code_scan")
+        out = code_upload.analyse_for_scan(up["upload_id"], rbac.Principal(sub="mcp", roles=["admin"]),
+                                           session_id="mcp-1")
     finally:
         mcp_mod.reset_service()
-    assert res["guardrails"]["pre"] and res["guardrails"]["post"]
-    assert any(r.get("remediation", {}).get("steps") for r in res["summary"]["recommendations"])
+    assert out["guardrails"]["pre"] and out["guardrails"]["post"]
+    assert any(r.get("remediation", {}).get("steps") for r in out["result"]["recommendations"])
     assert [e for e, _ in _events()][:2] == ["upload.stored", "guardrail.pre"]
     assert audit.read(settings.code_audit_log_path)[0]["client"]["via"] == "mcp"

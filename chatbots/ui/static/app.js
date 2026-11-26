@@ -614,7 +614,7 @@ async function info() {
       conn.textContent = 'MCP ' + d.endpoint + ' · roles ' + (d.roles || []).join(',');
       chatRoles = Array.isArray(d.roles) ? d.roles.map(String) : [];
       attachBtn.disabled = !isAdmin();
-      attachBtn.title = isAdmin() ? 'Attach source code (.zip, max 10 MB, Python only for now)'
+      attachBtn.title = isAdmin() ? 'Attach source code (.zip, max 10 MB; analysed in the web scan; Python only for now, other files marked partial)'
         : 'Code uploads ' + ADMIN_HINT;
       const tools = d.tools || {};
       conn.title = 'Allowlisted: ' + (Array.isArray(d.allowlisted) ? d.allowlisted.join(', ') : d.allowlisted)

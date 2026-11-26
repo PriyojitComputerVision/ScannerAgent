@@ -43,12 +43,12 @@
 
   <div id="attachment" class="attachment" hidden role="status" aria-live="polite">
     <span class="att-name" id="att-name"></span>
-    <span class="att-note">Goes with your next message: ask for a web scan with this code (SAST step, one report) or a code-only scan. <b>Python only for now.</b></span>
+    <span class="att-note">Goes with your next message: ask for a web scan of your site with this code. The code is analysed in the scan's code SAST step, all in one report. Or paste a public git link instead. <b>Python only for now:</b> other files are marked &ldquo;not Python, partial coverage&rdquo;; .exe/.bat/.cmd/.sh files are flagged as warnings.</span>
     <button type="button" id="att-remove" class="ghost" title="Remove the attachment">Remove</button>
   </div>
   <form id="composer" class="composer" autocomplete="off">
     <input id="file" type="file" accept=".zip,application/zip,application/x-zip-compressed" hidden>
-    <button type="button" id="attach" class="ghost attach-btn" title="Attach source code (.zip, max 10 MB, Python only for now)" aria-label="Attach source code">+ Code</button>
+    <button type="button" id="attach" class="ghost attach-btn" title="Attach source code (.zip, max 10 MB; analysed in the web scan; Python only for now, other files marked partial)" aria-label="Attach source code">+ Code</button>
     <textarea id="input" rows="2" maxlength="4000" placeholder="Message the scanner agent (Enter to send, Shift+Enter for a new line)"></textarea>
     <button type="submit" id="send">Send</button>
   </form>

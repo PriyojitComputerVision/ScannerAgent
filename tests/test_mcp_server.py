@@ -271,7 +271,7 @@ def test_tool_list_parsing():
     assert mcp_mod.parse_tool_list("get_report; list_scans ,bogus,") == (["get_report", "list_scans"], ["bogus"])
     assert set(mcp_mod.MCP_TOOL_NAMES) == {
         "scan_policy", "start_scan", "start_demo_scan", "get_scan", "cancel_scan", "list_scans",
-        "list_reports", "get_report", "verify_audit_log", "upload_code", "start_code_scan", "get_code_scan"}
+        "list_reports", "get_report", "verify_audit_log", "upload_code"}
 
 
 def test_only_the_pentest_agent_profiles_are_offered():

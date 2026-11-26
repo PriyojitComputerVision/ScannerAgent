@@ -199,6 +199,11 @@ def _check_url(url) -> str | None:
 
 
 _UPLOAD_RE = re.compile(r"^[a-f0-9]{32}$")
+# A public https repository (no credentials, port, query); the scanner checks its host allowlist.
+# Only .git clone links (the scanner validates the same with its GitLink model).
+_GIT_URL_RE = re.compile(r"^https://[a-z0-9.-]{1,253}(?:/[A-Za-z0-9_.-]{1,100}){1,5}/[A-Za-z0-9_.-]{1,100}\.git$",
+                         re.IGNORECASE)
+_GIT_REF_RE = re.compile(r"^(?!-)(?!.*\.\.)[A-Za-z0-9._/-]{1,200}$")
 
 
 def _check_id(value, field: str) -> str | None:
@@ -226,10 +231,17 @@ def check_tool_args(name: str, args: dict | None) -> str | None:
         return f"profile must be one of: {', '.join(SCAN_PROFILES)}"
     if name == "start_demo_scan" and not isinstance(args.get("sign_in", False), bool):
         return "sign_in must be true or false"
-    needs_upload = name in ("start_code_scan", "get_code_scan") or (
-        name == "start_scan" and args.get("upload_id") is not None)
+    needs_upload = name == "start_scan" and args.get("upload_id") is not None
     if needs_upload and not (isinstance(args.get("upload_id"), str) and _UPLOAD_RE.match(args["upload_id"])):
         return "upload_id must be the 32-character id of an uploaded archive"
+    if name == "start_scan" and args.get("git_url") is not None:
+        if args.get("upload_id") is not None:
+            return "pass either upload_id or git_url, not both"
+        if not (isinstance(args["git_url"], str) and _GIT_URL_RE.match(args["git_url"])):
+            return "git_url must be a public repository's .git clone link, e.g. https://github.com/owner/repo.git"
+    if name == "start_scan" and args.get("git_ref") is not None and not (
+            isinstance(args["git_ref"], str) and _GIT_REF_RE.match(args["git_ref"])):
+        return "git_ref must be a branch or tag name"
     if name in ("get_scan", "cancel_scan", "watch_scan"):
         return _check_id(args.get("scan_id"), "scan_id")
     if name == "get_report":

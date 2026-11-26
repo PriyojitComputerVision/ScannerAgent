@@ -45,7 +45,7 @@ HERE = Path(__file__).resolve().parent
 REPO = Path(os.environ.get("SCOPEGUARD_HOME") or HERE.parents[1]).resolve()
 
 # Tools that start or stop real network activity: a human approves every call.
-APPROVAL_TOOLS = ("start_scan", "start_demo_scan", "cancel_scan", "start_code_scan")
+APPROVAL_TOOLS = ("start_scan", "start_demo_scan", "cancel_scan")
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # the scanner's MCP_MAX_UPLOAD_MB default
 UPLOAD_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 LANGUAGE_NOTICE = "Python only for now: other languages are only partly covered."
@@ -289,15 +289,13 @@ def host_of(target: str) -> str:
 def approval_description(tool_call: dict, state: Any = None, runtime: Any = None) -> str:
     name, args = tool_call["name"], tool_call.get("args") or {}
     if name == "start_scan":
-        code = (" The attached source code is analysed in its SAST step and reported with the web findings."
-                if args.get("upload_id") else "")
+        code = (" The attached source code is analysed in its code SAST step (sandbox) and reported with the "
+                "web findings." if args.get("upload_id") else
+                f" The git repository {args.get('git_url')} is cloned (public, shallow) and analysed in its code "
+                "SAST step; approve only if you own that code too." if args.get("git_url") else "")
         return (f"Scan {args.get('target_url')} with the {args.get('profile', 'standard')} profile. "
                 "It sends real HTTP requests to that site. Approve only if you own the site or are "
                 f"authorized to test it: your approval is the authorization confirmation.{code}")
-    if name == "start_code_scan":
-        return ("Analyse the attached source code in the sandbox (static analysis; nothing is run). Approve only "
-                f"if you own this code or may analyse it: your approval is the authorization confirmation. "
-                f"{LANGUAGE_NOTICE}")
     if name == "start_demo_scan":
         return (f"Scan the built-in, deliberately vulnerable demo app ({args.get('profile', 'quick')} "
                 "profile, loopback only).")
@@ -420,6 +418,7 @@ def scan_result_markdown(r: dict) -> str:
             fix = " ".join(str(f.get("recommendation") or "").split())[:200]
             out.append(f"- **{title}**" + (f" (x{g['n']})" if g["n"] > 1 else "") + f" - {urls or '-'}"
                        + (f" - {f['cwe']}" if f.get("cwe") else "") + (f" - fix: {fix}" if fix else ""))
+    out += _code_sast_markdown(r.get("code_sast"))
     if r.get("red_flags"):
         out += ["", "#### Red flags"] + [f"- {flag}" for flag in r["red_flags"]]
     files = r.get("report_files") or {}
@@ -431,6 +430,53 @@ def scan_result_markdown(r: dict) -> str:
     if r.get("error"):
         out += ["", f"**Error:** {r['error']}"]
     return "\n".join(out)
+
+
+_MARKER_RE = re.compile(r"<<<[A-Z_]+>>>")
+
+
+def _code_origin(code: dict) -> str:
+    src = code.get("source") or {}
+    if src.get("kind") == "git":
+        return f"git {src.get('git_url')}" + (f" ({src['git_ref']})" if src.get("git_ref") else "") + (
+            f" @ {str(src['commit'])[:12]}" if src.get("commit") else "")
+    if src.get("kind") == "files":
+        return f"{src.get('files') or '?'} code file(s) uploaded"
+    return ".zip archive uploaded"
+
+
+def _code_sast_markdown(code: dict | None) -> list[str]:
+    """The scan's code SAST step (same report): origin, counts and language coverage. The analysis
+    covers Python only for now, so every non-Python file is shown as partial coverage."""
+    if not isinstance(code, dict) or not code:
+        return []
+    out = ["", "#### Source code (code SAST step, same report)",
+           f"- **Code:** {_code_origin(code)}",
+           (f"- **Analysed:** {code.get('source_files') or 0} source file(s), {code.get('findings') or 0} finding(s), "
+           f"{code.get('sandbox') or '?'} sandbox")]
+    langs = code.get("languages") or {}
+    by = langs.get("by_language") or {}
+    if by:
+        out.append("- **Languages:** " + " · ".join(
+            f"{'Python' if k == 'python' else 'config/text' if k == 'config' else f'{k} (not Python, partial)'} {n}"
+            for k, n in by.items()))
+    if langs.get("verdict"):
+        out.append(f"- **Coverage:** {langs['verdict']}")
+    for name in langs.get("not_python") or []:  # file names from the upload, shown as code
+        clean = " ".join(_MARKER_RE.sub("", str(name)).split()).replace("`", "")[:200]
+        out.append(f"  - not Python, partial coverage: `{clean}`")
+    for name in langs.get("warnings") or []:  # executables / scripts: always a warning
+        clean = " ".join(_MARKER_RE.sub("", str(name)).split()).replace("`", "")[:200]
+        out.append(f"  - **WARNING** executable / script file, review it: `{clean}`")
+    if not by and code.get("language_notice"):
+        out.append(f"- {code['language_notice']}")
+    std = code.get("coding_standard") or {}
+    if std.get("standard"):
+        rules = ", ".join(f"{rid} ({(std.get('codes') or {}).get(rid, '?')}) in {n} file(s)"
+                          for rid, n in (std.get("files_by_rule") or {}).items())
+        out.append(f"- **Coding standard (PEP 8):** {std.get('files_with_issues') or 0} Python file(s) with issues"
+                   + (f": {rules}" if rules else ""))
+    return out
 
 
 def compact_scan_result(r: dict) -> str:
@@ -473,6 +519,22 @@ def compact_scan_result(r: dict) -> str:
         lines.append(f"- [{str(sev).upper()}] {title}" + (f" x{g['n']}" if g["n"] > 1 else "")
                      + f" | {f.get('cwe') or 'no CWE'} | confidence {f.get('confidence')} | at {urls or '-'}"
                      + (f" | fix: {fix}" if fix else ""))
+    code = r.get("code_sast") or {}
+    if code:  # the code SAST step; file names keep their untrusted markers
+        langs = code.get("languages") or {}
+        lines.append(f"source code (code_sast step, same report): {_code_origin(code)} | "
+                     f"{code.get('source_files') or 0} file(s), {code.get('findings') or 0} finding(s) | "
+                     f"languages: {langs.get('by_language')} | {langs.get('verdict') or code.get('language_notice')}")
+        if langs.get("not_python"):
+            lines.append("not Python (partial coverage; findings there are low confidence): "
+                         + "; ".join(str(n) for n in langs["not_python"][:20]))
+        std = code.get("coding_standard") or {}
+        if std.get("standard"):
+            lines.append(f"coding standard (PEP 8; STYLE_* findings are info/low): "
+                         f"{std.get('files_with_issues') or 0} file(s) with issues, by rule: {std.get('files_by_rule')}")
+        if langs.get("warnings"):
+            lines.append("WARNING executable / script files (tell the user to review them): "
+                         + "; ".join(str(n) for n in langs["warnings"][:20]))
     for flag in r.get("red_flags") or []:
         lines.append(f"red flag: {flag}")
     if r.get("executive_summary"):
@@ -547,7 +609,7 @@ def decisions_from_answers(requests: list[dict], answers: list[dict]) -> list[di
             args = dict(ans.get("args") or args)
         elif kind != "approve":
             raise ValueError(f"unknown decision {kind!r}")
-        if name in ("start_scan", "start_code_scan"):
+        if name == "start_scan":
             args["authorization_confirmed"] = True
             out.append({"type": "edit", "edited_action": {"name": name, "args": args}})
         elif kind == "edit":
@@ -644,8 +706,8 @@ class Engine:
         content = verdict.text
         if attachment:  # added after the input guardrail: these values come from the server, not the user
             content += (f"\n\n[Attached source code: {attachment['filename']} (upload_id {attachment['upload_id']}). "
-                        "For a web scan plus this code call start_scan with this upload_id (analysed in the SAST "
-                        "step, one report); for the code alone call start_code_scan, then get_code_scan. "
+                        "Call start_scan for the user's site with this upload_id: the code is analysed in the "
+                        "scan's code SAST step and reported with the web findings (code is never scanned alone). "
                         f"{LANGUAGE_NOTICE}]")
         await self._stream({"messages": [{"role": "user", "content": content}]}, thread_id, emit)
 

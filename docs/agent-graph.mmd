@@ -9,6 +9,8 @@ graph TD;
 	recon(recon)
 	auth(auth)
 	auth_challenge(auth_challenge)
+	code_source(code_source)
+	code_sast(code_sast)
 	sandbox_check(sandbox_check)
 	dast(dast)
 	plan_probes(plan_probes)
@@ -24,11 +26,16 @@ graph TD;
 	audit -.-> __end__;
 	auth -.-> aggregate;
 	auth -.-> auth_challenge;
-	auth -.-> sandbox_check;
-	auth -.-> sast\3arun_sast;
+	auth -.-> code_source;
 	auth_challenge -.-> aggregate;
-	auth_challenge -.-> sandbox_check;
-	auth_challenge -.-> sast\3arun_sast;
+	auth_challenge -.-> code_source;
+	code_sast -.-> aggregate;
+	code_sast -.-> sandbox_check;
+	code_sast -.-> sast\3arun_sast;
+	code_source -.-> aggregate;
+	code_source -.-> code_sast;
+	code_source -.-> sandbox_check;
+	code_source -.-> sast\3arun_sast;
 	dast -.-> aggregate;
 	dast -.-> plan_probes;
 	plan_probes -.-> aggregate;

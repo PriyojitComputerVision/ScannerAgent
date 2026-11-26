@@ -40,7 +40,7 @@ DEFAULT_IMAGE = "python:3.12-slim"
 CONFIGMAP_PREFIX = "scopeguard-analyzer-"
 APP_DIR = "/app"
 # Everything scopeguard.upload_worker imports (stdlib only); shipped as a ConfigMap.
-ANALYZER_MODULES = ("__init__", "upload_worker", "codecheck", "archive", "engine", "limits", "textsafe",
+ANALYZER_MODULES = ("__init__", "upload_worker", "codecheck", "codestyle", "archive", "engine", "limits", "textsafe",
                     "contentpolicy", "ratelimit")
 MAX_CONFIGMAP_BYTES = 900_000  # Kubernetes objects are capped at 1 MiB
 BOOT = ("import sys;sys.path.insert(0,'/app');"

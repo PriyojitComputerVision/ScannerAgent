@@ -132,10 +132,14 @@ straight to the scanner's MCP `upload_code` tool, never through the model, and i
 message. Then ask for:
 
 - **a web scan with the code**: the agent calls `start_scan` with the `upload_id`; the code is analysed in
-  the scan's SAST step and its findings are in the same report;
-- **the code only**: `start_code_scan`, then `get_code_scan`.
+  the scan's code SAST step (sandbox) and its findings are in the same report.
 
-Both need your approval (that is the authorization confirmation) and the `admin` role
+Or paste a **public git link** with the request ("scan http://localhost:3000 with the code at
+https://github.com/me/app.git"; the `.git` clone link): the agent passes it as `git_url` (branch/tag: `git_ref`) and the scanner
+checks it is reachable and the branch/tag exists, then clones it (shallow, no credentials, hosts on `GIT_ALLOWED_HOSTS`). Code is never scanned on its own: it is
+always a step of a web scan.
+
+Scans need your approval (that is the authorization confirmation) and the `admin` role
 (`CHATBOT_ROLES=admin`, upload needs `scan:source`). **Python only for now**: other languages are only
 partly covered. Remove an attachment with **Remove**.
 

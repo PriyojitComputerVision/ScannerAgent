@@ -47,7 +47,7 @@ NAME = "ScopeGuard MCP chatbot"
 # MCP tools the model may call directly. get_scan is used through watch_scan, which
 # streams progress and returns a compact result (Groq's per-request token limit).
 MODEL_TOOLS = ("scan_policy", "start_scan", "start_demo_scan", "cancel_scan", "list_scans", "list_reports",
-               "get_report", "start_code_scan", "get_code_scan")
+               "get_report")
 # upload_code is never given to the model (a base64 archive in the prompt): the UI calls it directly.
 POLL_SECONDS = 5
 

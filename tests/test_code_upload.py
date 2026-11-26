@@ -36,8 +36,7 @@ def _zip(entries=None) -> bytes:
 
 @pytest.fixture(autouse=True)
 def _inline_jobs(monkeypatch, tmp_path):
-    """Run the background scan thread inline, with fresh upload/report folders."""
-    monkeypatch.setattr(code_upload, "_spawn", lambda fn, *args: fn(*args))
+    """Fresh upload/report folders, process sandbox."""
     monkeypatch.setattr(settings, "code_upload_dir", str(tmp_path / "uploads"))
     monkeypatch.setattr(settings, "reports_dir", str(tmp_path / "reports"))
     monkeypatch.setattr(settings, "sandbox_backend", "process")
@@ -73,33 +72,20 @@ def test_upload_size_cap(monkeypatch):
     assert r.status_code == 413
 
 
-def test_upload_scan_report_and_audit_end_to_end():
+def test_upload_is_stored_and_code_is_only_analysed_inside_a_web_scan():
     with TestClient(websocket_server.app) as client:
         r = _post(client, _zip(), ctype="application/x-zip-compressed")  # what Windows browsers send
         assert r.status_code == 201, r.text
         uid = r.json()["upload_id"]
         assert r.json()["status"] == "uploaded" and len(r.json()["sha256"]) == 64
-
-        assert client.post(f"/api/uploads/{uid}/scan", json={}).status_code == 400   # no confirmation
-        r = client.post(f"/api/uploads/{uid}/scan", json={"authorization_confirmed": True})
-        assert r.status_code == 202, r.text
-        meta = client.get(f"/api/uploads/{uid}").json()
+        assert r.json()["source"] == {"kind": "zip"}
+        # no standalone code scan any more: code SAST is a step of the agent graph
+        assert client.post(f"/api/uploads/{uid}/scan", json={"authorization_confirmed": True}).status_code in (
+            404, 405)
         policy = client.get("/api/uploads/policy").json()
-
-    assert meta["status"] == "done", meta
-    rules = {rec["rule"] for rec in meta["summary"]["recommendations"]}
-    assert {"XSS_REFLECTED_RESPONSE", "IDOR_DIRECT_OBJECT_LOOKUP", "ZIP_SLIP", "SENSITIVE_ENV_FILE"} <= rules
-    assert all(rec["recommendation"] for rec in meta["summary"]["recommendations"])
-    assert meta["sandbox"]["kind"] == "process"
-    folder = meta["report"]["folder"]
-    html = (settings.reports_dir and (code_upload.Path(settings.reports_dir) / folder / "report.html")).read_text(
-        encoding="utf-8")
-    assert "Recommendations" in html and "<script" not in html.lower()
-    assert not (code_upload.uploads_root() / uid / "archive.zip").exists()        # deleted after the scan
-    rec = audit.read(settings.audit_log_path)[-1]
-    assert rec["client"]["via"] == "upload" and rec["outcome"] == "completed"
-    assert rec["report"]["files"]["report.html"]
     assert policy["accepted"]["extension"] == ".zip" and policy["memory"]["multiplier"] == 5
+    assert "files" in policy["accepted"] and policy["git"]["hosts"] == ["github.com", "gitlab.com", "bitbucket.org"]
+    assert set(policy["modes"]) == {"ask_at_sast", "up_front"}
     assert policy["kubernetes"]["namespace"] == "scopeguard-sandbox"
 
 
@@ -133,11 +119,12 @@ def test_failed_scan_keeps_archive_and_checkpoint_for_resume(monkeypatch):
     monkeypatch.setattr(code_upload.codescan, "scan_archive", boom)
     who = rbac.Principal(sub="alice", roles=["admin"])
     meta = code_upload.store_bytes(who, "a.zip", "application/zip", _zip())
-    code_upload.start_scan(meta["upload_id"], who, authorization_confirmed=True)
+    with pytest.raises(codescan.CodescanError):
+        code_upload.analyse_for_scan(meta["upload_id"], who, session_id="web-f")
     after = code_upload.get_upload(meta["upload_id"], who)
     assert after["status"] == "failed" and "10x" in after["error"]
     assert (code_upload.uploads_root() / meta["upload_id"] / "archive.zip").exists()
-    assert audit.read(settings.audit_log_path)[-1]["outcome"] == "failed"
+    assert audit.read(settings.code_audit_log_path)[-1]["event"] == "scan.failed"
 
 
 # ------------------------------------------------------------------ MCP tools
@@ -154,26 +141,28 @@ def mcp_admin(monkeypatch):
     mcp_mod.reset_service()
 
 
-async def test_mcp_upload_scan_and_results(mcp_admin):
+async def test_mcp_upload_zip_or_files_then_start_scan(mcp_admin):
+    tools = {t.name for t in await mcp_mod.mcp.list_tools()}
+    assert "upload_code" in tools and not {"start_code_scan", "get_code_scan"} & tools
     up = await _call("upload_code", {"filename": "app.zip", "content_base64": base64.b64encode(_zip()).decode()})
-    uid = up["upload_id"]
-    with pytest.raises(ToolError, match="authorization_confirmed"):
-        await mcp_mod.mcp.call_tool("start_code_scan", {"upload_id": uid, "authorization_confirmed": False})
-    await _call("start_code_scan", {"upload_id": uid, "authorization_confirmed": True})
-    res = await _call("get_code_scan", {"upload_id": uid, "wait_seconds": 5})
-    assert res["status"] == "done" and res["summary"]["recommendations"]
-    f = res["findings"][0]
-    assert f["location"].startswith("<<<UNTRUSTED") and (f["evidence"] is None or "UNTRUSTED" in f["evidence"])
-    assert "report_files" in res and res["report_files"]["html"].endswith("report.html")
-    assert all(u.startswith(("http://", "https://")) and "/reports/upload-" in u for u in res["report_files"].values())
+    assert up["source"] == {"kind": "zip"} and "start_scan" in up["next_step"]
+    up = await _call("upload_code", {"files": [{"name": "app/orders.js", "content": VULN_JS},
+                                               {"name": "app/views.py", "content": "x = 1\n"}]})
+    assert up["source"] == {"kind": "files", "count": 2} and up["filename"] == "2-files.zip"
+    meta = code_upload.check_attachable(up["upload_id"], rbac.Principal(sub="mcp", roles=["admin"]))
+    assert meta["upload_id"] == up["upload_id"]
     policy = await _call("scan_policy", {})
     assert policy["code_uploads"]["allowed"] is True and "kubernetes" in policy["code_uploads"]
+    assert "git_url" in policy["code_uploads"]["how"] and "start_code_scan" not in policy["code_uploads"]["how"]
 
 
 @pytest.mark.parametrize("args, message", [
     ({"filename": "app.tar", "content_base64": base64.b64encode(_zip()).decode()}, "only .zip"),
     ({"filename": "app.zip", "content_base64": "not base64!!"}, "not valid base64"),
     ({"filename": "app.zip", "content_base64": base64.b64encode(b"MZ" + b"\0" * 50).decode()}, "executable"),
+    ({}, "either content_base64"),
+    ({"files": [{"name": "../etc/passwd.py", "content": "x"}]}, "'..'"),
+    ({"files": [{"name": "tool.exe", "content": "x"}]}, "not a source/text file"),
 ])
 async def test_mcp_upload_refusals(mcp_admin, args, message):
     with pytest.raises(ToolError, match=message):
@@ -553,7 +542,9 @@ def test_attached_upload_is_analysed_in_the_scans_sast_step():
     rules = {f["title"].split(":", 1)[0] for f in out["findings"]}
     assert {"XSS_REFLECTED_RESPONSE", "IDOR_DIRECT_OBJECT_LOOKUP"} <= rules, rules
     assert all(f["source"] == "code_upload" for f in out["findings"])
-    assert "Python only for now" in out["notes"] and out["upload"]["filename"] == "app.zip"
+    # no Python in this archive: the note and a red flag say the results are partial
+    assert "No Python files" in out["notes"] and out["upload"]["filename"] == "app.zip"
+    assert any("not a Python project" in f for f in out["red_flags"])
     assert out["upload"]["recommendations"] and out["upload"]["guardrails"]["post"]
     after = code_upload.get_upload(meta["upload_id"], _ADMIN)
     assert after["status"] == "done" and after["report"]["folder"] == "web-1"
@@ -576,7 +567,7 @@ def test_someone_elses_upload_is_not_analysed_in_a_scan():
         code_upload.check_attachable("0" * 32, _ADMIN)
 
 
-def test_graph_node_merges_the_upload_and_the_report_shows_it(monkeypatch, tmp_path):
+def test_graph_code_nodes_analyse_the_upload_and_the_report_shows_it(monkeypatch, tmp_path):
     from pentest_agent import graph
     from pentest_agent.schemas import FinalReport, TargetInput
     from pentest_agent.tools.report_tool import _render_markdown, render_report_html
@@ -588,9 +579,16 @@ def test_graph_node_merges_the_upload_and_the_report_shows_it(monkeypatch, tmp_p
     state = {"session_id": "web-4", "principal": _ADMIN.state_dict(), "allowed_domains": ["a.example"],
              "target": {"url": "https://a.example/", "upload_id": meta["upload_id"], "authorization_confirmed": True},
              "findings": []}
-    cmd = graph.sandbox_check_node(state)
-    up = cmd.update["sandbox_report"]["upload"]
-    assert cmd.goto == "dast" and cmd.update["findings"] and up["findings"] == len(cmd.update["findings"])
+    cmd = graph.code_source_node(state)  # named in the request: no pause
+    assert cmd.goto == "code_sast" and cmd.update["code_source"]["upload_id"] == meta["upload_id"]
+    state.update(cmd.update)
+    cmd = graph.code_sast_node(state)
+    up = cmd.update["code_report"]
+    assert cmd.goto == "sast" and cmd.update["findings"] and up["findings"] == len(cmd.update["findings"])
+    assert up["source"] == {"kind": "zip"}
+    # the site/source-folder check no longer touches the upload
+    state.update(cmd.update)
+    assert "code_report" not in graph.sandbox_check_node(state).update
     import datetime as dt
 
     now = dt.datetime.now(dt.UTC)
@@ -598,9 +596,27 @@ def test_graph_node_merges_the_upload_and_the_report_shows_it(monkeypatch, tmp_p
                          auth_tested=False, pages_crawled=1, started_at=now, finished_at=now,
                          findings=cmd.update["findings"], executive_summary="x", code_upload=up)
     md = _render_markdown(report)
-    assert "Attached code upload (SAST)" in md and "Python only for now" in md and "app.zip" in md
+    assert "Source code (code SAST step)" in md and "Python only for now" in md and "app.zip" in md
+    assert ".zip archive uploaded" in md
+    assert "### How to fix (per rule)" in md and "### Guardrails" in md
     html = render_report_html(report)
-    assert "Code upload (SAST)" in html and "<script" not in html.lower()
+    assert "Code SAST" in html and "<script" not in html.lower()
+    assert "Guardrails" in html and "Remediation" in html
+    # one document for the whole scan: the Word report carries the code fixes and verdicts too
+    import docx
+
+    from pentest_agent.tools.report_tool import render_report_docx
+
+    path = render_report_docx(report, tmp_path / "report.docx")
+    text = "\n".join(p.text for p in docx.Document(str(path)).paragraphs)
+    tables = "\n".join(c.text for t in docx.Document(str(path)).tables for r in t.rows for c in r.cells)
+    assert "Source Code: How to Fix (per rule)" in text and "XSS_REFLECTED_RESPONSE" in text
+    assert "Source Code: Guardrails" in text and "archive_integrity" in tables
+    assert "Source code" in tables and ".zip archive uploaded" in tables
+    # Python only for now: the JavaScript file is named and marked in every format
+    assert "Not Python (partial coverage)" in tables and "app/orders.js (JavaScript)" in tables
+    assert "### Language coverage" in md and "partial (not Python)" in md
+    assert "Not Python (partial coverage)" in html
 
 
 def test_missing_kubernetes_is_a_normal_python_sandbox_run_not_a_red_flag():

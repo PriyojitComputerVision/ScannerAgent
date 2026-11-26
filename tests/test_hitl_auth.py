@@ -210,11 +210,9 @@ def test_skip_and_invalid_answers_continue_unauthenticated(target, answer):
 def _mini_graph():
     g = StateGraph(graph.AgentState)
     g.add_node("auth_challenge", graph.auth_challenge_node)
-    g.add_node("sandbox_check", lambda s: {"phase": "next_step"})
-    g.add_node("sast", lambda s: {"phase": "next_step"})
+    g.add_node("code_source", lambda s: {"phase": "next_step"})
     g.add_edge(START, "auth_challenge")
-    g.add_edge("sandbox_check", END)
-    g.add_edge("sast", END)
+    g.add_edge("code_source", END)
     return g.compile(checkpointer=InMemorySaver())
 
 
@@ -252,7 +250,7 @@ def test_auth_routes_to_the_challenge_only_when_needed(monkeypatch):
     monkeypatch.setattr(graph, "authenticate", Tool({"kind": "mfa", "status": "pending"}))
     assert graph.auth_node(state).goto == "auth_challenge" and calls["interactive"] is True
     monkeypatch.setattr(graph, "authenticate", Tool({}))
-    assert graph.auth_node(state).goto in ("sandbox_check", "sast")
+    assert graph.auth_node(state).goto == "code_source"  # then the SAST step (human in the loop for code)
     state["principal"] = rbac.Principal(sub="b", roles=["scanner"]).state_dict()  # never interactive
     graph.auth_node(state)
     assert calls["interactive"] is False

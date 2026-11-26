@@ -70,16 +70,18 @@
       <div class="act-label">Act 2 · Looking around</div>
       <div class="step web"><span class="n">6</span><b>Login helper</b><small>auth</small><span class="marks"><i class="d-web"></i></span></div>
       <div class="step you"><span class="n">7</span><b>You, when asked</b><small>auth_challenge · SSO / MFA</small><span class="marks"><i class="d-you"></i></span></div>
-      <div class="step box"><span class="n">8</span><b>Code reader</b><small>sandbox_check</small><span class="marks"><i class="d-web"></i><i class="d-box"></i></span></div>
-      <div class="step box"><span class="n">9</span><b>Scanner</b><small>dast</small><span class="marks"><i class="d-web"></i><i class="d-box"></i></span></div>
-      <div class="step ai"><span class="n">10</span><b>AI planner</b><small>plan_probes</small><span class="marks"><i class="d-ai"></i></span></div>
+      <div class="step you"><span class="n">8</span><b>You, with your code</b><small>code_source · files, .zip, git</small><span class="marks"><i class="d-you"></i></span></div>
+      <div class="step box"><span class="n">9</span><b>Code analyst</b><small>code_sast</small><span class="marks"><i class="d-box"></i></span></div>
+      <div class="step box"><span class="n">10</span><b>Code reader</b><small>sandbox_check · site</small><span class="marks"><i class="d-web"></i><i class="d-box"></i></span></div>
+      <div class="step box"><span class="n">11</span><b>Scanner</b><small>dast</small><span class="marks"><i class="d-web"></i><i class="d-box"></i></span></div>
+      <div class="step ai"><span class="n">12</span><b>AI planner</b><small>plan_probes</small><span class="marks"><i class="d-ai"></i></span></div>
 
       <div class="act-label">Act 3 · Testing and writing it up</div>
-      <div class="step web"><span class="n">11</span><b>Prober</b><small>run_probes</small><span class="marks"><i class="d-web"></i></span></div>
-      <div class="step"><span class="n">12</span><b>Collector</b><small>aggregate</small></div>
-      <div class="step ai"><span class="n">13</span><b>AI writer</b><small>summarize</small><span class="marks"><i class="d-ai"></i></span></div>
-      <div class="step"><span class="n">14</span><b>Publisher</b><small>report</small></div>
-      <div class="step"><span class="n">15</span><b>Notary</b><small>audit</small></div>
+      <div class="step web"><span class="n">13</span><b>Prober</b><small>run_probes</small><span class="marks"><i class="d-web"></i></span></div>
+      <div class="step"><span class="n">14</span><b>Collector</b><small>aggregate</small></div>
+      <div class="step ai"><span class="n">15</span><b>AI writer</b><small>summarize</small><span class="marks"><i class="d-ai"></i></span></div>
+      <div class="step"><span class="n">16</span><b>Publisher</b><small>report</small></div>
+      <div class="step"><span class="n">17</span><b>Notary</b><small>audit</small></div>
 
       <div class="act-label">Act 4 · Your report</div>
       <div class="step endcap" style="grid-column: span 2"><b>Your report + a signed record</b><small>web page · Word · Markdown · JSON · audit log</small></div>
@@ -108,25 +110,29 @@
       <p>If you gave login details, signs in so the logged-in pages can be tested too. It notices when a login really goes to a single sign-on provider or asks for a second factor, and never pretends that worked.</p></div>
     <div class="card you"><span class="n">07</span><h3>You, when asked</h3><code>auth_challenge</code><span class="chip c-you">asks you</span>
       <p>Only if you ticked "pause for SSO / MFA": the scan waits and asks you. For a one-time code you type it in; for single sign-on you sign in in your own browser and hand over just the session. Your password and second factor never reach the agent. No answer in time: the scan continues as a visitor.</p></div>
-    <div class="card"><span class="n">08</span><h3>The Code reader</h3><code>sandbox_check</code><span class="chip c-box">sealed box</span><span class="chip c-web">reads your pages</span>
-      <p>Copies the text of your pages and scripts, plus any source code you attached (Python only for now), into a sealed box with no internet and reads the code for risky patterns. It never runs anything; the box is destroyed when it's done, and its findings join the same report.</p></div>
-    <div class="card"><span class="n">09</span><h3>The Scanner</h3><code>dast</code><span class="chip c-web">visits your website</span><span class="chip c-box">isolated</span>
+    <div class="card you"><span class="n">08</span><h3>You, with your code</h3><code>code_source</code><span class="chip c-you">asks you</span>
+      <p>At the code step the scan waits and asks you for your app's source code: pick some code files or a .zip, paste the .git link of a public repository (GitHub, GitLab, Bitbucket; any branch or tag), or skip. The link is checked first, so you can fix it if it can't be reached. Untick "ask me for source code" and it never waits. No answer in time: the website is tested on its own.</p></div>
+    <div class="card"><span class="n">09</span><h3>The Code analyst</h3><code>code_sast</code><span class="chip c-box">sealed box</span>
+      <p>Reads the code you gave (Python only for now) inside a sealed box with no internet: risky patterns, leaked secrets, missing access checks, unsafe settings. A git link is copied first (latest version only, no passwords). Nothing is ever run; files that aren't Python are marked as only partly checked, programs and scripts (.exe, .bat, .sh) are flagged as warnings, and every finding comes with how to fix it, in the same report.</p></div>
+    <div class="card"><span class="n">10</span><h3>The Code reader</h3><code>sandbox_check</code><span class="chip c-box">sealed box</span><span class="chip c-web">reads your pages</span>
+      <p>Copies the text of your website's pages and scripts into a sealed box with no internet and reads that code for risky patterns. It never runs anything; the box is destroyed when it's done, and its findings join the same report.</p></div>
+    <div class="card"><span class="n">11</span><h3>The Scanner</h3><code>dast</code><span class="chip c-web">visits your website</span><span class="chip c-box">isolated</span>
       <p>Runs the main security tests from an isolated helper that may only make reading requests, only inside the fence, only to the addresses it checked at the start, and never downloads files.</p></div>
-    <div class="card"><span class="n">10</span><h3>The AI planner</h3><code>plan_probes</code><span class="chip c-ai">uses the AI</span>
+    <div class="card"><span class="n">12</span><h3>The AI planner</h3><code>plan_probes</code><span class="chip c-ai">uses the AI</span>
       <p>Looks at what's been found and picks extra checks from a fixed menu of safe ones. It chooses; it can't write code. Without an AI, a built-in plan is used.</p></div>
   </div>
 
   <div class="h2row"><h2>Act 3 · Testing and writing it up</h2><span>Careful, read-only checks, then the paperwork.</span></div>
   <div class="cards c3">
-    <div class="card"><span class="n">11</span><h3>The Prober</h3><code>run_probes</code><span class="chip c-web">visits your website</span>
+    <div class="card"><span class="n">13</span><h3>The Prober</h3><code>run_probes</code><span class="chip c-web">visits your website</span>
       <p>Double-checks the plan, then runs those checks with reading requests only. A resumed scan doesn't ask the AI again.</p></div>
-    <div class="card"><span class="n">12</span><h3>The Collector</h3><code>aggregate</code>
+    <div class="card"><span class="n">14</span><h3>The Collector</h3><code>aggregate</code>
       <p>Gathers every finding, removes duplicates, notes what couldn't be tested, and writes a factual summary where each statement points to its source, like [S1].</p></div>
-    <div class="card"><span class="n">13</span><h3>The AI writer</h3><code>summarize</code><span class="chip c-ai">uses the AI</span>
+    <div class="card"><span class="n">15</span><h3>The AI writer</h3><code>summarize</code><span class="chip c-ai">uses the AI</span>
       <p>Drafts a friendlier executive summary, kept only if every claim cites a real finding; otherwise the Collector's summary stays.</p></div>
-    <div class="card"><span class="n">14</span><h3>The Publisher</h3><code>report</code>
+    <div class="card"><span class="n">16</span><h3>The Publisher</h3><code>report</code>
       <p>Produces the report as a web page, a Word document, Markdown and JSON. Everything taken from your site is shown as plain text, so nothing in it can run in your browser.</p></div>
-    <div class="card new"><span class="n">15</span><h3>The Notary</h3><code>audit</code>
+    <div class="card new"><span class="n">17</span><h3>The Notary</h3><code>audit</code>
       <p>Writes one record of the whole scan: who asked, what was scanned, how it ended, whether sign-in worked and a fingerprint of each report file. Records are chained and sealed, so any later edit shows. It never writes passwords, tokens or codes.</p></div>
   </div>
 

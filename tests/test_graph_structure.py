@@ -24,9 +24,13 @@ def test_every_route_is_visible_in_the_drawn_graph():
     assert "sast:run_sast" in nodes  # the SAST sub-agent is drawn inside the main graph
     expected = {
         ("__start__", "validate"), ("validate", "recon"), ("validate", "audit"),
-        ("recon", "auth"), ("auth", "sast:run_sast"), ("auth", "sandbox_check"),
+        ("recon", "auth"), ("auth", "code_source"),
         # human in the loop: auth pauses in auth_challenge for SSO / MFA, then continues
-        ("auth", "auth_challenge"), ("auth_challenge", "sandbox_check"), ("auth_challenge", "sast:run_sast"),
+        ("auth", "auth_challenge"), ("auth_challenge", "code_source"),
+        # human in the loop at the SAST step: code_source pauses for code files / a .zip / a git
+        # link; code_sast analyses that code in the sandbox, then the website's JavaScript SAST
+        ("code_source", "code_sast"), ("code_source", "sast:run_sast"), ("code_source", "sandbox_check"),
+        ("code_sast", "sast:run_sast"), ("code_sast", "sandbox_check"),
         ("sast:run_sast", "sandbox_check"),
         ("sandbox_check", "dast"), ("dast", "plan_probes"), ("plan_probes", "run_probes"),
         ("plan_probes", "aggregate"), ("run_probes", "aggregate"),
@@ -197,11 +201,13 @@ def _auth_state():
 
 
 @pytest.mark.parametrize("enabled, expected", [(True, "sandbox_check"), (False, "sast")])
-def test_auth_skips_sast_while_the_sandbox_check_is_on(monkeypatch, enabled, expected):
+def test_code_steps_skip_sast_while_the_sandbox_check_is_on(monkeypatch, enabled, expected):
     monkeypatch.setattr(graph.settings, "sandbox_check_enabled", enabled)
     monkeypatch.setattr(graph, "authenticate",
                         SimpleNamespace(invoke=lambda args: SimpleNamespace(update={"phase": "auth_complete"})))
-    assert graph.auth_node(_auth_state()).goto == expected
+    assert graph.auth_node(_auth_state()).goto == "code_source"
+    assert graph.code_source_node(_auth_state()).goto == expected   # no code asked for or named
+    assert graph.code_sast_node(_auth_state()).goto == expected     # nothing to analyse
 
 
 def test_failed_sandbox_check_falls_back_to_in_process_js_sast(monkeypatch):
