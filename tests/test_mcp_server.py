@@ -356,12 +356,23 @@ async def test_get_report_wraps_and_blocks_traversal():
     folder = Path(settings.reports_dir) / "mcp-report1"
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "report.md").write_text("# Report\nsee https://evil.test/x", encoding="utf-8")
+    (folder / "owner.json").write_text('{"v": 1, "sub": "mcp"}', encoding="utf-8")  # the stdio principal
     rep = await _call("get_report", {"session_id": "mcp-report1"})
     assert rep["content"].startswith("<<<UNTRUSTED_PAGE_CONTENT") and "evil.test" not in rep["content"]
     assert "path" not in rep and rep["url"].endswith("/reports/mcp-report1/report.md")
     for bad in ("../secrets", "..", "a/b"):
         with pytest.raises(ToolError):
             await _call("get_report", {"session_id": bad})
+    # another user's report reads as missing and is not listed
+    other = Path(settings.reports_dir) / "mcp-report2"
+    other.mkdir(parents=True, exist_ok=True)
+    (other / "report.md").write_text("# Other", encoding="utf-8")
+    (other / "owner.json").write_text('{"v": 1, "sub": "someone-else"}', encoding="utf-8")
+    with pytest.raises(ToolError, match="No md report"):
+        await _call("get_report", {"session_id": "mcp-report2"})
+    listed = await mcp_mod.mcp.call_tool("list_reports", {})
+    names = [json.loads(c.text)["name"] for c in listed.content]
+    assert "mcp-report1" in names and "mcp-report2" not in names
 
 
 async def test_audit_log_needs_admin(monkeypatch):

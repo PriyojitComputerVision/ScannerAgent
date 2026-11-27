@@ -380,3 +380,65 @@ def test_refusals_show_the_servers_reason():
     assert sc.refusal_text(text) == "role(s) scanner lack permission 'scan:source'."
     assert sc.refusal_text({"error": "not a zip"}) == "not a zip"
     assert sc.refusal_text({}) == "no reason given"
+
+
+# --------------------------------------------------------------------------- report links
+def test_report_files_become_links_only_for_scanner_report_paths():
+    url = "http://127.0.0.1:9123/reports/sess-1/report.html"
+    assert sc.report_path(url) == ("sess-1", "report.html")
+    assert sc.report_link_line("html", url) == f"- [Open HTML report]({url})"
+    assert sc.report_link_line("docx", url.replace(".html", ".docx")).startswith("- [Word (DOCX)](")
+    for bad in ("http://x/reports/../etc/report.html", "http://x/reports/a/secrets.txt",
+                "javascript:alert(1)", "http://x/reports/.hidden/report.md", "C:/r/report.html"):
+        assert sc.report_path(bad) is None
+        assert sc.report_link_line("html", bad).startswith("- HTML: `")
+    block = sc.scan_result_markdown({"report_files": {"html": url}})
+    assert f"[Open HTML report]({url})" in block
+
+
+def test_fetch_report_sends_the_token_in_the_header_and_refuses_bad_names(monkeypatch):
+    seen = {}
+
+    class FakeResp:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return self.body
+
+    def fake_urlopen(req, timeout=0):
+        seen["url"], seen["auth"] = req.full_url, req.get_header("Authorization")
+        return FakeResp(b"<html>ok</html>")
+
+    class Minter:
+        def token(self):
+            return "tok-123"
+
+    monkeypatch.setattr(sc.urllib.request, "urlopen", fake_urlopen)
+    status, body, ctype = sc.fetch_report("http://127.0.0.1:9123/", Minter(), "sess-1", "report.html")
+    assert (status, body, ctype.split(";")[0]) == (200, b"<html>ok</html>", "text/html")
+    assert seen == {"url": "http://127.0.0.1:9123/reports/sess-1/report.html", "auth": "Bearer tok-123"}
+    seen.clear()
+    for sid, name in (("../x", "report.html"), ("a..b", "report.md"), ("sess-1", "owner.json")):
+        assert sc.fetch_report("http://s", Minter(), sid, name)[0] == 404
+    assert seen == {}  # refused before any request
+
+
+def test_fetch_report_maps_scanner_refusals_to_not_found(monkeypatch):
+    import urllib.error
+
+    def refuse(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 403, "forbidden", {}, None)
+
+    class Minter:
+        def token(self):
+            return "t"
+
+    monkeypatch.setattr(sc.urllib.request, "urlopen", refuse)
+    assert sc.fetch_report("http://s", Minter(), "sess-1", "report.json")[0] == 404

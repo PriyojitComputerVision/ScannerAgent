@@ -284,6 +284,7 @@ Run everything with `uv run pytest` (no real network or LLM calls; the golden li
 | `tests/test_prompts.py` | Prompts live in a gitignored folder; a missing prompt must degrade to the deterministic fallbacks instead of crashing. |
 | `tests/test_rate_limit.py` | HTTP 429 handling: target links (engine + httpx transport), LLM retries, backend limits. |
 | `tests/test_recon_helpers.py` | Recon / crawl helpers: link extraction, scope filtering, discovery. |
+| `tests/test_report_access.py` | Who may read a saved report (pentest_agent/report_access.py). |
 | `tests/test_report_downloads.py` | Report downloads are named after the session id / report folder, not report.*. |
 | `tests/test_report_retention.py` | Old and checkpoint-less report folders are deleted with the checkpoint cleanup, and audited. |
 | `tests/test_report_tool.py` | Report rendering: Markdown, HTML, JSON and DOCX from the same structured data. |

@@ -160,7 +160,7 @@ After fixing, offer a re-scan with the same profile to confirm, and compare the 
 | --- | --- |
 | `list_scans` | Your scans in this server session. |
 | `cancel_scan(scan_id)` | Stop a scan; the cancellation is audited. |
-| `list_reports` | Saved reports from any source (console, CLI, MCP, A2A). |
+| `list_reports` | Your saved reports from any source (console, MCP, A2A). Other users' reports are not listed, and `get_report` answers them as missing; admin sees all. |
 | `get_report(session_id, format="md" or "json")` | Full report text, wrapped as untrusted. |
 | `verify_audit_log` | Check the tamper-evident audit chain. Needs the admin role. |
 

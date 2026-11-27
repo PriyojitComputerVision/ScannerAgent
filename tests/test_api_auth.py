@@ -38,6 +38,7 @@ def auth_on(tmp_path, monkeypatch):
     report = tmp_path / "reports" / "r1"
     report.mkdir(parents=True)
     (report / "report.html").write_text("<p>report</p>", encoding="utf-8")
+    (report / "owner.json").write_text('{"v": 1, "sub": "alice"}', encoding="utf-8")  # token()'s subject
     yield tmp_path
     api_auth.revoked_refresh_tokens.clear()
 
@@ -154,6 +155,11 @@ def test_http_requires_valid_token_and_role(auth_on):
         assert r.status_code == 401 and r.headers["WWW-Authenticate"].startswith("Bearer")
         assert c.get("/reports/r1/", headers={"Authorization": "Bearer nope"}).status_code == 401
         assert c.get("/reports/r1/", headers=bearer(token(["viewer"]))).status_code == 200
+        # someone else's report reads as missing; admin (reports:any) sees every report
+        assert c.get("/reports/r1/", headers=bearer(token(["scanner"], sub="bob"))).status_code == 404
+        assert "r1" not in c.get("/reports/", headers=bearer(token(["scanner"], sub="bob"))).text
+        assert "r1" in c.get("/reports/", headers=bearer(token(["viewer"]))).text
+        assert c.get("/reports/r1/", headers=bearer(token(["admin"], sub="bob"))).status_code == 200
 
 
 def test_token_endpoint_and_refresh_endpoint(auth_on):

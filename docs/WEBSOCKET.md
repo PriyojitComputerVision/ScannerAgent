@@ -321,9 +321,10 @@ The recon, auth, DAST and probe steps report `<step>_code_only` and pass straigh
 ## 8. Resume, cache, queue, token renewal
 
 - **Resume**: every graph step is checkpointed under `session_id`. After a drop, reconnect with the same
-  id and send `{"resume": true}`. Only the session's owner (or a role with `sessions:any`) may resume.
+  id and send `{"resume": true}`. Only the session's owner (or a role with `sessions:any`) may resume, or start a new scan on an
+  existing `session_id` (anyone else: close 4403, "belongs to another user; use a new session id").
 - **Cache**: the same scan request within `CACHE_TTL_SECONDS` returns the earlier result at once
-  (`complete` with `cached: true`). Send `"force_refresh": true` to scan again. Scans with code are never cached.
+  (`complete` with `cached: true`), for the same user only. Send `"force_refresh": true` to scan again. Scans with code are never cached.
 - **Queue**: one scan runs at a time by default (`WS_MAX_ACTIVE`). Later clients get `queued` messages,
   then `status` `queue_admitted`. More than `WS_MAX_QUEUE` waiting = `429`.
 - **Token renewal**: long scans keep running past the token's lifetime: the server pushes

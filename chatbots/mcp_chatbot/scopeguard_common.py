@@ -29,6 +29,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Callable
@@ -36,6 +37,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import guardrails
 
@@ -448,6 +450,59 @@ def scope_label(r: dict) -> str:
                             "website only")
 
 
+REPORT_FILES = {  # file -> (content type, shown inline)
+    "report.html": ("text/html; charset=utf-8", True),
+    "report.md": ("text/markdown; charset=utf-8", False),
+    "report.json": ("application/json", False),
+    "report.docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", False),
+}
+REPORT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")  # the scanner's SESSION_ID_RE
+_REPORT_PATH_RE = re.compile(r"/reports/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/(report\.(?:html|md|json|docx))")
+_REPORT_LABELS = {"html": "Open HTML report", "md": "Markdown", "json": "JSON", "docx": "Word (DOCX)"}
+# A scanned page's report viewer forbids scripts, frames and remote loads (same as the scanner's).
+REPORT_CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"
+
+
+def report_path(url: str) -> tuple[str, str] | None:
+    """(session id, file name) of a scanner report URL, or None for anything else."""
+    path = urlsplit(str(url or "")).path
+    m = _REPORT_PATH_RE.fullmatch(path)
+    if not m or ".." in m.group(1):
+        return None
+    return m.group(1), m.group(2)
+
+
+def report_link_line(fmt: str, url: str) -> str:
+    """One Markdown list line with a link the chat UI opens through its own origin
+    (``/reports/<id>/<file>``); other URLs stay plain code text."""
+    label = _REPORT_LABELS.get(str(fmt).lower(), str(fmt).upper())
+    if report_path(url):
+        return f"- [{label}]({url})"
+    return f"- {str(fmt).upper()}: `{url}`"
+
+
+def fetch_report(base: str, minter: TokenMinter, session_id: str, filename: str,
+                 max_bytes: int = 20 * 1024 * 1024) -> tuple[int, bytes, str]:
+    """GET one report file from the scanner with this chatbot's token. Returns (status, body,
+    content type); the scanner itself checks that the report belongs to this token's subject."""
+    if not REPORT_ID_RE.fullmatch(session_id) or ".." in session_id or filename not in REPORT_FILES:
+        return 404, b"", "text/plain"
+    from urllib.parse import quote
+
+    url = f"{base.rstrip('/')}/reports/{quote(session_id, safe='')}/{filename}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {minter.token()}"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read(max_bytes + 1)
+    except urllib.error.HTTPError as exc:
+        return (404 if exc.code in (403, 404) else 502), b"", "text/plain"
+    except OSError:
+        return 502, b"", "text/plain"
+    if len(body) > max_bytes:
+        return 502, b"", "text/plain"
+    return 200, body, REPORT_FILES[filename][0]
+
+
 def scan_result_markdown(r: dict) -> str:
     """The verified result block shown to the user exactly as the scanner returned it
     (not written by the model): counts, every finding under its own severity, red flags,
@@ -478,7 +533,7 @@ def scan_result_markdown(r: dict) -> str:
         out += ["", "#### Red flags"] + [f"- {flag}" for flag in r["red_flags"]]
     files = r.get("report_files") or {}
     if files:
-        out += ["", "#### Report files"] + [f"- {k.upper()}: `{v}`" for k, v in files.items()]
+        out += ["", "#### Report files"] + [report_link_line(k, v) for k, v in files.items()]
     a = r.get("audit")
     if isinstance(a, dict):
         out += ["", f"**Audit record:** seq {a.get('seq')}, outcome {a.get('outcome')}, hash `{str(a.get('hash'))[:16]}...`"]
@@ -746,6 +801,9 @@ class Engine:
         # optional async (filename, base64) -> dict: MCP upload_code, called by the UI directly (the
         # archive never passes through the model)
         self.upload = None
+        # optional (session_id, filename) -> (status, bytes, content type): a report file from the
+        # scanner with this chatbot's token, for the UI's report links (never through the model)
+        self.report = None
         # What the output guardrail checks answers against (no prompt leakage).
         self.prompts = [load_prompt(), load_prompt("summary_prompt")]
 
@@ -1015,6 +1073,8 @@ class ApiServer:
                     self._reply(200, {"allowed_targets": data.get("allowed_targets") or [],
                                       "allowed_targets_setting": data.get("allowed_targets_setting"),
                                       "profiles": profiles})
+                elif u.path == "/api/report":
+                    self._report((q.get("id") or [""])[0][:128], (q.get("file") or [""])[0][:20])
                 elif u.path == "/api/events":
                     tid = (q.get("thread_id") or [""])[0][:64]
                     after = int((q.get("after") or ["0"])[0] or 0)
@@ -1025,6 +1085,22 @@ class ApiServer:
                                       "pending": api.engine.pending.get(tid) or []})
                 else:
                     self._reply(404, {"error": "not found"})
+
+            def _report(self, session_id: str, filename: str) -> None:
+                """A report file, raw (the UI launcher serves it at /reports/<id>/<file>)."""
+                if api.engine.report is None:
+                    self._reply(404, {"error": "reports are not available"})
+                    return
+                status, body, ctype = api.engine.report(session_id, filename)
+                if status != 200:
+                    self._reply(status, {"error": "report not found" if status == 404 else "scanner unavailable"})
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
 
             def _upload(self) -> None:
                 """Raw .zip -> MCP upload_code (checks again on the server: name, MIME, signature)."""

@@ -32,6 +32,7 @@ from scopeguard_common import (
     build_agent,
     compact_scan_result,
     console_loop,
+    fetch_report,
     host_of,
     load_settings,
     log,
@@ -147,6 +148,7 @@ async def make_engine(base: str, roles: list[str], disabled: set[str] | None = N
                 {"filename": filename, "content_base64": content_base64}))
 
         engine.upload = upload
+    engine.report = lambda session_id, filename: fetch_report(base, minter, session_id, filename)
     return engine
 
 

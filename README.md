@@ -378,6 +378,11 @@ before auth and rate limits, and `401`/`429` replies stay readable. `/healthz` s
 
 Downloads are named after the session id (CLI: the report folder), e.g. `money-dynocde-001.docx`,
 `.md`, `.json`; on disk they stay `report.*`.
+Each report belongs to the user who ran the scan (`owner.json` in the report folder, hashed into the
+scan's audit record; older reports take the owner from their first audit record). The viewer index,
+`/api/reports` and MCP/A2A `list_reports`/`get_report` show a user only their own reports; another
+user's report answers 404 like a missing one. `admin` (`reports:any`) sees every report; reports with
+no known owner (e.g. CLI scans) are admin-only. A new scan cannot reuse another user's `session_id`.
 Reports are rendered with every target-controlled value HTML-escaped and served with a strict
 `Content-Security-Policy` (no scripts), so a hostile page cannot inject markup into the viewer.
 
@@ -440,9 +445,9 @@ Python clients (`scripts/scan_client.py` uses it).
 
 | Role | Permissions |
 | --- | --- |
-| `viewer` | read reports |
+| `viewer` | read own reports |
 | `scanner` | viewer + run/resume own scans (`quick`, `standard`) + LLM-planned probes |
-| `admin` | scanner + `aggressive`/`auth_deep`, authenticated target testing (`jwt`/`auth`/`interactive_auth` in the request), any user's sessions, the audit log (`audit:read`) |
+| `admin` | scanner + `aggressive`/`auth_deep`, authenticated target testing (`jwt`/`auth`/`interactive_auth` in the request), any user's sessions and reports (`sessions:any`, `reports:any`), the audit log (`audit:read`) |
 
 The API checks roles first (HTTP 403, WebSocket close 4403). The agent graph
 checks them again per node from the caller stored in its state: the validate
