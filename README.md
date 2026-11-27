@@ -96,7 +96,7 @@ The console is served by the agent server itself at `http://127.0.0.1:8765/`: a 
 summary (each `[Sn]` jumps to its finding), attack coverage, a findings explorer and all saved
 reports with html/docx/md/json downloads, and the **agent integrations** (MCP and A2A endpoints,
 see below). Admins also see the **audit trail** (live chain check) and
-can tick **Pause for SSO / MFA sign-in** to complete a target's sign-in themselves when asked, and choose
+are asked to complete a target's SSO / MFA sign-in themselves when the scan meets one (or tick **Never pause for sign-in**), and choose
 **What to test** in the New scan card (website + code, website only, code only, where you give files, a .zip or a git link
 right there instead of a link, or
 decide after launch). The page fits one
@@ -272,9 +272,10 @@ Input is checked strictly. Anything outside these rules is rejected with
 | `authorization_confirmed` | JSON `true` only (`"true"`, `1` or `"yes"` are rejected) |
 | `additional_allowed_domains` | up to 20 host names, optionally `:port`; no scheme, path or wildcard |
 | `notes` / `jwt` / `source_path` | strings up to 2000 / 8000 / 1000 characters |
-| `auth` | `login_url`, `username`, `password`, `username_field`, `password_field`, `extra_form_fields` (max 20) |
+| `auth` | `login_url` (optional: recon's login page otherwise), `username`, `password`, `username_field`, `password_field`, `extra_form_fields` (max 20), `totp_secret` (base32 seed of a test account: MFA codes are computed) |
 | `force_refresh` | `true` or `false` |
-| `interactive_auth` | JSON `true` / `false`: pause for SSO / MFA sign-in (admin; see [Sign-in with SSO / MFA](#sign-in-with-sso--mfa-human-in-the-loop)) |
+| `interactive_auth` | left out = pause for SSO / MFA (default), `true` = also on plain login forms, `false` = never (admin; see [Sign-in with SSO / MFA](#sign-in-with-sso--mfa-human-in-the-loop)) |
+| `session` | `{"cookie": "...", "bearer": "..."}`: a session from signing in yourself (SSO); checked, never stored in the checkpoint |
 | `resume` | exactly `{"resume": true}`, nothing else in the message |
 | `access_token` / `authorization` | the API token; removed before the request is processed |
 
@@ -841,31 +842,77 @@ validate/gate -> recon+crawl -> auth -> [human sign-in: SSO / MFA] -> JS SAST ->
 
 ## Sign-in with SSO / MFA (human in the loop)
 
-The agent signs in to a target by itself only with a JWT or a username/password form. It never signs
-in to an identity provider (Okta, Entra ID, Google, Auth0, SAML/OIDC, ...) and never stores MFA
-secrets: those are designed to need a person. Instead, with `"interactive_auth": true` (admin,
-`scan:authenticated`) the run **pauses** in the `auth_challenge` node with LangGraph `interrupt()`,
-checkpointed, until the operator answers:
+The agent signs in to a target by itself with a JWT, a stored session or a username/password form
+(plus a TOTP secret for MFA). It never signs in to an identity provider (Okta, Entra ID, Google,
+Auth0, SAML/OIDC, ...): that is your browser's job.
 
-| Detected (tools/auth_detect.py) | What you do | What the agent does |
+**1. Recon decides how the site signs in.** While crawling it looks for the hand-off to an identity
+provider on every page (a redirect to another host's sign-in or to an SSO endpoint, a SAML form, an
+OIDC `authorize` link, a "Sign in with ..." button on a login page; a footer link to github.com does
+not count) and for password forms. Result `login_methods.kind`: `password`, `sso`,
+`password_and_sso` or `none`. It also remembers the login page and a page that sends an anonymous
+visitor to sign-in (`protected_url`). The console log and the chatbot show "Sign-in found: ...".
+
+**2. The auth step adapts.**
+
+| Site signs in with | You gave | What happens |
 | --- | --- | --- |
-| **SSO**: the login redirects to another host, posts SAML, links to an OIDC/OAuth `authorize` endpoint or a known IdP | Sign in in your own browser, then paste the target's session (Cookie header and/or bearer token) | Checks the session with one in-scope GET, then scans signed in |
-| **MFA**: after the password step the target shows a one-time-code form (or redirects to `/mfa`, `/2fa`, `/otp`, ...) | Type the current code | Submits it to the target's own form with the pre-MFA session and CSRF token (no second login) |
-| A login form but no credentials | Sign in yourself and paste the session | Same as SSO |
+| nothing found | anything | nothing: the scan runs as before |
+| password form | username + password | the agent signs in on the target's own form (recon's login page when you gave no `login_url`) |
+| password form, then MFA | + `totp_secret` (test account) | the agent computes the current code (RFC 6238) and submits it |
+| password form, then MFA | no TOTP secret | the scan **pauses**: you type the code |
+| password form | nothing | red flag (or a pause with `interactive_auth: true`) |
+| SSO only | a stored session profile | the session is checked and used; expired = red flag "SSO login failed" |
+| SSO only | nothing | the scan **pauses**: you sign in in your own browser and hand over the session |
+| password + SSO | username + password | password first; if it fails, the scan pauses for SSO |
 
-Protocol: the server sends `{"type": "input_required", "request": {"kind", "login_url", "idp_host",
-"evidence", "target_url"}, "timeout_seconds": n}` and waits for
-`{"type": "auth_response", "action": "skip" | "session" | "mfa_code", "cookie"?, "bearer"?, "code"?}`
-on the same socket. Answers are validated strictly (no CR/LF, codes 4-12 characters); an invalid one
-gets `{"type": "input_invalid"}` and the wait continues. No answer within `AUTH_INPUT_TIMEOUT_SECONDS`
-(default 300) means skip: the scan continues unauthenticated. A client that disconnects while paused
-can reconnect with `{"resume": true}` and is asked again.
+`interactive_auth` (WebSocket) / `pause_for_sign_in` (MCP, A2A): left out = pause for SSO and MFA
+(default); `true` = also on a plain login form without credentials; `false` = never pause (red flag,
+unauthenticated). Pausing needs `scan:authenticated` (admin).
 
-Without `interactive_auth`, SSO and MFA raise a red flag and the scan runs unauthenticated. A password
-login that lands on an MFA page or back on the login form is never counted as signed in. The session
-(cookie or bearer) is sent by DAST and the probes to in-scope hosts only; it, the MFA code and the
-pre-MFA session are never streamed to clients, logged, traced or written to the audit log, and
-checkpoints holding them are AES-encrypted with `CHECKPOINT_ENCRYPTION_KEY`.
+**3. The pause, on every entry point.** The run stops in `auth_challenge` (LangGraph `interrupt()`).
+No answer within `AUTH_INPUT_TIMEOUT_SECONDS` (300) = skip: the scan continues unauthenticated.
+
+| Entry point | What you see | Answer | Skip (escape hatch) |
+| --- | --- | --- | --- |
+| Browser console | sign-in dialog: why, identity provider, "Site signs in with", an **Open the sign-in page in a new tab** button (a page cannot open a tab without your click), the steps, code / cookie / bearer fields with an eye button | Continue signed in | the Skip button or **Esc** |
+| WebSocket | `input_required` with `request.type` `sign_in` | `auth_response` `mfa_code` / `session` | `auth_response` `skip` |
+| MCP | `get_scan`: `status: input_required`, `sign_in` {kind, login_url, idp_host, evidence, methods, timeout} | `submit_sign_in(scan_id, action="mfa_code", code=...)` or `action="session", credentials=<session profile>` | `skip_sign_in(scan_id)` |
+| A2A | task state `input-required` with the same `sign_in` data | reply on the task `{"action": "sign_in", "answer": "mfa_code", "code": ...}` or `"answer": "session", "credentials": ...` | `{"action": "skip_sign_in"}` |
+| Chatbot UI | a sign-in card (link to the sign-in page, eye button, Skip) | Send code / Continue signed in (straight to MCP, never through the model) | Skip or **Esc** |
+
+Over MCP and A2A a session is handed over as a **credential profile name**: after signing in in your
+browser, the operator stores it once (`uv run scopeguard-mcp credentials add NAME --target HOST
+--session`, cookie / bearer prompted hidden). Raw cookie/bearer values there need
+`MCP_ALLOW_INLINE_CREDENTIALS` / `A2A_ALLOW_INLINE_CREDENTIALS`.
+
+**4. How the agent knows the sign-in worked.** A handed-over or stored session is checked with in-scope
+GETs only (`auth_flow.verify_session`). Rejected: HTTP 401/403, a redirect to the sign-in page or the
+identity provider, a login form in the answer. Proven (`verified: true`): the protected page recon
+found now opens, or the page shows a log out / sign out link. A session that is accepted but cannot be
+proven (a public home page answers 200 to anybody) is used with a red flag. A password login that lands
+on an MFA page or back on the login form is never counted as signed in.
+
+**5. The result.** `sign_in_result` = {kind, status `signed_in` | `failed` | `skipped` |
+`not_attempted`, outcome, verified, idp_host}, e.g. "SSO login failed: the target redirected to its
+sign-in page". It is in the report (the **Sign-in** row of md/html/docx), `get_scan.sign_in_result`, the
+A2A task's last message and the console log; failures are red flags too.
+
+**6. Credentials never reach the checkpoint or the LLM.** The request's `jwt`, username, password,
+TOTP secret, stored session, the session the auth step obtains, the pre-MFA session and your answers
+(code, session) live only in `pentest_agent/secret_vault.py`: in memory, **AES-256-GCM encrypted** with a
+random per-process key that is never written anywhere (bound to the scan id; decrypted only at the
+moment a node uses a value). The graph state, and so the SQLite checkpoint, gets the target without
+them plus `credentials_held` (booleans) and the session's cookie/header *names*; a sign-in answer
+resumes the graph as `{"action": ..., "vault": true}`. As a second layer the checkpoint serializer
+blanks the secret keys (`password`, `jwt`, `cookie`, `bearer`, `totp_secret`, the session, ...) in
+everything it writes (`checkpointer.RedactingSerializer`, inside the AES encryption of
+`CHECKPOINT_ENCRYPTION_KEY` when set). Every held value is replaced with `[REDACTED]` in everything sent
+to the LLM (`llm.invoke_with_backoff`) and in the findings and red flags before the report is built
+(a target may echo a username back), so reports, `get_scan` and A2A results hold none. The secrets are
+dropped when the run ends (6 h TTL otherwise); after a server restart a resumed scan runs
+unauthenticated unless the client sends them again. Nothing of this is streamed, logged, traced or
+audited (the audit record says only `login_provided`, `totp_provided`, `session_provided`).
 
 ## Audit log
 

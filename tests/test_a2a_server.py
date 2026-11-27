@@ -149,3 +149,38 @@ def test_text_requests_and_help():
         assert a2a.parse_request(msg) == {"action": "policy"}
     assert a2a._action({"action": "rm -rf"}) == "help"
     assert a2a._action({"target_url": "https://x"}) == "scan"
+
+
+class _PausingGraph(_Graph):
+    """Pauses for SSO once, then finishes."""
+
+    async def astream(self, inputs, config=None, stream_mode=None):
+        from langgraph.types import Command
+
+        if isinstance(inputs, Command):
+            self.resumed = inputs.resume
+            for node in ("auth_challenge", "report", "audit"):
+                yield {node: {"phase": f"{node}_done"}}
+            return
+        self.inputs = inputs
+        yield {"recon": {"phase": "recon_complete", "login_methods": {"kind": "sso", "idp_host": "okta.com"}}}
+        yield {"__interrupt__": (SimpleNamespace(value={
+            "type": "sign_in", "kind": "sso", "login_url": "https://app.example.com/login", "idp_host": "okta.com",
+            "evidence": "the site redirects to an SSO endpoint", "methods": ["SSO"], "timeout_seconds": 30}),)}
+
+
+def test_sso_pause_is_input_required_and_skip_sign_in_resumes(monkeypatch):
+    graph = _PausingGraph()
+    monkeypatch.setattr(scan_service.graph_module, "build_graph", lambda checkpointer=None: graph)
+    with TestClient(websocket_server.app) as c:
+        task = _send(c, {"action": "scan", "target_url": "https://app.example.com/",
+                         "authorization_confirmed": True, "profile": "quick"}).json()["result"]["task"]
+        assert task["status"]["state"] == "TASK_STATE_INPUT_REQUIRED"
+        data = next(p["data"] for p in task["status"]["message"]["parts"] if "data" in p)
+        assert data["sign_in"]["kind"] == "sso" and data["sign_in"]["idp_host"] == "okta.com"
+        assert "skip_sign_in" in data["sign_in"]["how"]
+        reply = _rpc(c, "SendMessage", {"message": {
+            "messageId": uuid.uuid4().hex, "role": "ROLE_USER", "taskId": task["id"],
+            "contextId": task["contextId"], "parts": [{"data": {"action": "skip_sign_in"}}]}}).json()
+        assert reply["result"]["task"]["status"]["state"] == "TASK_STATE_COMPLETED", reply
+        assert graph.resumed == {"action": "skip"}

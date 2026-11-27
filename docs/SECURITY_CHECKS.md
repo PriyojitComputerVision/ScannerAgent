@@ -254,6 +254,7 @@ Run everything with `uv run pytest` (no real network or LLM calls; the golden li
 | `tests/test_archive_safety.py` | Uploaded archives: hostile entries are flagged and never extracted; only text files the analyzer reads are written, inside the extraction folder. |
 | `tests/test_audit.py` | Audit log: hash chain, HMAC, report hashes, redaction, the graph's last node, server-side records for requests that never reach the graph, API and CLIs. |
 | `tests/test_auth.py` | Target sign-in helpers: JWT inspection, form login, session handling. |
+| `tests/test_auth_sso.py` | SSO / MFA sign-in: detection, pausing (all entry points), TOTP, session profiles, sign-in results, and secrets kept out of the state / checkpoint / LLM (secret_vault). No network, no LLM. |
 | `tests/test_checkpointer.py` | LangGraph checkpoints in SQLite, async only: connection setup for several concurrent writers, the separate sub-agent database, encryption at rest. |
 | `tests/test_citations.py` | Source citations ([Sn]) — grounding of LLM prose and safe link rendering. |
 | `tests/test_code_exec_scope_guard.py` | Custom probes stay in scope: URL building and host allowlist checks. |

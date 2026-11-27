@@ -106,9 +106,15 @@ async def test_checkpoints_are_encrypted_at_rest(tmp_path, monkeypatch):
         assert (await _hitl_graph(saver).aget_state(cfg)).values["secret"] == "SESSION-COOKIE-XYZ"
 
 
-def test_without_a_key_checkpoints_stay_plaintext(monkeypatch):
+def test_without_a_key_checkpoints_are_not_encrypted_but_still_redacted(monkeypatch):
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
     monkeypatch.setattr(settings, "checkpoint_encryption_key", "")
-    assert cp.make_serde() is None
+    serde = cp.make_serde()
+    assert isinstance(serde, cp.RedactingSerializer) and isinstance(serde.inner, JsonPlusSerializer)
+    assert not cp.encrypted_at_rest()
+    _, data = serde.dumps_typed({"password": "pw-plain-1"})
+    assert b"pw-plain-1" not in data
 
 
 # ---------------------------------------------------------------- retention (CHECKPOINT_RETENTION_HOURS)
