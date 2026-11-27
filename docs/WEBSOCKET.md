@@ -312,7 +312,7 @@ The recon, auth, DAST and probe steps report `<step>_code_only` and pass straigh
 | `1000` | – | Normal close after `complete` | Done. |
 | `4400` | `400` | Bad or missing `session_id`, or the first message is not a JSON object | Fix the request. |
 | `4401` | `401` | Missing / invalid / expired token, or the session cap was reached mid-scan | Sign in again (`/auth/token`), reconnect with the same `session_id` and resume. |
-| `4403` | `403` | Cross-origin browser page, missing permission, `authorization_confirmed` not true, another user's session, refused code | Don't retry unchanged. |
+| `4403` | `403` | Cross-origin browser page, missing permission, an access attribute (ABAC: message ends `[abac.<rule>]`), `authorization_confirmed` not true, another user's session, refused code | Don't retry unchanged. |
 | `4422` | `422` | Request failed validation (`detail` lists the fields, never your values) | Fix the fields. |
 | `4429` | `429` | Per-IP rate limit or queue full (`retry_after`, `queue`) | Wait `retry_after` seconds. |
 | `1011` | – | Server error / the run crashed | Reconnect with the same `session_id` and send `{"resume": true}`. |

@@ -411,3 +411,71 @@ async def test_start_scan_passes_the_scope_and_checks_it(monkeypatch, fake_graph
     assert started["scan_scope"] == "code"
     await mcp_mod.service().wait(started["scan_id"], 5)
     assert fake_graph.inputs["target"]["scan_scope"] == "code"
+
+
+# ----------------------------------------------------------------- idempotency keys
+async def test_start_scan_idempotency_key_returns_the_first_scan(fake_graph):
+    fake_graph.delay = 0.2
+    args = {"target_url": "https://app.example.com/", "authorization_confirmed": True, "profile": "quick",
+            "idempotency_key": "b3f1c2d4-0000-4000-8000-000000000001"}
+    first = await _call("start_scan", args)
+    again = await _call("start_scan", args)  # a retry: no "still running" refusal, no second scan
+    assert again["scan_id"] == first["scan_id"] and again["idempotent_replay"] is True
+    assert "idempotent_replay" not in first
+    with pytest.raises(ToolError, match="different start_scan request"):
+        await _call("start_scan", {**args, "profile": "standard"})
+    await _call("get_scan", {"scan_id": first["scan_id"], "wait_seconds": 5})
+    assert len(mcp_mod.service().list_runs()) == 1
+    after = await _call("start_scan", args)  # still the same scan after it finished
+    assert after["scan_id"] == first["scan_id"] and after["status"] == "completed"
+
+
+async def test_refused_call_releases_its_idempotency_key(fake_graph):
+    key = {"idempotency_key": "retry-after-fix-01"}
+    with pytest.raises(ToolError, match="authorization_confirmed must be true"):
+        await _call("start_scan", {"target_url": "https://app.example.com/", "authorization_confirmed": False, **key})
+    # The refusal released the key: the fixed request runs under the same key (not "different request").
+    started = await _call("start_scan", {"target_url": "https://app.example.com/", "authorization_confirmed": True,
+                                         **key})
+    assert started["status"] == "running" and "idempotent_replay" not in started
+    await mcp_mod.service().wait(started["scan_id"], 5)
+
+
+async def test_idempotency_keys_are_per_caller_and_validated(fake_graph):
+    svc = mcp_mod.service()
+    alice = scan_service.rbac.Principal(sub="alice", roles=["scanner"])
+    bob = scan_service.rbac.Principal(sub="bob", roles=["scanner"])
+    run = await svc.start_scan("https://app.example.com/", authorization_confirmed=True, profile="quick",
+                               idempotency_key="shared-key-123", principal=alice)
+    await svc.wait(run.scan_id, 5, alice)
+    other = await svc.start_scan("https://app.example.com/", authorization_confirmed=True, profile="quick",
+                                 idempotency_key="shared-key-123", principal=bob)
+    assert other.scan_id != run.scan_id and not scan_service.replayed()
+    await svc.wait(other.scan_id, 5, bob)
+    with pytest.raises(scan_service.PolicyError, match="8-128 characters"):
+        await svc.start_scan("https://app.example.com/", authorization_confirmed=True, idempotency_key="short")
+    tool = next(t for t in await mcp_mod.mcp.list_tools() if t.name == "start_scan")
+    assert tool.input_schema["properties"]["idempotency_key"]
+
+
+async def test_demo_and_git_scans_take_idempotency_keys(monkeypatch, fake_graph):
+    class Sim:
+        url = "http://127.0.0.1:9"
+        def __enter__(self): return self
+        def __exit__(self, *a): return None
+
+    from scopeguard import simulated_target
+    monkeypatch.setattr(simulated_target, "SimulatedTarget", Sim)
+    demo = await _call("start_demo_scan", {"profile": "quick", "idempotency_key": "demo-key-0001"})
+    assert (await _call("start_demo_scan", {"profile": "quick", "idempotency_key": "demo-key-0001"}))[
+        "scan_id"] == demo["scan_id"]
+    await mcp_mod.service().wait(demo["scan_id"], 5)
+    monkeypatch.setattr(settings, "mcp_role", "admin")
+    mcp_mod.reset_service()
+    git = {"target_url": "https://app.example.com/", "authorization_confirmed": True, "scan_scope": "code",
+           "git_url": "https://github.com/acme/shop.git", "idempotency_key": "git-key-00001"}
+    first = await _call("start_scan", git)
+    assert (await _call("start_scan", git))["idempotent_replay"] is True
+    with pytest.raises(ToolError, match="different start_scan request"):  # another repo or branch
+        await _call("start_scan", {**git, "git_ref": "dev"})
+    await mcp_mod.service().wait(first["scan_id"], 5)

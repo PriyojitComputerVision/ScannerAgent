@@ -42,6 +42,7 @@ import contextlib
 import json
 import sys
 import time
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -181,14 +182,25 @@ async def session(a: argparse.Namespace, ev: Events, client_cm) -> int:
             await ev.emit("guardrail", "Trying a host that is NOT allowlisted (expected refusal)",
                           short(res.content[0].text if res.content else "", 400))
 
+        # One fresh idempotency key per scan: a retry of this call (timeout, lost answer) would get
+        # the same scan back instead of starting a second one.
+        key = f"mcp-client-{uuid.uuid4()}"
         if a.target:
-            args = {"target_url": a.target, "authorization_confirmed": True, "profile": a.profile}
+            args = {"target_url": a.target, "authorization_confirmed": True, "profile": a.profile,
+                    "idempotency_key": key}
             if a.credentials:
                 args["credentials"] = a.credentials  # only the name; the secret stays on the server
             start = await client.call_tool("start_scan", args)
         else:
-            start = await client.call_tool("start_demo_scan", {"profile": a.profile, "sign_in": a.sign_in})
+            args = {"profile": a.profile, "sign_in": a.sign_in, "idempotency_key": key}
+            start = await client.call_tool("start_demo_scan", args)
         started = payload(start)
+        if not start.is_error:
+            again = payload(await client.call_tool("start_scan" if a.target else "start_demo_scan", args))
+            await ev.emit("idempotency", "Same call retried with the same idempotency_key",
+                          {"idempotency_key": key, "scan_id": again.get("scan_id"),
+                           "idempotent_replay": again.get("idempotent_replay"),
+                           "same_scan": again.get("scan_id") == started.get("scan_id")})
         if start.is_error:
             await ev.emit("refused", "The server refused the scan",
                           started.get("text") if isinstance(started, dict) else started)

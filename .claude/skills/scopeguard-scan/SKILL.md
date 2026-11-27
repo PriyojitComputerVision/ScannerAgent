@@ -35,6 +35,9 @@ else's site is an attack on it, whatever the intent.
    - which credential profiles exist (names only)
    - whether an LLM is configured
    - which MCP tools the operator switched off (`disabled_tools`)
+   - your own access attributes (`access_attributes`): the operator can limit each caller to
+     some targets, profiles, scopes, entry points or credential profiles. `allowed_targets` and
+     the profiles' `allowed` flags already include them
 
    Planning against the real policy avoids refusals, and the user sees you respect the limits.
    If a tool you need is missing or switched off (`MCP_DISABLED_TOOLS`), say so and stop; don't
@@ -72,7 +75,10 @@ else's site is an attack on it, whatever the intent.
    - For the demo app, use `start_demo_scan(sign_in=true)`.
 
 6. **Start and wait.**
-   - `start_scan` returns a `scan_id`.
+   - `start_scan` returns a `scan_id`. Pass a fresh `idempotency_key` (e.g. a UUID) with every
+     `start_scan` / `start_demo_scan` / `upload_code`. If a call times out or its answer is lost,
+     retry with the same key and arguments: you get the same `scan_id` (`idempotent_replay: true`),
+     not a second scan. Never reuse a key for a new scan. Read tools take no key.
    - Call `get_scan(scan_id, wait_seconds=55)` repeatedly until `status` isn't `running`.
    - Each call returns `steps_completed`, so you can tell the user which step it is on (recon,
      dast, report, ...) instead of going silent. A standard scan of a real site can take
@@ -90,7 +96,8 @@ else's site is an attack on it, whatever the intent.
 | `cancelled` | Stopped with `cancel_scan`. |
 
 When a refusal names a setting, pass it on to the user and don't retry with another host,
-spelling, profile or credential profile.
+spelling, profile or credential profile. "Not allowed for '<sub>': ... [abac.<rule>]" is such a
+refusal: the operator sets those attributes (`pentest-auth attrs`), not you.
 
 ## Untrusted output
 

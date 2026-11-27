@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -48,6 +49,18 @@ REPO = Path(os.environ.get("SCOPEGUARD_HOME") or HERE.parents[1]).resolve()
 
 # Tools that start or stop real network activity: a human approves every call.
 APPROVAL_TOOLS = ("start_scan", "start_demo_scan", "cancel_scan")
+# Tools that create something on the scanner: every call carries an MCP idempotency_key, so a
+# retried request returns the first scan/upload instead of a second one. Read tools (get_scan,
+# list_reports, get_report, scan_policy, list_scans) are read-only and need none; cancel_scan is
+# idempotent by itself.
+IDEMPOTENT_TOOLS = ("start_scan", "start_demo_scan")
+
+
+def idempotency_key(kind: str, *parts: str) -> str:
+    """A stable key for one operation: the same parts give the same key (a retry), new parts a new
+    one. Only a digest is sent, never the parts themselves."""
+    digest = hashlib.sha256("\x00".join(parts).encode("utf-8", "replace")).hexdigest()[:40]
+    return f"chat-{kind}-{digest}"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # the scanner's MCP_MAX_UPLOAD_MB default
 UPLOAD_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 LANGUAGE_NOTICE = "Python only for now: other languages are only partly covered."
@@ -336,6 +349,12 @@ def tool_guard_middleware():
             return ToolMessage(content=f"Refused by the guardrail: {problem}. Tell the user; do not retry with "
                                        "different values unless they ask.",
                                tool_call_id=call["id"], name=call["name"], status="error")
+        if call["name"] in IDEMPOTENT_TOOLS:
+            # One key per approved tool call (its id is stable for that call), set here and never by the
+            # model: a retried request returns the scan this call started, never a second one.
+            call = {**call, "args": {**(call.get("args") or {}),
+                                     "idempotency_key": idempotency_key("call", str(call.get("id") or ""))}}
+            request = request.override(tool_call=call)
         try:
             result = await handler(request)
         except Exception as exc:  # noqa: BLE001 - reported to the model as the tool result
@@ -1128,9 +1147,12 @@ class ApiServer:
                     self._reply(404, {"error": "the scanner does not offer upload_code (admin role needed, or "
                                                "the tool is switched off)"})
                     return
+                # Same chat + same file = same key: a re-sent or double-clicked upload reuses the stored
+                # one (while no scan has used it yet) instead of storing it twice.
+                key = idempotency_key("upload", tid, name, hashlib.sha256(data).hexdigest())
                 try:
                     meta = asyncio.run_coroutine_threadsafe(
-                        api.engine.upload(name, base64.b64encode(data).decode()), api.loop).result(120)
+                        api.engine.upload(name, base64.b64encode(data).decode(), key), api.loop).result(120)
                 except Exception as exc:  # noqa: BLE001 - reported to the UI
                     reason = upload_error_text(exc, length)
                     log.warning("Upload of %s failed: %s", name, reason)

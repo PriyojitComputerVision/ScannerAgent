@@ -136,7 +136,7 @@ every scan.</p>
     <div class="label" style="margin:0">MCP server · mcp_server/server.py</div>
     <div class="transport">
       <div class="box"><span class="t">/mcp · Streamable HTTP</span><span>inside pentest-agent · every call needs a JWT;
-        tools run as the token's user and roles</span></div>
+        tools run as the token's user, roles and access attributes</span></div>
       <div class="box"><span class="t">stdio · scopeguard-mcp</span><span>child process of the assistant · no port,
         no token · principal "mcp" with MCP_ROLE</span></div>
     </div>
@@ -152,10 +152,11 @@ every scan.</p>
         <div class="tool"><span class="n">start_scan</span>
           <span class="d">target_url, authorization_confirmed, profile (quick / standard / aggressive / auth_deep),
             credentials by name, optional upload_id or git_url (code analysed in the code_sast step, same report),
-            scan_scope: website_and_code / website / code (code only: target_url optional, no request to any site)</span>
+            scan_scope: website_and_code / website / code (code only: target_url optional, no request to any site);
+            idempotency_key: a retry with the same key returns the first scan, never a second one</span>
           <div class="tags"><span class="tag you">you approve</span><span class="tag web">target</span><span class="tag guard">rules</span></div></div>
         <div class="tool"><span class="n">start_demo_scan</span>
-          <span class="d">built-in vulnerable app on loopback; no allowlist entry needed</span>
+          <span class="d">built-in vulnerable app on loopback; no allowlist entry needed; idempotency_key</span>
           <div class="tags"><span class="tag you">you approve</span><span class="tag guard">rules</span></div></div>
         <div class="tool"><span class="n">cancel_scan</span>
           <span class="d">stops after the current step; audited</span>
@@ -186,7 +187,7 @@ every scan.</p>
       <div class="group run">
         <h3>5 · Code</h3>
         <div class="tool"><span class="n">upload_code</span>
-          <span class="d">a .zip (name, MIME type, zip signature checked) or code files; admin; nothing unpacked here; Python only for now</span>
+          <span class="d">a .zip (name, MIME type, zip signature checked) or code files; admin; nothing unpacked here; Python only for now; idempotency_key (same upload_id on a retry)</span>
           <div class="tags"><span class="tag guard">rules</span><span class="tag disk">disk</span></div></div>
         <div class="tool"><span class="n">start_scan(upload_id | git_url, scan_scope)</span>
           <span class="d">the code is analysed only as the scan's code_sast step, with the website or code only (git: .git link, reachability checked, optional branch/tag): Kubernetes Job or the Python process sandbox, no network; non-Python files marked partial, executables/batch files as warnings, shell scripts as notes; get_scan.code_sast</span>
@@ -199,7 +200,7 @@ every scan.</p>
         <li>target on the operator allowlist</li>
         <li>authorization_confirmed must be true</li>
         <li>only the four pentest profiles</li>
-        <li>RBAC roles, owner-only scans</li>
+        <li>RBAC roles + ABAC attributes, owner-only scans and reports</li>
         <li>credentials by profile name, never returned</li>
         <li>one scan at a time</li>
         <li>output wrapped as untrusted data</li>

@@ -34,6 +34,12 @@ Send one user message containing a JSON object, as a data part (preferred) or as
 `authorization_confirmed` must be the JSON literal `true`. The string `"true"` is rejected on
 purpose.
 
+Source code: A2A takes no files or `.zip` archives. Give the code as a git link in the scan:
+`"git_url": "https://github.com/owner/repo.git"` (optional `"git_ref"`), with `"scan_scope":
+"website_and_code"`, or `"code"` without `target_url`. Needs an admin token. A zip or loose files
+go through MCP `upload_code` (or `POST /api/uploads`); pass its `"upload_id"` instead.
+Idempotency keys are MCP only; A2A requests take none.
+
 ## Task lifecycle
 
 `policy` and the report actions answer with a single message. Scans become tasks:

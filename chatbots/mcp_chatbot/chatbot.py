@@ -143,9 +143,11 @@ async def make_engine(base: str, roles: list[str], disabled: set[str] | None = N
 
         engine.policy = policy
     if "upload_code" in server_tools:
-        async def upload(filename: str, content_base64: str) -> dict:
-            return mcp_json(await server_tools["upload_code"].ainvoke(
-                {"filename": filename, "content_base64": content_base64}))
+        async def upload(filename: str, content_base64: str, idempotency_key: str | None = None) -> dict:
+            args = {"filename": filename, "content_base64": content_base64}
+            if idempotency_key:
+                args["idempotency_key"] = idempotency_key
+            return mcp_json(await server_tools["upload_code"].ainvoke(args))
 
         engine.upload = upload
     engine.report = lambda session_id, filename: fetch_report(base, minter, session_id, filename)

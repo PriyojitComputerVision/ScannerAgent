@@ -248,6 +248,7 @@ Run everything with `uv run pytest` (no real network or LLM calls; the golden li
 | File | Covers |
 |---|---|
 | `tests/test_a2a_server.py` | A2A endpoint and the MCP/A2A mounts inside pentest-agent (stubbed graph: no network, no LLM). |
+| `tests/test_abac.py` | ABAC on top of RBAC (pentest_agent/abac.py): per-subject attributes from ABAC_SUBJECTS_FILE. |
 | `tests/test_admission.py` | Server-wide admission queues (pentest_agent/admission.py) and their use in the WebSocket endpoint and HTTP middleware. |
 | `tests/test_api_auth.py` | API authentication (RS256 JWT, auto refresh) and RBAC, at the API and in the agents. |
 | `tests/test_archive_safety.py` | Uploaded archives: hostile entries are flagged and never extracted; only text files the analyzer reads are written, inside the extraction folder. |

@@ -442,3 +442,27 @@ def test_fetch_report_maps_scanner_refusals_to_not_found(monkeypatch):
 
     monkeypatch.setattr(sc.urllib.request, "urlopen", refuse)
     assert sc.fetch_report("http://s", Minter(), "sess-1", "report.json")[0] == 404
+
+
+async def test_approved_scan_carries_an_idempotency_key_set_by_the_chatbot():
+    """Every start_scan / start_demo_scan call gets a key derived from its tool-call id (stable for
+    that call, new for the next one); a key the model wrote itself is replaced."""
+    seen: list[dict] = []
+
+    @tool("start_scan")
+    async def keyed_scan(target_url: str, authorization_confirmed: bool = False,
+                         idempotency_key: str | None = None) -> str:
+        """Start a scan."""
+        seen.append({"target_url": target_url, "idempotency_key": idempotency_key})
+        return '{"scan_id": "mcp-123", "status": "running"}'
+
+    call = AIMessage(content="", tool_calls=[{"name": "start_scan", "id": "c1", "args": {
+        "target_url": "https://app.example.test/", "idempotency_key": "model-chose-this"}}])
+    eng = sc.Engine(sc.build_agent([keyed_scan], model=ScriptedModel(messages=iter([call, AIMessage(content="ok")]))))
+    await eng.send("t1", "scan https://app.example.test/", lambda e: None)
+    await eng.decide("t1", [{"type": "approve"}], lambda e: None)
+    assert seen == [{"target_url": "https://app.example.test/", "idempotency_key": sc.idempotency_key("call", "c1")}]
+    key = seen[0]["idempotency_key"]
+    assert key.startswith("chat-call-") and 8 <= len(key) <= 128 and "c1" not in key
+    assert sc.idempotency_key("call", "c2") != key
+    assert sc.IDEMPOTENT_TOOLS == ("start_scan", "start_demo_scan")
