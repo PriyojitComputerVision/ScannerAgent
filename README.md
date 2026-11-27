@@ -30,6 +30,9 @@ otherwise `sandbox_check` applies the same JavaScript rules inside its Kubernete
 (`scopeguard-job-<session_id>`, deleted after the run). Orange lines mark the only traffic to the target website (in scope only).
 Only `plan_probes` and `summarize` call the LLM, and both have offline fallbacks. Reports,
 SQLite checkpoints (AES-encrypted with `CHECKPOINT_ENCRYPTION_KEY`) and the audit log are written under `data/`.
+Checkpoints are written asynchronously (aiosqlite + LangGraph's `AsyncSqliteSaver`, no synchronous SQLite anywhere);
+the server and every MCP / A2A scan share the file through WAL mode with a busy timeout
+(`CHECKPOINT_BUSY_TIMEOUT_SECONDS`, 30), so concurrent scans wait for each other instead of failing with "database is locked".
 The diagrams are rendered from `docs/src/*.html` with `uv run python scripts/render_docs.py`. The same scan engine (`src/scopeguard/`) also runs
 standalone through `python -m scopeguard.cli`.
 

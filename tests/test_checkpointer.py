@@ -1,66 +1,100 @@
+"""LangGraph checkpoints in SQLite, async only: connection setup for several concurrent writers,
+the separate sub-agent database, encryption at rest."""
 from __future__ import annotations
 
-from langgraph.checkpoint.sqlite import SqliteSaver
+import asyncio
+import sqlite3
+from typing import TypedDict
 
-from pentest_agent.checkpointer import (
-    get_main_checkpointer_sync,
-    get_subagent_checkpointer_sync,
-    subagent_thread_id,
-)
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command, interrupt
+
+from pentest_agent import checkpointer as cp
+from pentest_agent.config import settings
+
+
+class S(TypedDict, total=False):
+    secret: str
+    answer: dict
+    n: int
+
+
+def _ask(state: S):
+    return {"answer": interrupt({"kind": "mfa"})}
+
+
+def _hitl_graph(saver):
+    g = StateGraph(S)
+    g.add_node("ask", _ask)
+    g.add_edge(START, "ask")
+    g.add_edge("ask", END)
+    return g.compile(checkpointer=saver)
+
+
+def _counter_graph(saver, steps: int):
+    """A graph that writes one checkpoint per step."""
+    g = StateGraph(S)
+    g.add_node("step", lambda s: {"n": s.get("n", 0) + 1})
+    g.add_edge(START, "step")
+    g.add_conditional_edges("step", lambda s: END if s["n"] >= steps else "step")
+    return g.compile(checkpointer=saver)
 
 
 def test_subagent_thread_id_format():
-    assert subagent_thread_id("session-123", "codegen_planner") == "session-123::codegen_planner"
-    assert subagent_thread_id("s", "sast_subagent") == "s::sast_subagent"
+    assert cp.subagent_thread_id("session-123", "codegen_planner") == "session-123::codegen_planner"
+    assert cp.subagent_thread_id("s", "sast_subagent") == "s::sast_subagent"
 
 
-def test_main_checkpointer_is_sqlite_saver():
-    saver = get_main_checkpointer_sync()
-    assert isinstance(saver, SqliteSaver)
+async def test_connection_is_set_up_for_concurrent_writers(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "checkpoint_busy_timeout_seconds", 12.5)
+    db = tmp_path / "nested" / "main.sqlite"  # the folder is created
+    async with cp.async_main_checkpointer(str(db)) as saver:
+        assert isinstance(saver, AsyncSqliteSaver)
+        pragmas = {}
+        for name in ("journal_mode", "busy_timeout", "synchronous", "foreign_keys"):
+            async with saver.conn.execute(f"PRAGMA {name}") as cur:
+                pragmas[name] = (await cur.fetchone())[0]
+        async with saver.conn.execute("select name from sqlite_master where type='table'") as cur:
+            tables = {r[0] for r in await cur.fetchall()}
+    assert pragmas == {"journal_mode": "wal", "busy_timeout": 12500, "synchronous": 1, "foreign_keys": 1}
+    assert {"checkpoints", "writes"} <= tables  # set up before the first write
+    assert db.exists()
 
 
-def test_subagent_checkpointer_is_separate_db_from_main():
-    from pentest_agent.config import settings
-
+async def test_subagent_checkpointer_is_a_separate_async_db(tmp_path, monkeypatch):
+    monkeypatch.setattr(settings, "subagent_checkpoint_db_path", str(tmp_path / "sub.sqlite"))
     assert settings.checkpoint_db_path != settings.subagent_checkpoint_db_path
-    saver = get_subagent_checkpointer_sync()
-    assert isinstance(saver, SqliteSaver)
+    async with cp.async_subagent_checkpointer() as saver:
+        assert isinstance(saver, AsyncSqliteSaver)
+        out = await _counter_graph(saver, 3).ainvoke({"n": 0}, {"configurable": {"thread_id": "s::sast"}})
+    assert out["n"] == 3 and (tmp_path / "sub.sqlite").exists()
 
 
-def test_checkpoints_are_encrypted_at_rest(tmp_path, monkeypatch):
+async def test_two_connections_write_the_same_db_concurrently(tmp_path):
+    """The WebSocket server and an MCP / A2A scan each hold a connection to one checkpoint file:
+    many scans on both, at the same time, without "database is locked"."""
+    db = str(tmp_path / "main.sqlite")
+    async with cp.async_main_checkpointer(db) as server, cp.async_main_checkpointer(db) as mcp_scan:
+        runs = [_counter_graph(saver, 25).ainvoke({"n": 0}, {"configurable": {"thread_id": f"{name}-{i}"}})
+                for name, saver in (("ws", server), ("mcp", mcp_scan)) for i in range(4)]
+        results = await asyncio.gather(*runs)
+        assert [r["n"] for r in results] == [25] * 8
+        # every run's final state is readable from the other connection too
+        state = await _counter_graph(mcp_scan, 25).aget_state({"configurable": {"thread_id": "ws-3"}})
+        assert state.values["n"] == 25
+
+
+async def test_checkpoints_are_encrypted_at_rest(tmp_path, monkeypatch):
     """With CHECKPOINT_ENCRYPTION_KEY, state and human-in-the-loop resume values
     (e.g. an MFA code) never reach the SQLite file in plaintext."""
-    import sqlite3
-    from typing import TypedDict
-
-    from langgraph.graph import END, START, StateGraph
-    from langgraph.types import Command, interrupt
-
-    from pentest_agent import checkpointer as cp
-    from pentest_agent.config import settings
-
-    class S(TypedDict, total=False):
-        secret: str
-        answer: dict
-
-    def ask(state: S):
-        return {"answer": interrupt({"kind": "mfa"})}
-
-    def build(saver):
-        g = StateGraph(S)
-        g.add_node("ask", ask)
-        g.add_edge(START, "ask")
-        g.add_edge("ask", END)
-        return g.compile(checkpointer=saver)
-
     db = tmp_path / "cp.sqlite"
-    monkeypatch.setattr(settings, "checkpoint_db_path", str(db))
     monkeypatch.setattr(settings, "checkpoint_encryption_key", "test-only-key")
     cfg = {"configurable": {"thread_id": "t1"}}
-    with cp.main_checkpointer_ctx() as saver:
-        app = build(saver)
-        app.invoke({"secret": "SESSION-COOKIE-XYZ"}, cfg)
-        done = app.invoke(Command(resume={"code": "987654"}), cfg)
+    async with cp.async_main_checkpointer(str(db)) as saver:
+        app = _hitl_graph(saver)
+        await app.ainvoke({"secret": "SESSION-COOKIE-XYZ"}, cfg)
+        done = await app.ainvoke(Command(resume={"code": "987654"}), cfg)
     assert done == {"secret": "SESSION-COOKIE-XYZ", "answer": {"code": "987654"}}
     raw = db.read_bytes() + b"".join(p.read_bytes() for p in tmp_path.glob("cp.sqlite-*"))
     assert b"SESSION-COOKIE-XYZ" not in raw and b"987654" not in raw
@@ -68,13 +102,10 @@ def test_checkpoints_are_encrypted_at_rest(tmp_path, monkeypatch):
     types = {r[0] for r in conn.execute("select type from checkpoints")}
     conn.close()
     assert types and all("+aes" in t for t in types)
-    with cp.main_checkpointer_ctx() as saver:  # same key: state reads back
-        assert build(saver).get_state(cfg).values["secret"] == "SESSION-COOKIE-XYZ"
+    async with cp.async_main_checkpointer(str(db)) as saver:  # same key: state reads back
+        assert (await _hitl_graph(saver).aget_state(cfg)).values["secret"] == "SESSION-COOKIE-XYZ"
 
 
 def test_without_a_key_checkpoints_stay_plaintext(monkeypatch):
-    from pentest_agent import checkpointer as cp
-    from pentest_agent.config import settings
-
     monkeypatch.setattr(settings, "checkpoint_encryption_key", "")
     assert cp.make_serde() is None

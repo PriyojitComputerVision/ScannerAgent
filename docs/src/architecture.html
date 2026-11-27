@@ -182,7 +182,7 @@
       <div class="box disk"><div class="h">local disk · data/</div><b>Files the server writes</b>
         <ul>
           <li>reports/&lt;session_id&gt;/report.*</li>
-          <li>checkpoints/main.sqlite (AES at rest)</li>
+          <li>checkpoints/main.sqlite (AES at rest; async aiosqlite, WAL + busy timeout: server and MCP/A2A scans write it concurrently)</li>
           <li>audit/audit.jsonl (pentest-audit verify)</li>
           <li>audit/code_audit.jsonl (pentest-audit --trail code verify)</li>
           <li>uploads/&lt;id&gt;/ (archive until scanned, checkpoint)</li>
