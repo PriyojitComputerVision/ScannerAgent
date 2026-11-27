@@ -31,7 +31,7 @@ graph TD;
 	auth_challenge -.-> aggregate;
 	auth_challenge -.-> code_source;
 	choose_scope -.-> aggregate;
-	choose_scope -.-> code_source;
+	choose_scope -.-> auth;
 	choose_scope -.-> recon;
 	code_sast -.-> aggregate;
 	code_sast -.-> sandbox_check;
