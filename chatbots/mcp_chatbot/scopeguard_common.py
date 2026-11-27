@@ -294,8 +294,9 @@ def approval_description(tool_call: dict, state: Any = None, runtime: Any = None
                 f" The git repository {args.get('git_url')} is cloned (public, shallow) and analysed in its code "
                 "SAST step; approve only if you own that code too." if args.get("git_url") else "")
         if args.get("scan_scope") == "code":
-            return (f"Analyse only the source code (no request is sent to {args.get('target_url')}; its URL labels "
-                    f"the report).{code} Approve only if you own the code or may analyse it: your approval is the "
+            site = (f"no request is sent to {args.get('target_url')}; its URL labels the report"
+                    if args.get("target_url") else "no website is needed or contacted")
+            return (f"Analyse only the source code ({site}).{code} Approve only if you own the code or may analyse it: your approval is the "
                     "authorization confirmation. You can still pick what to test in the card.")
         return (f"Scan {args.get('target_url')} with the {args.get('profile', 'standard')} profile. "
                 "It sends real HTTP requests to that site. Approve only if you own the site or are "

@@ -217,7 +217,9 @@ def check_tool_args(name: str, args: dict | None) -> str | None:
     """Pre-guardrail for a tool call. Returns a reason to refuse it, or None."""
     args = args or {}
     if name == "start_scan":
-        problem = _check_url(args.get("target_url"))
+        # A source-code-only scan needs no website: target_url may be left out.
+        code_only_no_url = args.get("scan_scope") == "code" and not args.get("target_url")
+        problem = None if code_only_no_url else _check_url(args.get("target_url"))
         if problem:
             return problem
         if args.get("jwt") or args.get("login"):

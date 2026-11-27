@@ -83,7 +83,8 @@ summary (each `[Sn]` jumps to its finding), attack coverage, a findings explorer
 reports with html/docx/md/json downloads, and the **agent integrations** (MCP and A2A endpoints,
 see below). Admins also see the **audit trail** (live chain check) and
 can tick **Pause for SSO / MFA sign-in** to complete a target's sign-in themselves when asked, and choose
-**What to test** (ask me after launch, website + code, website only, code only). The page fits one
+**What to test** in the New scan card (website + code, website only, code only with no link needed, or
+decide after launch). The page fits one
 screen: the top bar and footer stay put while the left rail and the main stage scroll on their own
 (on narrow screens it becomes one scrolling page). The built-in target (`127.0.0.1` only) is offered as a
 one-click demo target. Flags: `--no-browser`, `--no-target`, `--host`, `--port`.
@@ -468,18 +469,23 @@ what the scan tests:
 | --- | --- | --- |
 | `website_and_code` | every website step, then the code at the SAST step (`code_source` → `code_sast`) | yes |
 | `website` | every website step; no code step | yes |
-| `code` | `choose_scope → code_source → code_sast → aggregate → summarize → report → audit` | **none**: the URL only labels the report |
+| `code` | `choose_scope → code_source → code_sast → aggregate → summarize → report → audit` | **none**: no website is needed; a URL, if given, only labels the report |
 
 * **Ask me (human in the loop).** With `"ask_scan_scope": true` the run pauses (LangGraph `interrupt`,
   checkpointed) and the server sends `input_required` with `request.type == "scan_scope"`, the offered
   `options` and the `default`. Answer `{"type": "scope_response", "scope": "website_and_code" | "website" | "code"}`.
   Only offered scopes are accepted; no answer within `SCOPE_INPUT_TIMEOUT_SECONDS` (300) keeps the default.
-  The console does this by default for admins (**What to test → Ask me after launch**), then shows a
+  In the console pick **Decide after launch** in the New scan card; the scan then shows a
   **What should this scan test?** dialog.
-* **Named up front.** `"scan_scope": "..."` in the scan request (console: pick the scope in **Scan
-  settings**; MCP `start_scan(scan_scope=...)`; A2A `"scan_scope"`; the MCP chatbot's approval card has a
+* **Named up front.** `"scan_scope": "..."` in the scan request (console: the **What to test** chips in
+  the New scan card, Website + code by default for admins; **Code only** makes the link optional and
+  turns the card into "Which code should ScopeGuard analyse?"; MCP `start_scan(scan_scope=...)`; A2A `"scan_scope"`; the MCP chatbot's approval card has a
   **What to test** choice). Code scopes need the code (`upload_id` / `git_url`, or `ask_for_code` for a
   client that answers the code pause); `website` together with code is refused.
+* **No website.** A code-only scan may omit `url` (MCP/A2A: `target_url`): nothing is checked against the
+  network policy or the allowlist, and the report is labelled `source code (no website)`. Every other
+  scope needs the URL (the error points at `url`); a code-only scan without one takes no extra hosts or
+  target credentials.
 * **Default.** Without either, the scope follows the request as before: code named or `ask_for_code` →
   website + code, otherwise website only.
 

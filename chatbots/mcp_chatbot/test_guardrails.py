@@ -201,3 +201,8 @@ def test_scan_scope_argument_is_checked():
     assert "one of" in g.check_tool_args("start_scan", {**ok, "scan_scope": "all"})
     assert "needs source code" in g.check_tool_args("start_scan", {"target_url": url, "scan_scope": "code"})
     assert "tests no source code" in g.check_tool_args("start_scan", {**ok, "scan_scope": "website"})
+
+
+def test_code_only_scan_may_omit_the_target():
+    assert g.check_tool_args("start_scan", {"scan_scope": "code", "upload_id": "a" * 32}) is None
+    assert g.check_tool_args("start_scan", {"upload_id": "a" * 32}) is not None  # a website scan needs a URL
