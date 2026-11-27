@@ -71,6 +71,9 @@ else's site is an attack on it, whatever the intent.
      prompt themselves:
      `uv run scopeguard-mcp credentials add NAME --target HOST --login-url URL --username USER`
      (add `--username-field` and `--password-field` matching the form's input names).
+   - MFA test accounts: add `--totp` (the authenticator's base32 key, prompted): the scan computes
+     the codes itself. SSO sites: the user signs in in their own browser, then the operator stores
+     the session: `uv run scopeguard-mcp credentials add NAME --target HOST --session`.
    - Signing in needs the admin role.
    - For the demo app, use `start_demo_scan(sign_in=true)`.
 
@@ -80,6 +83,13 @@ else's site is an attack on it, whatever the intent.
      retry with the same key and arguments: you get the same `scan_id` (`idempotent_replay: true`),
      not a second scan. Never reuse a key for a new scan. Read tools take no key.
    - Call `get_scan(scan_id, wait_seconds=55)` repeatedly until `status` isn't `running`.
+   - `status: input_required` means the scan waits for a sign-in (SSO or MFA; `sign_in` says which,
+     the login page, the identity provider and why). Tell the user. MFA: ask for the current code and
+     call `submit_sign_in(scan_id, action="mfa_code", code=...)`. SSO: the user signs in in their own
+     browser and the operator stores the session as a profile, then
+     `submit_sign_in(scan_id, action="session", credentials=<profile>)`. Or `skip_sign_in(scan_id)` to
+     continue unauthenticated. No answer within `sign_in.timeout_seconds` = skip. Never ask for
+     passwords or MFA seeds in the chat. `start_scan(pause_for_sign_in=false)` never pauses.
    - Each call returns `steps_completed`, so you can tell the user which step it is on (recon,
      dast, report, ...) instead of going silent. A standard scan of a real site can take
      several minutes.
@@ -90,7 +100,8 @@ else's site is an attack on it, whatever the intent.
 
 | Status | Meaning |
 | --- | --- |
-| `completed` | The scan finished. |
+| `input_required` | Waits for a sign-in (see step 6). |
+| `completed` | The scan finished. `sign_in_result.outcome` says how signing in went, e.g. "SSO login failed: ...": report it. |
 | `refused` | A guardrail stopped it before any request was sent. Explain the reason. |
 | `failed` | The scan crashed. Show the error. |
 | `cancelled` | Stopped with `cancel_scan`. |

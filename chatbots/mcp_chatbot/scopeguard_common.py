@@ -63,6 +63,9 @@ def idempotency_key(kind: str, *parts: str) -> str:
     return f"chat-{kind}-{digest}"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # the scanner's MCP_MAX_UPLOAD_MB default
 UPLOAD_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+SCAN_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{2,63}$")
+MFA_CODE_RE = re.compile(r"^[A-Za-z0-9-]{4,12}$")
+PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 LANGUAGE_NOTICE = "Python only for now: other languages are only partly covered."
 # Groq's on_demand tier allows 8,000 tokens per request (prompt + reply budget), so tool
 # results are kept compact and old tool outputs are cleared from the history.
@@ -823,6 +826,9 @@ class Engine:
         # optional (session_id, filename) -> (status, bytes, content type): a report file from the
         # scanner with this chatbot's token, for the UI's report links (never through the model)
         self.report = None
+        # optional async (scan_id, action, code, credentials) -> dict: answer a scan's sign-in pause
+        # (MCP submit_sign_in / skip_sign_in), called by the UI directly: codes never reach the model
+        self.sign_in = None
         # What the output guardrail checks answers against (no prompt leakage).
         self.prompts = [load_prompt(), load_prompt("summary_prompt")]
 
@@ -874,6 +880,8 @@ class Engine:
                 if mode == "custom":
                     if isinstance(chunk, dict) and "scan_result" in chunk:  # verified block, not model text
                         emit({"type": "scan_result", "markdown": chunk["scan_result"]})
+                    elif isinstance(chunk, dict) and "sign_in" in chunk:  # a scan waits for SSO / MFA
+                        emit({"type": "sign_in", "request": chunk["sign_in"]})
                     else:
                         emit({"type": "progress", "text": str(chunk.get("text") if isinstance(chunk, dict)
                                                               else chunk)})
@@ -1169,6 +1177,37 @@ class ApiServer:
                     api.attachments[tid] = att
                 self._reply(201, att)
 
+            def _sign_in(self, body: dict) -> None:
+                """A scan's sign-in pause: skip, MFA code or a session credential profile -> MCP."""
+                scan_id = str(body.get("scan_id") or "")
+                action = str(body.get("action") or "")
+                code = body.get("code") or None
+                cred = body.get("credentials") or None
+                if not SCAN_ID_RE.match(scan_id) or action not in ("skip", "mfa_code", "session"):
+                    self._reply(400, {"error": "scan_id and action (skip, mfa_code, session) are required"})
+                    return
+                if action == "mfa_code" and not (isinstance(code, str) and MFA_CODE_RE.match(code.strip())):
+                    self._reply(400, {"error": "the code must be 4-12 letters or digits"})
+                    return
+                if action == "session" and not (isinstance(cred, str) and PROFILE_RE.match(cred.strip())):
+                    self._reply(400, {"error": "name the session credential profile the operator stored"})
+                    return
+                if api.engine.sign_in is None:
+                    self._reply(404, {"error": "the scanner does not offer submit_sign_in"})
+                    return
+                try:
+                    result = asyncio.run_coroutine_threadsafe(api.engine.sign_in(
+                        scan_id, action, code.strip() if code else None, cred.strip() if cred else None),
+                        api.loop).result(30)
+                except Exception as exc:  # noqa: BLE001 - reported to the UI, never the code itself
+                    self._reply(502, {"error": f"sign-in answer failed: {type(exc).__name__}"})
+                    return
+                if not isinstance(result, dict) or "scan_id" not in result:
+                    self._reply(409, {"error": "the scanner refused it: " + refusal_text(
+                        result if isinstance(result, dict) else {})})
+                    return
+                self._reply(202, {"ok": True, "status": result.get("status")})
+
             def do_POST(self):
                 if not self._authorized():
                     return
@@ -1200,6 +1239,9 @@ class ApiServer:
                     with api.lock:
                         api.attachments.pop(tid, None)
                     err = None
+                elif self.path == "/api/sign_in":
+                    self._sign_in(body)
+                    return
                 elif self.path == "/api/decide":
                     answers = body.get("answers")
                     if not isinstance(answers, list) or len(answers) != len(api.engine.pending.get(tid) or []):

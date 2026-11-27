@@ -16,7 +16,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, Interrupt
 
-from pentest_agent import audit_log, graph, rbac, websocket_server
+from pentest_agent import audit_log, graph, rbac, secret_vault, websocket_server
 from pentest_agent.config import settings
 from pentest_agent.http_retry import RateLimitRetryTransport
 from pentest_agent.tools import auth_flow
@@ -219,17 +219,26 @@ def _mini_graph():
 def test_graph_pauses_for_mfa_and_resumes_with_the_code(target):
     challenge, pending = _pending(target)
     app, cfg = _mini_graph(), {"configurable": {"thread_id": "hitl-1"}}
+    # The pre-MFA session lives in the encrypted vault, never in the (checkpointed) state.
+    secret_vault.put("hitl-1", auth_pending=pending)
     state = {"session_id": "hitl-1", "target": {"url": "http://app.test/", "session_id": "hitl-1",
                                                 "authorization_confirmed": True},
-             "allowed_domains": sorted(ALLOWED), "auth_challenge": challenge, "auth_pending": pending}
+             "allowed_domains": sorted(ALLOWED), "auth_challenge": challenge}
     paused = app.invoke(state, cfg)
     (intr,) = paused["__interrupt__"]
     assert intr.value["kind"] == "mfa" and intr.value["type"] == "sign_in"
     assert "step1" not in json.dumps(intr.value)          # no secret in what the operator is shown
     assert app.get_state(cfg).next == ("auth_challenge",)  # checkpointed, waiting
-    done = app.invoke(Command(resume={"action": "mfa_code", "code": "123456"}), cfg)
+    # Entry points resume with a vault marker: the code itself never enters the checkpoint.
+    marker = secret_vault.resume_value("hitl-1", intr.value, {"action": "mfa_code", "code": "123456"})
+    assert marker == {"action": "mfa_code", "vault": True}
+    done = app.invoke(Command(resume=marker), cfg)
     assert done["auth_performed"] is True and done["phase"] == "next_step"
-    assert done["auth_challenge"]["status"] == "signed_in" and done["auth_pending"] == {}
+    assert done["auth_challenge"]["status"] == "signed_in" and "auth_pending" not in done
+    assert done["sign_in_result"]["status"] == "signed_in"
+    assert secret_vault.get("hitl-1")["auth_session_cookies"]  # the session: in the vault
+    assert "auth_session_cookies" not in done and "123456" not in json.dumps(done, default=str)
+    secret_vault.clear("hitl-1")
 
 
 def test_auth_routes_to_the_challenge_only_when_needed(monkeypatch):
@@ -310,7 +319,7 @@ def test_websocket_asks_the_operator_and_resumes(monkeypatch):
     assert "input_required" in kinds and "input_invalid" in kinds and kinds[-1] == "complete"
     req = next(m for m in msgs if m["type"] == "input_required")
     assert req["request"]["kind"] == "mfa" and req["timeout_seconds"] == settings.auth_input_timeout_seconds
-    assert fake.resumes == [{"action": "mfa_code", "code": "123456"}]
+    assert fake.resumes == [{"action": "mfa_code", "vault": True}]  # the code went to the vault
     for secret in ("SECRET1", "SECRET2", "SECRET3", "123456"):
         assert secret not in raw, f"{secret} was streamed to the client"
 
@@ -325,8 +334,10 @@ def test_websocket_timeout_continues_unauthenticated(monkeypatch):
 
 # ----------------------------------------------------------------- the session reaches the scanner
 def test_session_cookie_reaches_dast_and_probes():
-    state = {"auth_session_cookies": {"sid": "full", "bad\r\n": "x"}}
+    secret_vault.put("cookie-1", auth_session_cookies={"sid": "full", "bad\r\n": "x"})
+    state = {"session_id": "cookie-1"}
     assert graph._session_cookie(state) == "sid=full"
+    secret_vault.clear("cookie-1")
     seen = []
 
     class Handler(http.server.BaseHTTPRequestHandler):

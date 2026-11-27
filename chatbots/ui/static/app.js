@@ -411,6 +411,137 @@ function showApproval(requests) {
   });
 }
 
+// ---------------------------------------------------------------- sign-in pause (SSO / MFA)
+// A scan waits for the user (human in the loop). The answer goes from this page to the
+// scanner's MCP submit_sign_in / skip_sign_in directly: codes never pass through the model.
+const SVG_NS = 'http://www.w3.org/2000/svg';
+function eyeIcon(open) {
+  const svg = document.createElementNS(SVG_NS, 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('aria-hidden', 'true');
+  const shape = (tag, attrs) => {
+    const n = document.createElementNS(SVG_NS, tag);
+    Object.entries(attrs).forEach(([k, v]) => n.setAttribute(k, v));
+    n.setAttribute('fill', 'none');
+    n.setAttribute('stroke', 'currentColor');
+    n.setAttribute('stroke-width', '1.8');
+    svg.appendChild(n);
+  };
+  shape('path', { d: 'M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z' });
+  shape('circle', { cx: '12', cy: '12', r: '3' });
+  if (!open) shape('path', { d: 'M3 3l18 18' });
+  return svg;
+}
+
+// A secret input with an eye button: crossed eye = hidden, open eye = shown.
+function secretInput(placeholder, maxLength, visibleByDefault) {
+  const wrap = el('span', 'secret-field');
+  const input = el('input');
+  input.maxLength = maxLength;
+  input.placeholder = placeholder;
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  const eye = button('', 'reveal');
+  const show = (on) => {
+    input.type = on ? 'text' : 'password';
+    eye.setAttribute('aria-pressed', on ? 'true' : 'false');
+    eye.setAttribute('aria-label', on ? 'Hide' : 'Show');
+    eye.title = on ? 'Hide' : 'Show';
+    eye.replaceChildren(eyeIcon(!on));
+  };
+  eye.addEventListener('click', () => { show(input.type === 'password'); input.focus(); });
+  show(Boolean(visibleByDefault));
+  wrap.append(input, eye);
+  return { wrap, input, hide: () => show(Boolean(visibleByDefault)) };
+}
+
+let activeSignIn = null; // the card waiting for an answer (Esc skips it)
+
+function safeHttpUrl(raw) {
+  try {
+    const u = new URL(raw);
+    return (u.protocol === 'https:' || u.protocol === 'http:') ? u.href : null;
+  } catch (e) { return null; }
+}
+
+function showSignIn(req) {
+  streamBubble = null;
+  const kind = req.kind === 'mfa' ? 'mfa' : (req.kind === 'sso' ? 'sso' : 'session');
+  const box = add(el('div', 'approval signin'));
+  box.appendChild(el('h3', null, kind === 'mfa' ? 'Enter your one-time code'
+    : (kind === 'sso' ? 'SSO sign-in needed' : 'Sign-in needed')));
+  box.appendChild(el('p', null, 'Scan ' + (req.scan_id || '') + ' is waiting for you (human in the loop). '
+    + (req.evidence ? 'Why: ' + req.evidence + '. ' : '')
+    + 'No answer within ' + (req.timeout_seconds || 300) + ' s = skipped.'));
+  if (req.methods && req.methods.length) {
+    box.appendChild(el('p', 'line', 'The site signs in with: ' + req.methods.join(' and ')));
+  }
+  if (req.idp_host) box.appendChild(el('p', 'line', 'Identity provider: ' + req.idp_host));
+  const href = safeHttpUrl(req.login_url);
+  if (href && kind !== 'mfa') {
+    // A page cannot open a tab without a click, so this is a link the user opens.
+    const a = el('a', 'btn-link', 'Open the sign-in page in a new tab');
+    a.href = href;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer';
+    box.appendChild(a);
+  }
+  let secret;
+  if (kind === 'mfa') {
+    secret = secretInput('123456', 12, false);
+    box.appendChild(field('One-time code', secret.wrap));
+  } else {
+    box.appendChild(el('p', 'line', 'Sign in in that tab (SSO, MFA and all). The operator then stores the session '
+      + 'once: uv run scopeguard-mcp credentials add NAME --target HOST --session. Enter that profile name below. '
+      + 'Never paste passwords here.'));
+    secret = secretInput('session profile name', 64, true);
+    box.appendChild(field('Session credential profile', secret.wrap));
+  }
+  const status = el('p', 'line', '');
+  const actions = el('div', 'actions');
+  const go = button(kind === 'mfa' ? 'Send code' : 'Continue signed in');
+  const skip = button('Skip: scan unauthenticated (Esc)', 'danger');
+  actions.append(go, skip);
+  box.append(actions, status);
+
+  const send = async (body, label) => {
+    go.disabled = true;
+    skip.disabled = true;
+    const r = await api('POST', 'sign_in', { thread_id: threadId, scan_id: req.scan_id, ...body });
+    secret.input.value = '';
+    secret.hide();
+    if (r.ok) {
+      activeSignIn = null;
+      box.querySelectorAll('input, button').forEach((c) => { c.disabled = true; });
+      actions.replaceChildren(el('span', 'done', label));
+      status.textContent = '';
+    } else {
+      go.disabled = false;
+      skip.disabled = false;
+      status.textContent = (r.data && r.data.error) || 'The answer was not accepted.';
+    }
+  };
+  const submit = () => {
+    const value = secret.input.value.trim();
+    if (!value) {
+      status.textContent = kind === 'mfa' ? 'Enter the code first.' : 'Enter the profile name first.';
+      return;
+    }
+    send(kind === 'mfa' ? { action: 'mfa_code', code: value } : { action: 'session', credentials: value },
+      kind === 'mfa' ? 'Code sent' : 'Session sent');
+  };
+  go.addEventListener('click', submit);
+  secret.input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } });
+  const doSkip = () => send({ action: 'skip' }, 'Skipped: the scan continues unauthenticated');
+  skip.addEventListener('click', doSkip);
+  activeSignIn = doSkip;
+  secret.input.focus();
+}
+
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && activeSignIn) { e.preventDefault(); activeSignIn(); }
+});
+
 function handle(ev) {
   switch (ev.type) {
     case 'token':
@@ -448,6 +579,9 @@ function handle(ev) {
     case 'approval':
       streamBubble = null;
       showApproval(ev.requests);
+      break;
+    case 'sign_in':
+      showSignIn(ev.request || {});
       break;
     case 'error':
       if (ev.kind === 'rate_limit') {

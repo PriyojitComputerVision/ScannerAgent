@@ -256,3 +256,13 @@ details.line pre { white-space: pre-wrap; color: var(--text-2); margin: 4px 0 6p
 
 .check.disabled { opacity: .6; cursor: not-allowed; }
 .attach-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+/* Sign-in pause card + secret inputs with an eye button */
+.secret-field { position: relative; display: block; }
+.secret-field > input { width: 100%; padding-right: 38px; box-sizing: border-box; }
+.secret-field > .reveal { position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 30px; height: 30px; padding: 0; display: grid; place-items: center; border: 0;
+  background: transparent; color: inherit; opacity: .75; cursor: pointer; }
+.secret-field > .reveal:hover, .secret-field > .reveal:focus-visible { opacity: 1; }
+.secret-field > .reveal svg { width: 18px; height: 18px; }
+.signin .btn-link { display: inline-block; margin: 6px 0; font-weight: 600; }

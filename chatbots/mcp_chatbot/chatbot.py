@@ -76,6 +76,8 @@ def make_watch_scan(get_scan):
         executive summary, report files and the audit record. Call it right after a scan starts."""
         write = get_stream_writer()
         seen = 0
+        announced = None  # the sign-in pause already shown to the user
+        methods_shown = False
         while True:
             data = mcp_json(await get_scan.ainvoke({"scan_id": scan_id, "wait_seconds": POLL_SECONDS,
                                                     "max_findings": 0}))
@@ -85,6 +87,23 @@ def make_watch_scan(get_scan):
                 seen += 1
                 write({"text": f"{step.get('node')} done (phase {step.get('phase')}, "
                                f"{step.get('at_seconds')}s)"})
+            methods = data.get("login_methods") or {}
+            if methods and not methods_shown and methods.get("kind") not in (None, "none"):
+                methods_shown = True
+                kinds = {"password": "a password form only", "sso": "SSO only",
+                         "password_and_sso": "both a password form and SSO"}
+                write({"text": f"sign-in found: {kinds.get(methods.get('kind'), methods.get('kind'))}"
+                               + (f" (identity provider {methods['idp_host']})" if methods.get("idp_host") else "")})
+            if data.get("status") == "input_required":
+                # SSO / MFA: the UI shows a sign-in card (open the page, enter a code or a session
+                # profile, or skip; Esc skips). Its answer goes straight to MCP, never through the model.
+                pause = data.get("sign_in") or {}
+                if pause and pause != announced:
+                    announced = pause
+                    write({"sign_in": {"scan_id": scan_id, **pause}})
+                    write({"text": f"scan waits for sign-in ({pause.get('kind')}): {pause.get('evidence') or ''}"})
+                await asyncio.sleep(POLL_SECONDS)
+                continue
             if data.get("status") != "running":
                 break
         final = mcp_json(await get_scan.ainvoke({"scan_id": scan_id, "wait_seconds": 0,
@@ -150,6 +169,20 @@ async def make_engine(base: str, roles: list[str], disabled: set[str] | None = N
             return mcp_json(await server_tools["upload_code"].ainvoke(args))
 
         engine.upload = upload
+    if "submit_sign_in" in server_tools:
+        async def sign_in(scan_id: str, action: str, code: str | None = None,
+                          credentials: str | None = None) -> dict:
+            """The user's answer to a scan's sign-in pause, straight to MCP (never via the model)."""
+            if action == "skip" and "skip_sign_in" in server_tools:
+                return mcp_json(await server_tools["skip_sign_in"].ainvoke({"scan_id": scan_id}))
+            args = {"scan_id": scan_id, "action": action}
+            if code:
+                args["code"] = code
+            if credentials:
+                args["credentials"] = credentials
+            return mcp_json(await server_tools["submit_sign_in"].ainvoke(args))
+
+        engine.sign_in = sign_in
     engine.report = lambda session_id, filename: fetch_report(base, minter, session_id, filename)
     return engine
 

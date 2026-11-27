@@ -207,7 +207,9 @@ async def test_credential_profile_is_used_but_never_returned(cred_file, fake_gra
                                          "authorization_confirmed": True, "credentials": "app"})
     res = await _call("get_scan", {"scan_id": started["scan_id"], "wait_seconds": 5})
     assert res["credentials"] == "profile:app"
-    assert fake_graph.inputs["target"]["auth"]["password"] == "S3cret-pw!"   # reached the graph
+    # The secret goes into the encrypted in-memory vault, never into the graph state (checkpoint).
+    assert fake_graph.inputs["credentials_held"]["login"] is True
+    assert "S3cret-pw!" not in json.dumps(fake_graph.inputs)
     everything = json.dumps([started, res, await _call("scan_policy"), await _call("list_scans")])
     assert "S3cret-pw!" not in everything and "eyJhbGciOi" not in everything
     assert "S3cret-pw!" not in Path(settings.audit_log_path).read_text(encoding="utf-8")
@@ -271,7 +273,7 @@ def test_tool_list_parsing():
     assert mcp_mod.parse_tool_list("get_report; list_scans ,bogus,") == (["get_report", "list_scans"], ["bogus"])
     assert set(mcp_mod.MCP_TOOL_NAMES) == {
         "scan_policy", "start_scan", "start_demo_scan", "get_scan", "cancel_scan", "list_scans",
-        "list_reports", "get_report", "verify_audit_log", "upload_code"}
+        "list_reports", "get_report", "verify_audit_log", "upload_code", "submit_sign_in", "skip_sign_in"}
 
 
 def test_only_the_pentest_agent_profiles_are_offered():

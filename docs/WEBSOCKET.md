@@ -97,8 +97,9 @@ Strict JSON object: unknown keys are refused (`422`), booleans must be real `tru
 | `profile` | `quick` \| `standard` \| `aggressive` \| `auth_deep` | Default `standard`. `aggressive`/`auth_deep` need the admin role. |
 | `additional_allowed_domains` | string[] | Extra in-scope hosts (max 20). |
 | `notes` | string | Stored with the scan (max 2000 characters). |
-| `jwt` / `auth` | string / `{login_url, username, password, username_field?, password_field?, extra_form_fields?}` | Credentials **for the target** (needs `scan:authenticated`). |
-| `interactive_auth` | bool | Pause for SSO / MFA sign-in (section 5). |
+| `jwt` / `auth` | string / `{login_url?, username, password, username_field?, password_field?, extra_form_fields?, totp_secret?}` | Credentials **for the target** (needs `scan:authenticated`). `login_url` defaults to the login page recon finds; `totp_secret` (base32) lets the scan compute MFA codes. Kept in the encrypted in-memory vault, never in the checkpoint. |
+| `session` | `{cookie?, bearer?}` | A session from signing in yourself (SSO). Checked before use; expired = "SSO login failed" red flag. |
+| `interactive_auth` | bool or left out | Left out: pause for SSO / MFA (default). `true`: also on a plain login form without credentials. `false`: never pause (section 5). |
 | `scan_scope` | `website_and_code` \| `website` \| `code` | What to test. Default: derived from the request. |
 | `ask_scan_scope` | bool | Pause before any request and ask what to test. |
 | `upload_id` | 32 hex | Code stored over HTTP (section 6). Not with `git_url`. |
@@ -146,8 +147,9 @@ untrusted text (escape before rendering, never execute or follow links automatic
 
 ## 5. Pauses (human in the loop)
 
-A run pauses only when the request asks it to (`ask_scan_scope`, `ask_for_code`, `interactive_auth`), so
-clients that cannot answer never wait. Pauses happen in this order:
+A run pauses for the scope / code only when the request asks it to (`ask_scan_scope`, `ask_for_code`). It pauses
+for sign-in whenever the target uses SSO or asks for an MFA code (send `interactive_auth: false` if your client
+cannot answer; a timeout skips anyway). Pauses happen in this order:
 
 ```
 validate -> choose_scope [scan_scope pause] -> recon -> auth [sign_in pause] -> code_source [code_source pause] -> ...
@@ -165,7 +167,7 @@ validate -> choose_scope [scan_scope pause] -> recon -> auth [sign_in pause] -> 
 
 - `scan_scope`: answer with one of `request.options[].value`. Timeout `SCOPE_INPUT_TIMEOUT_SECONDS` (300) keeps `default`.
 - `code_source`: `request` lists `accepts`, `max_upload_mb`, `max_files`, `git_enabled`, `git_hosts`. Upload the code over HTTP first, then answer with the `upload_id` (section 6). A git link is checked (host allowlist, reachable, branch exists) before the scan resumes. A failed check returns `input_invalid`, so you can fix the link. Timeout `CODE_INPUT_TIMEOUT_SECONDS` (600) = skip.
-- `sign_in`: `request.kind` is `mfa` (send the one-time `code`) or `sso` (sign in in your own browser, then send the target's `cookie` header value and/or a `bearer` token). Timeout `AUTH_INPUT_TIMEOUT_SECONDS` (300) = continue unauthenticated.
+- `sign_in`: `request.kind` is `mfa` (send the one-time `code`), `sso` (open `request.login_url` in your own browser, sign in, then send the target's `cookie` header value and/or a `bearer` token) or `session`. `request.methods` says how the site signs in (`password`, `SSO` or both), `request.idp_host` the identity provider. Answer `{"type": "auth_response", "action": "skip"}` to continue unauthenticated (the console binds it to Esc). Timeout `AUTH_INPUT_TIMEOUT_SECONDS` (300) = skip. The answer is kept in the encrypted in-memory vault; the checkpoint only records `{"action": ..., "vault": true}`. The session is verified (protected page / log out link); the outcome comes as `phase_update` data `sign_in_result` (e.g. "SSO login failed: ...") and is in the report.
 
 After a valid answer you get `status` with `event: "input_received"`, and the run continues.
 
