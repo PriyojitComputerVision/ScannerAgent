@@ -524,7 +524,7 @@ def test_bootstrap_without_kubectl_or_docker_means_python_sandbox(monkeypatch):
     # default policy: Kubernetes unavailable -> the scan still runs, in the Python process sandbox
     from pentest_agent.config import Settings
 
-    assert Settings.model_fields["sandbox_require_kubernetes"].default is False
+    assert "sandbox_require_kubernetes" not in Settings.model_fields  # no setting: falling back is a must
     out = codescan.scan_archive(_zip(), backend="kubernetes", require_kubernetes=False, timeout=120)
     assert out["sandbox"]["kind"] == "process" and out["findings"]
 
@@ -638,16 +638,14 @@ def test_missing_kubernetes_is_a_normal_python_sandbox_run_not_a_red_flag():
 
 
 # ---------------------------------------------------------------- sandbox auto-check at startup
-@pytest.mark.parametrize("tools, require, expected, changed", [
-    ({}, False, "process", True),                               # no kubectl: process sandbox for this run
-    ({"kubectl": "/usr/bin/kubectl"}, False, "kubernetes", False),  # kubectl: Kubernetes tried first
-    ({}, True, "kubernetes", False),                            # required: refuse instead of switching
+@pytest.mark.parametrize("tools, expected, changed", [
+    ({}, "process", True),                                  # no kubectl: process sandbox for this run
+    ({"kubectl": "/usr/bin/kubectl"}, "kubernetes", False),  # kubectl: Kubernetes tried first
 ])
-def test_sandbox_autodetect_picks_the_backend_the_machine_supports(monkeypatch, tools, require, expected, changed):
+def test_sandbox_autodetect_picks_the_backend_the_machine_supports(monkeypatch, tools, expected, changed):
     import shutil
 
     monkeypatch.setattr(settings, "sandbox_backend", "kubernetes")
-    monkeypatch.setattr(settings, "sandbox_require_kubernetes", require)
     monkeypatch.setattr(shutil, "which", lambda name: tools.get(name))
     result = code_upload.autodetect_sandbox()
     assert result["backend"] == expected and result["changed"] is changed

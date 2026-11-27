@@ -2,7 +2,7 @@
 
 ScopeGuard analyses backend code and uploaded archives in short-lived Kubernetes Jobs
 (`src/scopeguard/k8s.py`). Without a usable cluster everything still works: scans run in the
-Python process sandbox (`SANDBOX_REQUIRE_KUBERNETES=false`, the default).
+Python process sandbox, automatically (`.env` is never changed; there is no setting to refuse instead).
 
 A cluster is only used after an **isolation probe** proves that sandbox pods cannot open any
 connection (Kubernetes API, internet). The network plugin must therefore enforce

@@ -2,8 +2,8 @@
 Kubernetes Job sandbox (scopeguard.k8s). Stdlib only. No Docker is ever used.
 
 The isolated sandbox is a Kubernetes Job (scopeguard.k8s / scopeguard.codescan). This
-module is the local fallback the operator can choose (``SANDBOX_BACKEND=process``) or
-allow (``SANDBOX_REQUIRE_KUBERNETES=false``): an isolated child interpreter (``-I``)
+module is the local fallback, used automatically whenever Kubernetes cannot run (or chosen with
+``SANDBOX_BACKEND=process``): an isolated child interpreter (``-I``)
 with a scrubbed environment and throwaway cwd, a hard memory cap (POSIX rlimits /
 Windows Job Object), and the analyzer's own audit hook (no network, DNS, processes or
 writes; reads only under the inputs).

@@ -644,7 +644,7 @@ def bootstrap(cfg: K8sConfig, *, kind_cluster: str = "", manifests: str | None =
     2. Sandbox namespace missing + ``auto_apply``: ``kubectl apply -f <manifests>``.
     3. Ship / verify the analyzer ConfigMap.
     4. Full readiness check (RBAC, NetworkPolicy, isolation probe), cache refreshed.
-    ``ready`` false means scans use the Python process sandbox (unless Kubernetes is required)."""
+    ``ready`` false means scans use the Python process sandbox (always: falling back is not a setting)."""
     actions: list[str] = []
     if not _kubectl():
         return {"ready": False, "reason": "kubectl not found", "actions": actions}

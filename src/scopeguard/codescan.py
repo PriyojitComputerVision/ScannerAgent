@@ -6,8 +6,9 @@ backend folder + staged website text (:func:`scan_dirs`, which packs them into a
 1. Size: memory = ``memory_multiplier`` (5) x the content size (archive + the text it
    holds), at least ``floor_mb``, at most ``ceiling_mb`` (scopeguard.limits).
 2. Run ``scopeguard.upload_worker`` as a Kubernetes Job (scopeguard.k8s; no Docker, no
-   custom image). Kubernetes unavailable -> an error when ``require_kubernetes`` (the
-   default), else the process sandbox with ``fallback_reason``. ``backend="process"``
+   custom image). Kubernetes unavailable -> the process sandbox with ``fallback_reason`` (the
+   scanner always falls back; ``require_kubernetes=True`` is only for direct callers that want an
+   error instead). ``backend="process"``
    uses the process sandbox on purpose (development, tests).
 3. Out of memory (exit 86, OOMKilled, SIGKILL): the checkpoint lines the run printed
    are kept, the state is saved to ``checkpoint_path`` and the next attempt runs with
@@ -60,7 +61,7 @@ def _run_process(stdin: bytes, *, memory_mb: int, timeout: int, args: list[str])
 
 
 def scan_archive(data: bytes, *, backend: str = "kubernetes", k8s_config: k8s.K8sConfig | None = None,
-                 require_kubernetes: bool = True, header: dict | None = None, checkpoint_path: str | None = None, timeout: int = 300,
+                 require_kubernetes: bool = False, header: dict | None = None, checkpoint_path: str | None = None, timeout: int = 300,
                  memory_multiplier: int = limits.MEMORY_MULTIPLIER,
                  retry_multiplier: int = limits.RETRY_MEMORY_MULTIPLIER,
                  floor_mb: int = limits.MEMORY_FLOOR_MB, ceiling_mb: int = limits.MEMORY_CEILING_MB,
