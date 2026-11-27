@@ -56,6 +56,17 @@ def test_url_key_ignores_trailing_slash_case_and_fragment():
     assert url_key("https://a.test/x?q=1") != url_key("https://a.test/x?q=2")
 
 
+def test_code_findings_on_different_lines_stay_separate():
+    """A '#L<n>' anchor is part of a code location: the same rule on two lines is two findings."""
+    assert url_key("app/views.py#L12") != url_key("app/views.py#L40")
+    assert url_key("app/views.py#L12") == url_key("app/views.py#L12")
+    assert url_key("https://a.test/x#L5") != url_key("https://a.test/x#L6")
+    assert url_key("https://a.test/x#Lazy") == url_key("https://a.test/x")  # not a line anchor
+    two = [_f("PY_EVAL_EXEC: eval()/exec() runs dynamic code.", "sandbox_source", url="app/a.py#L3"),
+           _f("PY_EVAL_EXEC: eval()/exec() runs dynamic code.", "sandbox_source", url="app/a.py#L9")]
+    assert len(dedupe_findings(two)) == 2
+
+
 def test_single_findings_are_unchanged():
     f = _f("Open redirect", "dast_native", cwe="CWE-601")
     assert dedupe_findings([f]) == [f]

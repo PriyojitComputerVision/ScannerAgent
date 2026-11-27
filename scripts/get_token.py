@@ -7,8 +7,9 @@ What it does, in order:
 2. Reuses the token saved in keys/token.json while it has more than
    JWT_AUTO_REFRESH_BEFORE_MINUTES (default 10) left; otherwise mints a fresh
    access token (valid JWT_ACCESS_TTL_MINUTES, default 60) + refresh token.
-3. Prints the token, its expiry and roles, and ready-to-paste values for
-   Postman / curl, and saves the pair to keys/token.json (gitignored).
+3. Saves the pair to keys/token.json (gitignored) and prints its expiry, roles and
+   how to use it (Postman header, a shell line that reads the file). The token
+   itself is not printed, so it stays out of terminal scrollback and CI logs.
 
 Tokens are signed locally with the private key, so the server does not need to
 be running. Subject and roles come from .env: AUTH_CLIENT_ID and
@@ -61,20 +62,19 @@ def main() -> int:
     expires = dt.datetime.fromtimestamp(claims["exp"]).astimezone()
     minutes_left = int(api_auth.seconds_left(claims) // 60)
     port = settings.ws_port
-    token = pair["access_token"]
 
     print(f"\n{status} for '{claims['sub']}' with roles: {', '.join(claims['roles'])}")
     print(f"Expires: {expires:%Y-%m-%d %H:%M:%S %Z} ({minutes_left} min left; "
           f"the server renews it automatically while you use it)\n")
-    print("ACCESS TOKEN:")
-    print(token)
+    print(f"Token pair saved to {TOKEN_FILE} (gitignored). It is not printed, so it stays out of")
+    print("terminal scrollback and CI logs; copy access_token from that file.")
     print("\nPostman / HTTP header:")
-    print(f"  Authorization: Bearer {token}")
-    print("\nWebSocket URL (Postman: or send the header above instead of ?access_token=):")
+    print("  Authorization: Bearer <access_token>")
+    print("\nShell (bash):")
+    print('  T=$(uv run python -c "import json; print(json.load(open(\'keys/token.json\'))[\'access_token\'])")')
+    print("\nWebSocket URL (send the header above, or put access_token in the first JSON message):")
     print(f"  ws://127.0.0.1:{port}/ws?session_id=postman-demo-1")
-    print("\nReports in a browser:")
-    print(f"  http://127.0.0.1:{port}/reports/?access_token={token}")
-    print(f"\nRefresh token and expiry saved to {TOKEN_FILE}")
+    print("\nReports in a browser: open them from the console (no token in the URL).")
     return 0
 
 

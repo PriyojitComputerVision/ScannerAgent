@@ -638,3 +638,41 @@ def test_code_sast_reports_the_pep8_coding_standard_in_the_one_report():
     md = _render_markdown(report)
     assert "### Coding standard (PEP 8)" in md and "| STYLE_BARE_EXCEPT | PEP 8 E722 | 1 |" in md
     assert "Coding standard (PEP 8)" in render_report_html(report)
+
+
+def test_report_lists_every_file_and_line_without_internal_folders(monkeypatch, tmp_path):
+    """Code findings and the per-rule 'Where' lists show project paths + line numbers only."""
+    from docx import Document
+
+    from pentest_agent.schemas import FinalReport
+    from pentest_agent.tools.report_tool import (
+        _render_markdown,
+        render_report_docx,
+        render_report_html,
+    )
+
+    _fake_git(monkeypatch, {"app/views.py": VULN_PY, "app/more.py": VULN_PY})
+    app, cfg = _mini_graph(), {"configurable": {"thread_id": "cs-where"}}
+    app.invoke(_state("cs-where", ask_for_code=True), cfg)
+    done = app.invoke(Command(resume={"action": "git", "git_url": "https://github.com/acme/shop.git"}), cfg)
+    code = [f for f in done["findings"] if f["source"] == "code_upload"]
+    assert code and all(f["affected_url"].startswith("app/") for f in code)
+    recs = done["code_report"]["recommendations"]
+    assert recs and all(loc["file"].startswith("app/") for r in recs for loc in r["locations"])
+    assert any(len({loc["file"] for loc in r["locations"]}) == 2 for r in recs)  # both files listed
+
+    import datetime as dt
+
+    now = dt.datetime.now(dt.UTC)
+    report = FinalReport(session_id="cs-where", target_url="http://app.test/", profile="standard",
+                         jwt_provided=False, auth_tested=False, pages_crawled=0, started_at=now, finished_at=now,
+                         findings=done["findings"], executive_summary="x", code_upload=done["code_report"])
+    md = _render_markdown(report)
+    assert "### Where each issue is (file and line)" in md and "- `app/views.py`: line" in md
+    assert "**File and line:** app/views.py#L" in md
+    html = render_report_html(report)
+    assert "<code>app/views.py</code>: line" in html and "File and line: <code>app/" in html
+    docx_text = "\n".join(p.text for p in Document(str(render_report_docx(report, tmp_path / "r.docx"))).paragraphs)
+    assert "app/views.py: line" in docx_text and "Where (" in docx_text
+    for text in (md, html, docx_text):
+        assert "source/app/" not in text and "upload/app/" not in text

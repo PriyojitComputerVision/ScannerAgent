@@ -70,6 +70,57 @@ def _val(x, key):
     return getattr(v, "value", v)
 
 
+# --------------------------------------------------------------------------- code locations
+_LOC_LINE = re.compile(r"#L(\d+)$")
+MAX_LISTED_LOCATION_FILES = 60
+
+
+def location_groups(rec: dict) -> list[tuple[str, list[int]]]:
+    """A recommendation's locations grouped per file: [(file, [line, ...])], file order kept.
+    Falls back to the single ``example`` for recommendations built before ``locations`` existed."""
+    locs = rec.get("locations")
+    if locs is None and rec.get("example"):
+        text = str(rec["example"])
+        m = _LOC_LINE.search(text)
+        locs = [{"file": text[:m.start()] if m else text, "line": int(m.group(1)) if m else None}]
+    groups: dict[str, list[int]] = {}
+    for loc in locs or []:
+        lines = groups.setdefault(str(loc.get("file") or "?"), [])
+        if isinstance(loc.get("line"), int) and loc["line"] not in lines:
+            lines.append(loc["line"])
+    return [(f, sorted(lines)) for f, lines in groups.items()]
+
+
+def where_heading(rec: dict) -> str:
+    """'Where (12 in 5 files)' for a recommendation."""
+    groups = location_groups(rec)
+    total = rec.get("locations_total") or sum(max(1, len(lines)) for _, lines in groups)
+    return f"Where ({total} location{'s' if total != 1 else ''} in {len(groups)} file{'s' if len(groups) != 1 else ''})"
+
+
+def location_lines(rec: dict, max_files: int = MAX_LISTED_LOCATION_FILES) -> list[tuple[str, str]]:
+    """[(file, 'line 12' / 'lines 12, 40')] for display, plus a final ('', '+N more ...') row when cut."""
+    groups = location_groups(rec)
+    rows = [(f, ("line " if len(lines) == 1 else "lines ") + ", ".join(map(str, lines)) if lines else "")
+            for f, lines in groups[:max_files]]
+    listed = sum(max(1, len(lines)) for _, lines in groups[:max_files])
+    more = (rec.get("locations_total") or listed) - listed
+    if more > 0:
+        rows.append(("", f"+{more} more location(s): full list in report.json (code_upload.recommendations)"))
+    return rows
+
+
+def distinct_steps(rem: dict, summary: str | None = None) -> list[str]:
+    """Remediation steps without the one that only repeats the summary (rules without a full
+    playbook carry their one-line advice as both summary and step 1)."""
+    said = " ".join(str(summary if summary is not None else rem.get("summary") or "").split())
+    return [str(s) for s in rem.get("steps") or [] if " ".join(str(s).split()) != said]
+
+
+def location_markdown(rec: dict) -> list[str]:
+    return [f"- `{f}`: {lines}" if f else f"- {lines}" for f, lines in location_lines(rec)]
+
+
 def render_html(*, title: str, meta: list[tuple[str, str]], summary: str | None, findings: list,
                 sources: dict[str, dict], red_flags: list[str], blocked: list[str],
                 downloads: list[tuple[str, str]] | None = None, download_base: str | None = None,
@@ -95,8 +146,11 @@ def render_html(*, title: str, meta: list[tuple[str, str]], summary: str | None,
         b += ["<h2>Recommendations</h2>",
               "<table><tr><th>Severity</th><th>Issue</th><th>Count</th><th>What to do</th></tr>"]
         b += [f'<tr><td><span class="sev {_e(r.get("severity"))}">{_e(r.get("severity"))}</span></td>'
-              f'<td>{_e(r.get("rule"))}<div class="small">{_e(r.get("cwe") or "")} · e.g. {_e(r.get("example") or "")}'
-              f'</div></td><td>{_e(r.get("count"))}</td><td>{_e(r.get("recommendation"))}</td></tr>'
+              f'<td>{_e(r.get("rule"))}<div class="small">{_e(r.get("cwe") or "")}</div>'
+              f'<div class="small"><b>{_e(where_heading(r))}:</b></div><ul class="small">'
+              + "".join(f"<li><code>{_e(f)}</code>{': ' if f and lines else ''}{_e(lines)}</li>"
+                        for f, lines in location_lines(r))
+              + f'</ul></td><td>{_e(r.get("count"))}</td><td>{_e(r.get("recommendation"))}</td></tr>'
               for r in recommendations]
         b.append("</table>")
         b += _remediation_html(recommendations)
@@ -122,7 +176,9 @@ def render_html(*, title: str, meta: list[tuple[str, str]], summary: str | None,
               f'<h3><span class="sev {_e(sev)}">{_e(sev)}</span> {_e(_val(f, "title"))}{ref}</h3>',
               (f'<div class="small">Category: {_e(_val(f, "category"))} · CWE: {cwe_html} · '
               f'Confidence: {_e(_val(f, "confidence"))} · Source: {_e(_val(f, "source"))}</div>'),
-              f'<div class="small">URL: {_link(_val(f, "affected_url"))}</div>',
+              (f'<div class="small">URL: {_link(_val(f, "affected_url"))}</div>'
+               if str(_val(f, "affected_url") or "").startswith(("http://", "https://"))
+               else f'<div class="small">File and line: <code>{_e(_val(f, "affected_url"))}</code></div>'),
               f"<p>{_e(_val(f, 'description'))}</p>"]
         if _val(f, "evidence"):
             b.append(f"<pre>{_e(_val(f, 'evidence'))}</pre>")
@@ -158,8 +214,9 @@ def _remediation_html(recommendations: list[dict]) -> list[str]:
         b += ['<div class="finding">',
               (f'<h3><span class="sev {_e(r.get("severity"))}">{_e(r.get("severity"))}</span> '
               f'{_e(r.get("rule"))}{group}</h3>'), f"<p>{_e(rem.get('summary'))}</p>"]
-        if rem.get("steps"):
-            b += ["<ol>"] + [f"<li>{_e(step)}</li>" for step in rem["steps"]] + ["</ol>"]
+        steps = distinct_steps(rem)
+        if steps:
+            b += ["<ol>"] + [f"<li>{_e(step)}</li>" for step in steps] + ["</ol>"]
         ex = rem.get("example")
         if ex:
             b += [f'<p class="small">Vulnerable ({_e(ex.get("language"))}):</p><pre>{_e(ex.get("before"))}</pre>',
@@ -179,7 +236,7 @@ def remediation_markdown(recommendations: list[dict]) -> list[str]:
             continue
         group = f" ({rem['group']})" if rem.get("group") else ""
         L += [f"### [{str(r.get('severity', '')).upper()}] {r.get('rule')}{group}", "", str(rem.get("summary") or ""), ""]
-        L += [f"{i}. {step}" for i, step in enumerate(rem.get("steps") or [], 1)] + [""]
+        L += [f"{i}. {step}" for i, step in enumerate(distinct_steps(rem), 1)] + [""]
         ex = rem.get("example")
         if ex:
             lang = {"js": "js", "py": "python", "php": "php"}.get(ex.get("language"), "")
