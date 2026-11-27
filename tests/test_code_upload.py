@@ -169,6 +169,23 @@ async def test_mcp_upload_refusals(mcp_admin, args, message):
         await mcp_mod.mcp.call_tool("upload_code", args)
 
 
+async def test_mcp_upload_idempotency_key(mcp_admin):
+    """A retried upload with the same key returns the same upload_id; once the upload is gone (used by
+    a scan), the same key stores the code again; another content under the key is refused."""
+    zip_b64 = base64.b64encode(_zip()).decode()
+    args = {"filename": "app.zip", "content_base64": zip_b64, "idempotency_key": "upload-key-0001"}
+    first = await _call("upload_code", args)
+    again = await _call("upload_code", args)
+    assert again["upload_id"] == first["upload_id"] and again["idempotent_replay"] is True
+    assert "idempotent_replay" not in first
+    assert len([p for p in code_upload.uploads_root().iterdir() if p.is_dir()]) == 1
+    with pytest.raises(ToolError, match="different upload_code request"):
+        await mcp_mod.mcp.call_tool("upload_code", {**args, "filename": "other.zip"})
+    code_upload.delete_upload(first["upload_id"], rbac.Principal(sub="mcp", roles=["admin"]))
+    fresh = await _call("upload_code", args)
+    assert fresh["upload_id"] != first["upload_id"] and "idempotent_replay" not in fresh
+
+
 async def test_mcp_upload_size_cap(mcp_admin, monkeypatch):
     monkeypatch.setattr(settings, "mcp_max_upload_mb", 1)
     with pytest.raises(ToolError, match="POST /api/uploads"):

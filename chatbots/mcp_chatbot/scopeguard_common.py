@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -29,6 +30,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 from collections.abc import Callable
@@ -36,6 +38,7 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import guardrails
 
@@ -46,6 +49,18 @@ REPO = Path(os.environ.get("SCOPEGUARD_HOME") or HERE.parents[1]).resolve()
 
 # Tools that start or stop real network activity: a human approves every call.
 APPROVAL_TOOLS = ("start_scan", "start_demo_scan", "cancel_scan")
+# Tools that create something on the scanner: every call carries an MCP idempotency_key, so a
+# retried request returns the first scan/upload instead of a second one. Read tools (get_scan,
+# list_reports, get_report, scan_policy, list_scans) are read-only and need none; cancel_scan is
+# idempotent by itself.
+IDEMPOTENT_TOOLS = ("start_scan", "start_demo_scan")
+
+
+def idempotency_key(kind: str, *parts: str) -> str:
+    """A stable key for one operation: the same parts give the same key (a retry), new parts a new
+    one. Only a digest is sent, never the parts themselves."""
+    digest = hashlib.sha256("\x00".join(parts).encode("utf-8", "replace")).hexdigest()[:40]
+    return f"chat-{kind}-{digest}"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024   # the scanner's MCP_MAX_UPLOAD_MB default
 UPLOAD_ID_RE = re.compile(r"^[a-f0-9]{32}$")
 LANGUAGE_NOTICE = "Python only for now: other languages are only partly covered."
@@ -334,6 +349,12 @@ def tool_guard_middleware():
             return ToolMessage(content=f"Refused by the guardrail: {problem}. Tell the user; do not retry with "
                                        "different values unless they ask.",
                                tool_call_id=call["id"], name=call["name"], status="error")
+        if call["name"] in IDEMPOTENT_TOOLS:
+            # One key per approved tool call (its id is stable for that call), set here and never by the
+            # model: a retried request returns the scan this call started, never a second one.
+            call = {**call, "args": {**(call.get("args") or {}),
+                                     "idempotency_key": idempotency_key("call", str(call.get("id") or ""))}}
+            request = request.override(tool_call=call)
         try:
             result = await handler(request)
         except Exception as exc:  # noqa: BLE001 - reported to the model as the tool result
@@ -448,6 +469,59 @@ def scope_label(r: dict) -> str:
                             "website only")
 
 
+REPORT_FILES = {  # file -> (content type, shown inline)
+    "report.html": ("text/html; charset=utf-8", True),
+    "report.md": ("text/markdown; charset=utf-8", False),
+    "report.json": ("application/json", False),
+    "report.docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", False),
+}
+REPORT_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")  # the scanner's SESSION_ID_RE
+_REPORT_PATH_RE = re.compile(r"/reports/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/(report\.(?:html|md|json|docx))")
+_REPORT_LABELS = {"html": "Open HTML report", "md": "Markdown", "json": "JSON", "docx": "Word (DOCX)"}
+# A scanned page's report viewer forbids scripts, frames and remote loads (same as the scanner's).
+REPORT_CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"
+
+
+def report_path(url: str) -> tuple[str, str] | None:
+    """(session id, file name) of a scanner report URL, or None for anything else."""
+    path = urlsplit(str(url or "")).path
+    m = _REPORT_PATH_RE.fullmatch(path)
+    if not m or ".." in m.group(1):
+        return None
+    return m.group(1), m.group(2)
+
+
+def report_link_line(fmt: str, url: str) -> str:
+    """One Markdown list line with a link the chat UI opens through its own origin
+    (``/reports/<id>/<file>``); other URLs stay plain code text."""
+    label = _REPORT_LABELS.get(str(fmt).lower(), str(fmt).upper())
+    if report_path(url):
+        return f"- [{label}]({url})"
+    return f"- {str(fmt).upper()}: `{url}`"
+
+
+def fetch_report(base: str, minter: TokenMinter, session_id: str, filename: str,
+                 max_bytes: int = 20 * 1024 * 1024) -> tuple[int, bytes, str]:
+    """GET one report file from the scanner with this chatbot's token. Returns (status, body,
+    content type); the scanner itself checks that the report belongs to this token's subject."""
+    if not REPORT_ID_RE.fullmatch(session_id) or ".." in session_id or filename not in REPORT_FILES:
+        return 404, b"", "text/plain"
+    from urllib.parse import quote
+
+    url = f"{base.rstrip('/')}/reports/{quote(session_id, safe='')}/{filename}"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {minter.token()}"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read(max_bytes + 1)
+    except urllib.error.HTTPError as exc:
+        return (404 if exc.code in (403, 404) else 502), b"", "text/plain"
+    except OSError:
+        return 502, b"", "text/plain"
+    if len(body) > max_bytes:
+        return 502, b"", "text/plain"
+    return 200, body, REPORT_FILES[filename][0]
+
+
 def scan_result_markdown(r: dict) -> str:
     """The verified result block shown to the user exactly as the scanner returned it
     (not written by the model): counts, every finding under its own severity, red flags,
@@ -478,7 +552,7 @@ def scan_result_markdown(r: dict) -> str:
         out += ["", "#### Red flags"] + [f"- {flag}" for flag in r["red_flags"]]
     files = r.get("report_files") or {}
     if files:
-        out += ["", "#### Report files"] + [f"- {k.upper()}: `{v}`" for k, v in files.items()]
+        out += ["", "#### Report files"] + [report_link_line(k, v) for k, v in files.items()]
     a = r.get("audit")
     if isinstance(a, dict):
         out += ["", f"**Audit record:** seq {a.get('seq')}, outcome {a.get('outcome')}, hash `{str(a.get('hash'))[:16]}...`"]
@@ -746,6 +820,9 @@ class Engine:
         # optional async (filename, base64) -> dict: MCP upload_code, called by the UI directly (the
         # archive never passes through the model)
         self.upload = None
+        # optional (session_id, filename) -> (status, bytes, content type): a report file from the
+        # scanner with this chatbot's token, for the UI's report links (never through the model)
+        self.report = None
         # What the output guardrail checks answers against (no prompt leakage).
         self.prompts = [load_prompt(), load_prompt("summary_prompt")]
 
@@ -1015,6 +1092,8 @@ class ApiServer:
                     self._reply(200, {"allowed_targets": data.get("allowed_targets") or [],
                                       "allowed_targets_setting": data.get("allowed_targets_setting"),
                                       "profiles": profiles})
+                elif u.path == "/api/report":
+                    self._report((q.get("id") or [""])[0][:128], (q.get("file") or [""])[0][:20])
                 elif u.path == "/api/events":
                     tid = (q.get("thread_id") or [""])[0][:64]
                     after = int((q.get("after") or ["0"])[0] or 0)
@@ -1025,6 +1104,22 @@ class ApiServer:
                                       "pending": api.engine.pending.get(tid) or []})
                 else:
                     self._reply(404, {"error": "not found"})
+
+            def _report(self, session_id: str, filename: str) -> None:
+                """A report file, raw (the UI launcher serves it at /reports/<id>/<file>)."""
+                if api.engine.report is None:
+                    self._reply(404, {"error": "reports are not available"})
+                    return
+                status, body, ctype = api.engine.report(session_id, filename)
+                if status != 200:
+                    self._reply(status, {"error": "report not found" if status == 404 else "scanner unavailable"})
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(body)
 
             def _upload(self) -> None:
                 """Raw .zip -> MCP upload_code (checks again on the server: name, MIME, signature)."""
@@ -1052,9 +1147,12 @@ class ApiServer:
                     self._reply(404, {"error": "the scanner does not offer upload_code (admin role needed, or "
                                                "the tool is switched off)"})
                     return
+                # Same chat + same file = same key: a re-sent or double-clicked upload reuses the stored
+                # one (while no scan has used it yet) instead of storing it twice.
+                key = idempotency_key("upload", tid, name, hashlib.sha256(data).hexdigest())
                 try:
                     meta = asyncio.run_coroutine_threadsafe(
-                        api.engine.upload(name, base64.b64encode(data).decode()), api.loop).result(120)
+                        api.engine.upload(name, base64.b64encode(data).decode(), key), api.loop).result(120)
                 except Exception as exc:  # noqa: BLE001 - reported to the UI
                     reason = upload_error_text(exc, length)
                     log.warning("Upload of %s failed: %s", name, reason)

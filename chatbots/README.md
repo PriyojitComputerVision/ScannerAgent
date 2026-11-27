@@ -16,6 +16,11 @@ shows the scanner's verified result and explains it.
 - **Verified results:** the result block (counts, every finding under its own severity,
   red flags, report files, audit record) comes straight from the scanner. The model only
   writes the analysis around it, so it cannot misfile a severity or invent a file path.
+- **Report links:** the report files in that block are buttons. HTML opens in a new tab,
+  md/json/docx download. They go to `/reports/<id>/<file>` on the UI's own origin; the
+  backend fetches the file from the scanner with the chatbot's JWT in the `Authorization`
+  header, so the page never holds a token. Only report paths become links; the scanner
+  still checks that the report is this chatbot's (owner = its token subject).
 - **Allowed targets:** any number of hosts. Add or remove them in the UI. Each change
   restarts only the scanner, so the conversation keeps going.
 - **Guardrails:** messages are checked before they reach the model, tool arguments before

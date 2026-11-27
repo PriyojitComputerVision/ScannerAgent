@@ -70,15 +70,48 @@ async function api(method, name, body, query) {
 }
 
 // ---------------------------------------------------------------- tiny safe Markdown
+// Only scan report files are links: /reports/<session id>/report.<ext>, opened through this
+// page's own origin (serve_ui.py fetches them with the chatbot's token). Any other URL stays text.
+const REPORT_PATH = /^\/reports\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/(report\.(?:html|md|json|docx))$/;
+
+function reportHref(url) {
+  let path;
+  try { path = new URL(url, window.location.origin).pathname; } catch (e) { return null; }
+  const m = REPORT_PATH.exec(path);
+  if (!m || m[1].includes('..')) return null;
+  return '/reports/' + encodeURIComponent(m[1]) + '/' + m[2];
+}
+
+function reportLink(label, href) {
+  const a = el('a', 'report-link', label);
+  a.href = href;
+  a.rel = 'noopener noreferrer';
+  if (href.endsWith('.html')) {
+    a.target = '_blank';
+  } else {
+    a.setAttribute('download', '');
+  }
+  return a;
+}
+
 function inline(parent, text) {
-  // **bold** and `code`; everything else is plain text
-  const re = /(\*\*[^*]+\*\*|`[^`]+`)/g;
+  // **bold**, `code` and [label](report link); everything else is plain text
+  const re = /(\*\*[^*]+\*\*|`[^`]+`|\[[^\]\n]{1,120}\]\([^)\s]{1,600}\))/g;
   let last = 0;
   let m;
   while ((m = re.exec(text)) !== null) {
     if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
     const tok = m[0];
-    parent.appendChild(tok.startsWith('**') ? el('strong', null, tok.slice(2, -2)) : el('code', null, tok.slice(1, -1)));
+    if (tok.startsWith('**')) {
+      parent.appendChild(el('strong', null, tok.slice(2, -2)));
+    } else if (tok.startsWith('`')) {
+      parent.appendChild(el('code', null, tok.slice(1, -1)));
+    } else {
+      const split = tok.indexOf('](');
+      const label = tok.slice(1, split);
+      const href = reportHref(tok.slice(split + 2, -1));
+      parent.appendChild(href ? reportLink(label, href) : document.createTextNode(tok));
+    }
     last = m.index + tok.length;
   }
   if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));

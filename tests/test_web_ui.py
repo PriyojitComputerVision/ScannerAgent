@@ -29,6 +29,7 @@ def auth_on(tmp_path, monkeypatch):
     report = tmp_path / "reports" / "r1"
     report.mkdir(parents=True)
     (report / "report.html").write_text("<p>report</p>", encoding="utf-8")
+    (report / "owner.json").write_text('{"v": 1, "sub": "alice"}', encoding="utf-8")  # bearer()'s subject
     (report / "report.json").write_text(json.dumps({
         "target_url": "http://127.0.0.1:9/", "profile": "standard", "pages_crawled": 3,
         "findings": [{"severity": "high"}, {"severity": "low"}, {"severity": "low"}, {"severity": "bogus"}],
@@ -37,8 +38,8 @@ def auth_on(tmp_path, monkeypatch):
     web_ui.disarm_demo_login()
 
 
-def bearer(roles=("scanner",)) -> dict:
-    return {"Authorization": f"Bearer {api_auth.issue_tokens('alice', list(roles)).access_token}"}
+def bearer(roles=("scanner",), sub="alice") -> dict:
+    return {"Authorization": f"Bearer {api_auth.issue_tokens(sub, list(roles)).access_token}"}
 
 
 # ----------------------------------------------------------------- static files
@@ -134,6 +135,8 @@ def test_api_reports_lists_report_summaries(auth_on):
     assert item["name"] == "r1" and item["files"] == ["report.html", "report.json"]
     assert item["severity_counts"] == {"critical": 0, "high": 1, "medium": 0, "low": 2, "info": 0}
     assert item["target_url"] == "http://127.0.0.1:9/" and item["pages_crawled"] == 3
+    # another user's reports are not listed
+    assert TestClient(app).get("/api/reports", headers=bearer(("scanner",), sub="bob")).json()["reports"] == []
 
 
 def test_api_info_reports_caller_permissions(auth_on):

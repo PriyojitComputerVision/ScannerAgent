@@ -19,6 +19,11 @@ dev = ["pytest>=8", "pytest-asyncio>=0.24"]
 [tool.uv]
 package = false
 
+# Its own ruff root, so `ruff check` from the repo root also sees scopeguard_common, guardrails and
+# chatbot as this folder's first-party modules (same import order as a run inside this folder).
+[tool.ruff]
+src = ["."]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

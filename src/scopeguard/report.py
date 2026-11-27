@@ -324,11 +324,12 @@ def write_reports(out_dir: str, target: str, result: dict, mode: str) -> dict:
     return {k: str(v) for k, v in paths.items()}
 
 
-def render_index(reports_dir: str | Path) -> str:
-    """HTML list of every report folder under `reports_dir` (newest first)."""
+def render_index(reports_dir: str | Path, include=None) -> str:
+    """HTML list of the report folders under `reports_dir` (newest first). `include`
+    (folder Path -> bool) limits it to the folders the viewer may read."""
     root = Path(reports_dir)
     rows = []
-    dirs = [p for p in root.iterdir() if p.is_dir()] if root.is_dir() else []
+    dirs = [p for p in root.iterdir() if p.is_dir() and (include is None or include(p))] if root.is_dir() else []
     for p in sorted(dirs, key=lambda x: x.stat().st_mtime, reverse=True):
         files = [n for n in ("report.html", "report.md", "report.json", "report.docx") if (p / n).exists()]
         if not files:

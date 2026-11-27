@@ -17,6 +17,16 @@ Setup is automatic:
   allowlist the host, the script automatically starts a private agent on a free
   port for this run instead (like stdio MCP); --own-server always does that.
 
+Note on source code: A2A does not take files or .zip archives (no upload action, no file
+parts). If the code should be analysed too, give its git link: --git-url (a public
+repository's .git clone link on the server's GIT_ALLOWED_HOSTS, e.g.
+https://github.com/owner/repo.git, optional --git-ref branch/tag). It goes into the scan
+request as "git_url" and is analysed in the scan's code_sast step (admin role, so the
+script then mints an admin token). With --target it is website + code; without --target
+only the code is analysed (scan_scope "code", no request to any website). A zip or loose
+files go through MCP upload_code or POST /api/uploads instead; their upload_id can then be
+passed as "upload_id". Idempotency keys are an MCP feature; A2A requests take none.
+
 Examples (from the repo root):
 
     uv run python scripts/a2a_client.py                              # demo app, quick, streamed
@@ -25,6 +35,9 @@ Examples (from the repo root):
     uv run python scripts/a2a_client.py --target http://localhost:3000 --i-am-authorized
     uv run python scripts/a2a_client.py --target http://localhost:3000 --i-am-authorized --credentials local
     uv run python scripts/a2a_client.py --no-llm --show-refusal
+    # website + its code, then the code alone:
+    uv run python scripts/a2a_client.py --target http://localhost:3000 --i-am-authorized --git-url https://github.com/owner/repo.git --git-ref main
+    uv run python scripts/a2a_client.py --git-url https://github.com/owner/repo.git --i-am-authorized  # code only
 """
 from __future__ import annotations
 
@@ -80,7 +93,8 @@ async def run(a: argparse.Namespace) -> int:
         env["A2A_ALLOWED_TARGETS"] = urlparse(a.target).netloc
     if a.no_llm:
         env["GROQ_API_KEY"] = ""
-    roles = ["admin"] if (a.sign_in or a.credentials) else ["scanner"]
+    # Signing in and source code (git link) need the admin role (scan:authenticated / scan:source).
+    roles = ["admin"] if (a.sign_in or a.credentials or a.git_url) else ["scanner"]
     token = mint_token("a2a-test-client", roles)
     await ev.emit("auth", "Automatic sign-in: API JWT minted with this machine's key",
                   {"subject": "a2a-test-client", "roles": roles, "token": token[:16] + "… (not shown)"})
@@ -139,11 +153,18 @@ async def session(a: argparse.Namespace, ev: Events, token: str, base: str, star
             await ev.emit("guardrail", "A host that is NOT allowlisted (expected: task rejected)",
                           short(_last_status_text(events), 400))
 
-        if a.target:
-            req = {"action": "scan", "target_url": a.target, "authorization_confirmed": True,
-                   "profile": a.profile, "max_findings": a.findings}
+        if a.target or a.git_url:
+            req = {"action": "scan", "authorization_confirmed": True, "profile": a.profile,
+                   "max_findings": a.findings}
+            if a.target:
+                req["target_url"] = a.target
             if a.credentials:
                 req["credentials"] = a.credentials  # only the profile name travels
+            if a.git_url:  # A2A takes code only as a git link (no files / zip): see the module note
+                req["git_url"] = a.git_url
+                req["scan_scope"] = "website_and_code" if a.target else "code"
+                if a.git_ref:
+                    req["git_ref"] = a.git_ref
         else:
             req = {"action": "demo_scan", "profile": a.profile, "sign_in": a.sign_in,
                    "max_findings": a.findings}
@@ -213,6 +234,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="required with --target: you own the target or may test it")
     ap.add_argument("--sign-in", action="store_true", help="demo app: sign in with its public fake account")
     ap.add_argument("--credentials", metavar="PROFILE", help="with --target: credential profile name")
+    ap.add_argument("--git-url", metavar="URL",
+                    help="also analyse this repository's code (public .git clone link on GIT_ALLOWED_HOSTS); "
+                         "A2A takes no files or zips. Without --target: code only")
+    ap.add_argument("--git-ref", metavar="REF", help="with --git-url: branch or tag (default branch if omitted)")
     ap.add_argument("--profile", default="quick", choices=["quick", "standard"], help="scan profile")
     ap.add_argument("--delay", type=float, default=1.0, help="pause after each event, seconds (default 1)")
     ap.add_argument("--findings", type=int, default=100,
@@ -226,6 +251,12 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--sign-in is for the demo app; use --credentials PROFILE with --target")
     if a.credentials and not a.target:
         ap.error("--credentials needs --target")
+    if a.git_url and not a.i_am_authorized:
+        ap.error("--git-url needs --i-am-authorized: only analyse code you own or may test")
+    if a.git_ref and not a.git_url:
+        ap.error("--git-ref needs --git-url")
+    if a.git_url and a.sign_in:
+        ap.error("--git-url is not for the demo app; use it with --target, or alone for a code-only scan")
     try:
         return anyio.run(run, a)
     except KeyboardInterrupt:

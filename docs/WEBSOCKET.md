@@ -312,7 +312,7 @@ The recon, auth, DAST and probe steps report `<step>_code_only` and pass straigh
 | `1000` | – | Normal close after `complete` | Done. |
 | `4400` | `400` | Bad or missing `session_id`, or the first message is not a JSON object | Fix the request. |
 | `4401` | `401` | Missing / invalid / expired token, or the session cap was reached mid-scan | Sign in again (`/auth/token`), reconnect with the same `session_id` and resume. |
-| `4403` | `403` | Cross-origin browser page, missing permission, `authorization_confirmed` not true, another user's session, refused code | Don't retry unchanged. |
+| `4403` | `403` | Cross-origin browser page, missing permission, an access attribute (ABAC: message ends `[abac.<rule>]`), `authorization_confirmed` not true, another user's session, refused code | Don't retry unchanged. |
 | `4422` | `422` | Request failed validation (`detail` lists the fields, never your values) | Fix the fields. |
 | `4429` | `429` | Per-IP rate limit or queue full (`retry_after`, `queue`) | Wait `retry_after` seconds. |
 | `1011` | – | Server error / the run crashed | Reconnect with the same `session_id` and send `{"resume": true}`. |
@@ -321,9 +321,10 @@ The recon, auth, DAST and probe steps report `<step>_code_only` and pass straigh
 ## 8. Resume, cache, queue, token renewal
 
 - **Resume**: every graph step is checkpointed under `session_id`. After a drop, reconnect with the same
-  id and send `{"resume": true}`. Only the session's owner (or a role with `sessions:any`) may resume.
+  id and send `{"resume": true}`. Only the session's owner (or a role with `sessions:any`) may resume, or start a new scan on an
+  existing `session_id` (anyone else: close 4403, "belongs to another user; use a new session id").
 - **Cache**: the same scan request within `CACHE_TTL_SECONDS` returns the earlier result at once
-  (`complete` with `cached: true`). Send `"force_refresh": true` to scan again. Scans with code are never cached.
+  (`complete` with `cached: true`), for the same user only. Send `"force_refresh": true` to scan again. Scans with code are never cached.
 - **Queue**: one scan runs at a time by default (`WS_MAX_ACTIVE`). Later clients get `queued` messages,
   then `status` `queue_admitted`. More than `WS_MAX_QUEUE` waiting = `429`.
 - **Token renewal**: long scans keep running past the token's lifetime: the server pushes

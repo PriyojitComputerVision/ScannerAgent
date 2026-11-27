@@ -380,3 +380,89 @@ def test_refusals_show_the_servers_reason():
     assert sc.refusal_text(text) == "role(s) scanner lack permission 'scan:source'."
     assert sc.refusal_text({"error": "not a zip"}) == "not a zip"
     assert sc.refusal_text({}) == "no reason given"
+
+
+# --------------------------------------------------------------------------- report links
+def test_report_files_become_links_only_for_scanner_report_paths():
+    url = "http://127.0.0.1:9123/reports/sess-1/report.html"
+    assert sc.report_path(url) == ("sess-1", "report.html")
+    assert sc.report_link_line("html", url) == f"- [Open HTML report]({url})"
+    assert sc.report_link_line("docx", url.replace(".html", ".docx")).startswith("- [Word (DOCX)](")
+    for bad in ("http://x/reports/../etc/report.html", "http://x/reports/a/secrets.txt",
+                "javascript:alert(1)", "http://x/reports/.hidden/report.md", "C:/r/report.html"):
+        assert sc.report_path(bad) is None
+        assert sc.report_link_line("html", bad).startswith("- HTML: `")
+    block = sc.scan_result_markdown({"report_files": {"html": url}})
+    assert f"[Open HTML report]({url})" in block
+
+
+def test_fetch_report_sends_the_token_in_the_header_and_refuses_bad_names(monkeypatch):
+    seen = {}
+
+    class FakeResp:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self, n=-1):
+            return self.body
+
+    def fake_urlopen(req, timeout=0):
+        seen["url"], seen["auth"] = req.full_url, req.get_header("Authorization")
+        return FakeResp(b"<html>ok</html>")
+
+    class Minter:
+        def token(self):
+            return "tok-123"
+
+    monkeypatch.setattr(sc.urllib.request, "urlopen", fake_urlopen)
+    status, body, ctype = sc.fetch_report("http://127.0.0.1:9123/", Minter(), "sess-1", "report.html")
+    assert (status, body, ctype.split(";")[0]) == (200, b"<html>ok</html>", "text/html")
+    assert seen == {"url": "http://127.0.0.1:9123/reports/sess-1/report.html", "auth": "Bearer tok-123"}
+    seen.clear()
+    for sid, name in (("../x", "report.html"), ("a..b", "report.md"), ("sess-1", "owner.json")):
+        assert sc.fetch_report("http://s", Minter(), sid, name)[0] == 404
+    assert seen == {}  # refused before any request
+
+
+def test_fetch_report_maps_scanner_refusals_to_not_found(monkeypatch):
+    import urllib.error
+
+    def refuse(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 403, "forbidden", {}, None)
+
+    class Minter:
+        def token(self):
+            return "t"
+
+    monkeypatch.setattr(sc.urllib.request, "urlopen", refuse)
+    assert sc.fetch_report("http://s", Minter(), "sess-1", "report.json")[0] == 404
+
+
+async def test_approved_scan_carries_an_idempotency_key_set_by_the_chatbot():
+    """Every start_scan / start_demo_scan call gets a key derived from its tool-call id (stable for
+    that call, new for the next one); a key the model wrote itself is replaced."""
+    seen: list[dict] = []
+
+    @tool("start_scan")
+    async def keyed_scan(target_url: str, authorization_confirmed: bool = False,
+                         idempotency_key: str | None = None) -> str:
+        """Start a scan."""
+        seen.append({"target_url": target_url, "idempotency_key": idempotency_key})
+        return '{"scan_id": "mcp-123", "status": "running"}'
+
+    call = AIMessage(content="", tool_calls=[{"name": "start_scan", "id": "c1", "args": {
+        "target_url": "https://app.example.test/", "idempotency_key": "model-chose-this"}}])
+    eng = sc.Engine(sc.build_agent([keyed_scan], model=ScriptedModel(messages=iter([call, AIMessage(content="ok")]))))
+    await eng.send("t1", "scan https://app.example.test/", lambda e: None)
+    await eng.decide("t1", [{"type": "approve"}], lambda e: None)
+    assert seen == [{"target_url": "https://app.example.test/", "idempotency_key": sc.idempotency_key("call", "c1")}]
+    key = seen[0]["idempotency_key"]
+    assert key.startswith("chat-call-") and 8 <= len(key) <= 128 and "c1" not in key
+    assert sc.idempotency_key("call", "c2") != key
+    assert sc.IDEMPOTENT_TOOLS == ("start_scan", "start_demo_scan")

@@ -34,6 +34,7 @@ os.environ["AUTH_ENABLED"] = "false"
 os.environ.setdefault("JWT_PRIVATE_KEY_PATH", str(_TMP_ROOT / "keys" / "jwt_private.pem"))
 os.environ.setdefault("JWT_PUBLIC_KEY_PATH", str(_TMP_ROOT / "keys" / "jwt_public.pem"))
 os.environ.setdefault("AUTH_CLIENTS_FILE", str(_TMP_ROOT / "keys" / "clients.json"))
+os.environ["ABAC_SUBJECTS_FILE"] = str(_TMP_ROOT / "keys" / "abac_subjects.json")  # never the real one
 os.environ["AUTH_CLIENT_SECRET"] = ""
 os.environ["CODE_UPLOAD_DIR"] = str(_TMP_ROOT / "uploads")
 # Code checks and uploads use the process sandbox in tests; never a real cluster.
@@ -119,8 +120,12 @@ def _reset_backend_rate_limits():
 @pytest.fixture(autouse=True)
 def _clear_ttl_caches():
     """No cached LLM answer, probe result or scan leaks between tests."""
-    from pentest_agent import ttl_cache
+    from pentest_agent import abac, report_access, ttl_cache
 
     ttl_cache.clear_all()
+    report_access.clear_cache()
+    abac.clear_cache()
     yield
     ttl_cache.clear_all()
+    report_access.clear_cache()
+    abac.clear_cache()

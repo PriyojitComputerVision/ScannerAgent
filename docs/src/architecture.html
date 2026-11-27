@@ -78,8 +78,8 @@
   <div class="panel">
     <p class="label">FastAPI server · websocket_server.py</p>
     <div class="row server">
-      <div class="box"><span class="t mono">/auth/token · /refresh</span><span>RS256 JWT, single-use refresh, roles per client (RBAC)</span></div>
-      <div class="box"><span class="t mono">/ws?session_id=…</span><span>verify JWT · same-origin only · strict input · RBAC · cache · sign-in pauses</span></div>
+      <div class="box"><span class="t mono">/auth/token · /refresh</span><span>RS256 JWT, single-use refresh, roles per client (RBAC) + per-subject attributes (ABAC)</span></div>
+      <div class="box"><span class="t mono">/ws?session_id=…</span><span>verify JWT · same-origin only · strict input · RBAC + ABAC · per-user cache · sign-in pauses</span></div>
       <div class="box"><span class="t mono">/ · /ui/* · /api/*</span><span>whitelisted console files; /api/info, /api/reports, /api/audit?trail=scans|code (audit:read)</span></div>
       <div class="box"><span class="t mono">/api/uploads</span><span>store source code for a scan's code SAST step: .zip (name, MIME, signature) or code files (/api/uploads/files); Python only for now · analysed only in a scan's code_sast step (with the website, or code only) · pre-guardrails · Kubernetes Job (Python sandbox fallback, egress blocked) · post-guardrails · remediation</span></div>
       <div class="box"><span class="t mono">/reports/…</span><span>no-script CSP viewer; HttpOnly cookie, never a token in the URL</span></div>
@@ -93,7 +93,7 @@
       <p class="label">LangGraph pipeline · graph.py · graph.astream(), thread = session_id</p>
       <div class="pipe">
         <div class="node"><span class="t">validate</span><span>refuses → audit</span></div>
-        <div class="mod"><b>guardrails.py · rbac.py · netpolicy.py</b><span>authorization; scope = host + www + allowed; metadata / link-local / reserved IPs refused</span></div>
+        <div class="mod"><b>guardrails.py · rbac.py · abac.py · report_access.py · netpolicy.py</b><span>authorization; per-user targets / profiles / scopes; own reports only; scope = host + www + allowed; metadata / link-local / reserved IPs refused</span></div>
         <div class="tags"><i class="tag disk">no network</i></div>
 
         <div class="node hitl"><span class="t">choose_scope</span><span>interrupt() · human in the loop</span></div>

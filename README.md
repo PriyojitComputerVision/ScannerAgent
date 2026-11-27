@@ -157,6 +157,14 @@ guardrails as the console:
 - **Profiles.** Only the four pentest profiles (`quick`, `standard`, `aggressive`, `auth_deep`);
   anything else is refused.
 - **Audit log.** Every attempt is recorded, including refused, cancelled and crashed ones.
+- **Idempotency keys (MCP).** `start_scan`, `start_demo_scan` and `upload_code` take an optional
+  `idempotency_key` (e.g. a UUID, one per intended scan/upload). A retry with the same key and
+  arguments returns the first `scan_id`/`upload_id` (`idempotent_replay: true`) instead of a
+  second scan; the same key with other arguments (target, profile, `git_url`/`git_ref`, zip, ...)
+  is refused. Per caller, in memory for `IDEMPOTENCY_TTL_MINUTES` (24 h). Read tools need none.
+  The chatbot UI sends one per approved scan and per attached zip. A2A takes no key.
+- **Source code over A2A.** Only as a git link (`"git_url"`, optional `"git_ref"`); A2A takes no
+  files or zips. Zips/files go through MCP `upload_code` or `POST /api/uploads` (`upload_id`).
 - **Untrusted output.** Text from the target is returned wrapped as untrusted.
 - **Logging.** The server log has one line per MCP tool call (caller, safe arguments,
   outcome, duration) and per WebSocket message, never payloads, arguments in full or tokens.
@@ -190,6 +198,8 @@ uv run python scripts/a2a_client.py --sign-in --profile standard --delay 2   # s
 uv run python scripts/mcp_client.py --target https://your-app.example/ --i-am-authorized --profile standard --delay 2
 uv run python scripts/a2a_client.py --target https://your-app.example/ --i-am-authorized --profile standard
 uv run python scripts/mcp_client.py --target http://localhost:3000 --i-am-authorized --credentials local
+# A2A with the site's code: A2A takes code only as a git link (no files / zip)
+uv run python scripts/a2a_client.py --target http://localhost:3000 --i-am-authorized --git-url https://github.com/owner/repo.git
 ```
 
 The scripts set themselves up:
@@ -378,6 +388,11 @@ before auth and rate limits, and `401`/`429` replies stay readable. `/healthz` s
 
 Downloads are named after the session id (CLI: the report folder), e.g. `money-dynocde-001.docx`,
 `.md`, `.json`; on disk they stay `report.*`.
+Each report belongs to the user who ran the scan (`owner.json` in the report folder, hashed into the
+scan's audit record; older reports take the owner from their first audit record). The viewer index,
+`/api/reports` and MCP/A2A `list_reports`/`get_report` show a user only their own reports; another
+user's report answers 404 like a missing one. `admin` (`reports:any`) sees every report; reports with
+no known owner (e.g. CLI scans) are admin-only. A new scan cannot reuse another user's `session_id`.
 Reports are rendered with every target-controlled value HTML-escaped and served with a strict
 `Content-Security-Policy` (no scripts), so a hostile page cannot inject markup into the viewer.
 
@@ -440,9 +455,9 @@ Python clients (`scripts/scan_client.py` uses it).
 
 | Role | Permissions |
 | --- | --- |
-| `viewer` | read reports |
+| `viewer` | read own reports |
 | `scanner` | viewer + run/resume own scans (`quick`, `standard`) + LLM-planned probes |
-| `admin` | scanner + `aggressive`/`auth_deep`, authenticated target testing (`jwt`/`auth`/`interactive_auth` in the request), any user's sessions, the audit log (`audit:read`) |
+| `admin` | scanner + `aggressive`/`auth_deep`, authenticated target testing (`jwt`/`auth`/`interactive_auth` in the request), any user's sessions and reports (`sessions:any`, `reports:any`), the audit log (`audit:read`) |
 
 The API checks roles first (HTTP 403, WebSocket close 4403). The agent graph
 checks them again per node from the caller stored in its state: the validate
@@ -454,6 +469,56 @@ target credentials without `scan:authenticated`, and the probe node is skipped
 | --- | --- | --- |
 | missing/invalid/expired token | 401 + `WWW-Authenticate` | `{"type":"error","code":401}`, close 4401 |
 | role lacks permission | 403 | `{"type":"error","code":403}`, close 4403 |
+
+### Attributes on top of roles (ABAC)
+
+Roles say what a kind of caller may do. Attributes narrow it per caller: which hosts this
+subject may scan, with which profiles and scopes, through which entry point, with which
+credential profiles, and with whom it shares reports. A scan needs both the role and every
+attribute rule.
+
+Attributes live on the server in `keys/abac_subjects.json` (`ABAC_SUBJECTS_FILE`), keyed by the
+token's `sub`: the client id of `/auth/token`, the `--sub` of `pentest-auth token`, `mcp` for
+stdio MCP, `mcp-chatbot` for the chatbot. Nothing new goes into the JWT, so a change applies on
+the next request without a new token. It is one file for every entry point (console, MCP stdio
+and HTTP, A2A, chatbot, scripts): a relative path is taken from the repo root, not the current
+folder. When it is missing or empty (0 bytes, `{}`, or `{"default": {}, "subjects": {}}`), it is
+filled with defaults as soon as anything starts, because every command loads the settings first:
+
+- `default` lists every value of each attribute (all entry points, all four profiles, all three
+  scopes, no tenant sharing). That allows everything, the same as no limits, and shows what can
+  be narrowed.
+- `subjects` has entries for the token subjects the repo itself uses, each limited to the entry
+  point it scans through: `mcp` (stdio MCP), `mcp-chatbot`, `mcp-test-client`
+  (`scripts/mcp_client.py`) and `demo-console` (the browser console) for their own channel, and
+  `a2a-test-client` (`scripts/a2a_client.py`) for A2A.
+
+A file with any entry of its own is never overwritten. A subject with its own entry uses that entry; everyone else uses `default`.
+An attribute you leave out adds no limit.
+
+```bash
+uv run pentest-auth attrs set team-a-ci --tenant team-a --allowed-targets staging.team-a.dev,localhost:3000     --profiles quick,standard --via mcp,a2a --share-reports-with-tenant
+uv run pentest-auth attrs show      # the whole file
+uv run pentest-auth attrs check     # exit 1 if the file is invalid
+uv run pentest-auth attrs remove team-a-ci
+```
+
+| Rule | Attribute | Refuses when |
+| --- | --- | --- |
+| `abac.via` | `allowed_via` (`ws`, `mcp`, `a2a`) | the scan comes through another entry point |
+| `abac.target` | `allowed_targets` (`host` = any port, `host:port` = that port) | the URL or an extra allowed domain is not listed (the built-in demo target is always allowed; a code-only scan touches no host) |
+| `abac.profile` | `allowed_profiles` | the profile is not listed |
+| `abac.scope` | `allowed_scan_scopes` | the named or default scope is not listed (the scope pause offers only listed scopes) |
+| `abac.credentials` | `allowed_credentials` | the credential profile name is not listed |
+| `abac.config` | | the file exists but is invalid: every scan is refused until it is fixed |
+
+`tenant` + `share_reports_with_tenant`: users of the same tenant read each other's reports
+when both have sharing on. The operator allowlist (`MCP_ALLOWED_TARGETS`,
+`A2A_ALLOWED_TARGETS`) still applies; `allowed_targets` can only narrow it. ABAC refusals look
+like RBAC ones (HTTP 403, WebSocket close 4403, MCP/A2A "Not allowed for '<sub>': ..."). The
+audit record names the rule id. The graph's validate step checks the same rules again.
+`scan_policy` and `/api/info` show the caller's attributes (`access_attributes`).
+`ABAC_ENABLED=false` turns it off.
 
 `AUTH_ENABLED=false` turns all of this off (local testing only). In Docker,
 mount the keys (`-v "$PWD/keys:/app/keys"`); without them the container creates

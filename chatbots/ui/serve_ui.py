@@ -41,7 +41,7 @@ import webbrowser
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 HERE = Path(__file__).resolve().parent
 CHATBOTS = HERE.parent
@@ -63,6 +63,16 @@ CSP = ("default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self';
 COOKIE = "sg_chatbot"
 API_GET = ("info", "events", "policy")
 API_POST = ("send", "decide", "detach")
+# Report links in the chat: /reports/<session id>/[report.<ext>], served through the backend.
+REPORT_PATH_RE = re.compile(r"/reports/([A-Za-z0-9][A-Za-z0-9._-]{0,127})/(report\.(?:html|md|json|docx))?")
+REPORT_TYPES = {  # file -> (content type, shown inline)
+    "report.html": ("text/html; charset=utf-8", True),
+    "report.md": ("text/markdown; charset=utf-8", False),
+    "report.json": ("application/json", False),
+    "report.docx": ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", False),
+}
+# Reports hold text from the scanned site: no scripts, frames or remote loads (as on the scanner).
+REPORT_CSP = "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'"
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 ZIP_TYPES = ("application/zip", "application/x-zip-compressed")
 MAX_ALLOWED_HOSTS = 20
@@ -257,6 +267,19 @@ def backend_call(state: State, method: str, path: str, body: bytes | None = None
         return 502, {"error": "the chatbot is starting (or stopped); see data/logs/chatbot-mcp-api.log"}
 
 
+def backend_raw(state: State, path: str, timeout: float = 60) -> tuple[int, bytes, str]:
+    """GET a non-JSON body (a report file) from the backend: (status, body, content type)."""
+    req = urllib.request.Request(f"http://127.0.0.1:{state.backend_port}{path}",
+                                 headers={"X-Chatbot-Key": state.api_key})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read(), r.headers.get("Content-Type", "application/octet-stream")
+    except urllib.error.HTTPError as exc:
+        return exc.code, b"", "text/plain"
+    except OSError:
+        return 502, b"", "text/plain"
+
+
 def make_handler(state: State):
     allowed_hosts = {f"127.0.0.1:{state.port}", f"localhost:{state.port}"}
     allowed_origins = {f"http://{h}" for h in allowed_hosts}
@@ -316,11 +339,32 @@ def make_handler(state: State):
             if u.path == "/api/allowlist":
                 self._json(200, state.allowlist())
                 return
+            m = REPORT_PATH_RE.fullmatch(u.path)
+            if m and ".." not in m.group(1):
+                self._report(m.group(1), m.group(2) or "report.html")
+                return
             name = u.path.removeprefix("/api/")
             if u.path.startswith("/api/") and name in API_GET:
                 self._json(*backend_call(state, "GET", f"/api/{name}" + (f"?{u.query}" if u.query else "")))
                 return
             self._json(404, {"error": "not found"})
+
+        def _report(self, session_id: str, filename: str) -> None:
+            """A scan report, fetched by the backend with the chatbot's token (the scanner checks
+            that the report is this chatbot's). HTML opens inline under the report CSP (no scripts),
+            md/json/docx download as <session_id>.<ext>."""
+            status, body, ctype = backend_raw(state, f"/api/report?{urlencode({'id': session_id, 'file': filename})}")
+            if status != 200:
+                self._json(404 if status in (401, 403, 404) else 502,
+                           {"error": "report not found" if status in (401, 403, 404) else "scanner unavailable"})
+                return
+            ctype, inline = REPORT_TYPES[filename]
+            extra = {"Content-Security-Policy": REPORT_CSP}
+            if not inline:
+                ext = filename.rsplit(".", 1)[1]
+                extra["Content-Disposition"] = f'attachment; filename="{session_id}.{ext}"'
+            self._headers(200, ctype, len(body), extra)
+            self.wfile.write(body)
 
         def do_POST(self):
             if not self._host_ok() or not self._session_ok():

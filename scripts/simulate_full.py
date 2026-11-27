@@ -21,7 +21,7 @@ import websockets
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 from pentest_agent.auth_client import TokenManager
-from scopeguard.simulated_target import SimulatedTarget  # noqa: E402
+from scopeguard.simulated_target import SimulatedTarget
 
 WS_PORT = int(os.getenv("SIM_WS_PORT", "8765"))
 
@@ -33,7 +33,7 @@ def _wait_healthy(timeout=40):
             with urllib.request.urlopen(f"http://127.0.0.1:{WS_PORT}/healthz", timeout=2) as r:
                 if json.load(r).get("graph_initialized"):
                     return
-        except Exception:
+        except (OSError, ValueError):  # not listening yet, or not JSON yet
             time.sleep(0.5)
     raise SystemExit("agent server did not become healthy")
 

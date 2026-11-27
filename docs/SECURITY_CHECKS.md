@@ -248,6 +248,7 @@ Run everything with `uv run pytest` (no real network or LLM calls; the golden li
 | File | Covers |
 |---|---|
 | `tests/test_a2a_server.py` | A2A endpoint and the MCP/A2A mounts inside pentest-agent (stubbed graph: no network, no LLM). |
+| `tests/test_abac.py` | ABAC on top of RBAC (pentest_agent/abac.py): per-subject attributes from ABAC_SUBJECTS_FILE. |
 | `tests/test_admission.py` | Server-wide admission queues (pentest_agent/admission.py) and their use in the WebSocket endpoint and HTTP middleware. |
 | `tests/test_api_auth.py` | API authentication (RS256 JWT, auto refresh) and RBAC, at the API and in the agents. |
 | `tests/test_archive_safety.py` | Uploaded archives: hostile entries are flagged and never extracted; only text files the analyzer reads are written, inside the extraction folder. |
@@ -284,6 +285,7 @@ Run everything with `uv run pytest` (no real network or LLM calls; the golden li
 | `tests/test_prompts.py` | Prompts live in a gitignored folder; a missing prompt must degrade to the deterministic fallbacks instead of crashing. |
 | `tests/test_rate_limit.py` | HTTP 429 handling: target links (engine + httpx transport), LLM retries, backend limits. |
 | `tests/test_recon_helpers.py` | Recon / crawl helpers: link extraction, scope filtering, discovery. |
+| `tests/test_report_access.py` | Who may read a saved report (pentest_agent/report_access.py). |
 | `tests/test_report_downloads.py` | Report downloads are named after the session id / report folder, not report.*. |
 | `tests/test_report_retention.py` | Old and checkpoint-less report folders are deleted with the checkpoint cleanup, and audited. |
 | `tests/test_report_tool.py` | Report rendering: Markdown, HTML, JSON and DOCX from the same structured data. |
