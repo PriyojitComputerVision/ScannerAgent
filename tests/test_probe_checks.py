@@ -200,3 +200,72 @@ def test_llm_plan_drops_parameter_probes_without_parameter():
     plan = ProbePlan(probes=[ProbeCase(probe_type=ProbeType.OPEN_REDIRECT, path="/", reason="t"),
                              ProbeCase(probe_type=ProbeType.CORS, path="/", reason="t")])
     assert [p.probe_type for p in cg.drop_unusable_probes(plan).probes] == [ProbeType.CORS]
+
+
+# ---------------------------------------------------------------- transient failures (tenacity)
+@pytest.fixture
+def waits(monkeypatch):
+    """The backoff waits tenacity asks for (nothing really sleeps)."""
+    seen = []
+    monkeypatch.setattr(pr, "_pause", seen.append)
+    return seen
+
+
+def _flaky_target(monkeypatch, fail_times):
+    timeouts = []
+
+    def handler(request):
+        timeouts.append(request.extensions.get("timeout", {}).get("read"))
+        if len(timeouts) <= fail_times:
+            raise httpx.ReadTimeout("The read operation timed out", request=request)
+        return httpx.Response(200, headers={"content-security-policy": "script-src 'unsafe-inline'"}, text="ok")
+
+    monkeypatch.setattr(pr, "rate_limited_client",
+                        lambda stats, verify=True, limits=None, **kw: httpx.Client(
+                            transport=httpx.MockTransport(handler), **kw))
+    return timeouts
+
+
+CSP = ProbeCase(probe_type=ProbeType.CSP_WEAKNESS, path="/", reason="t")
+
+
+def test_a_timed_out_probe_is_retried_with_a_longer_timeout(monkeypatch, waits):
+    timeouts = _flaky_target(monkeypatch, fail_times=1)
+    findings, errors = _run([CSP])
+    assert not errors and findings  # the retry got the answer
+    assert timeouts == [pr.REQUEST_TIMEOUT, pr.RETRY_TIMEOUT] and waits == [2]
+
+
+def test_up_to_five_tries_with_exponential_backoff(monkeypatch, waits):
+    timeouts = _flaky_target(monkeypatch, fail_times=4)
+    findings, errors = _run([CSP])
+    assert not errors and findings and len(timeouts) == 5  # the fifth try answered
+    assert waits == [2, 4, 8, 16]
+
+
+def test_a_probe_that_keeps_timing_out_gets_a_plain_red_flag(monkeypatch, waits):
+    timeouts = _flaky_target(monkeypatch, fail_times=99)
+    _findings, errors = _run([CSP, ProbeCase(probe_type=ProbeType.SERVER_BANNER, path="/", reason="t")])
+    assert len(timeouts) == 10  # 5 tries per probe, and the next probe still ran
+    assert errors[0] == ("csp_weakness at /: the site sent no response within 25 s (tried 5 times), so this "
+                         "check was not run; the site may have been slow or throttling requests after the "
+                         "DAST step")
+
+
+def test_the_retry_budget_stops_retries_for_a_site_that_is_down(monkeypatch, waits):
+    monkeypatch.setattr(pr.settings, "probe_retry_budget_seconds", 0)
+    timeouts = _flaky_target(monkeypatch, fail_times=99)
+    _findings, errors = _run([CSP])
+    assert len(timeouts) == 1 and not waits and "(tried 1 time)" in errors[0]
+
+
+def test_the_backoff_waits_at_least_the_targets_retry_after(monkeypatch, waits):
+    class Throttled(pr.RateLimitStats):  # the transport saw "Retry-After: 7" earlier in the run
+        def __init__(self):
+            super().__init__()
+            self.last_wait = 7.0
+
+    monkeypatch.setattr(pr, "RateLimitStats", Throttled)
+    _flaky_target(monkeypatch, fail_times=4)
+    _run([CSP])
+    assert waits == [7, 7, 8, 16]

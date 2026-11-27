@@ -789,6 +789,14 @@ content-injection reminder; without that reminder prompt the LLM is not called a
 the baseline checks on `/`, then open-redirect checks on redirect-like parameters (`next`, `url`, `return`, ...),
 directory-listing checks on up to two crawled directories, then reflection checks.
 
+**Slow or flaky sites.** A probe whose request times out or loses its connection is retried with
+tenacity: up to `PROBE_MAX_ATTEMPTS` (5) tries, exponential backoff 2, 4, 8, 16 s (never shorter than
+the `Retry-After` the site sent earlier in the run), 25 s to answer on a retry. All retries of one scan
+together take at most `PROBE_RETRY_BUDGET_SECONDS` (180), so a site that is down does not stall the
+scan. HTTP 429 itself is retried by the transport, which honours `Retry-After`. A check that still
+fails becomes a plain red flag, e.g. "csp_weakness at /: the site sent no response within 25 s
+(tried 5 times), so this check was not run".
+
 ## Caching (saves LLM cost and repeat requests)
 
 Identical work within `CACHE_TTL_SECONDS` (default 300, i.e. 5 minutes; `0` turns caching off) is reused

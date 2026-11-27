@@ -66,6 +66,7 @@ class RateLimitStats:
     retries: int = 0             # retries performed
     gave_up: int = 0             # requests still throttled after the last retry
     waited_seconds: float = 0.0
+    last_wait: float = 0.0       # the latest wait the target asked for (Retry-After) or backed off
     urls: list[str] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
@@ -75,6 +76,8 @@ class RateLimitStats:
             self.retries += int(retried)
             self.gave_up += int(gave_up)
             self.waited_seconds += waited
+            if retried:
+                self.last_wait = waited
             if gave_up and url not in self.urls and len(self.urls) < 50:
                 self.urls.append(url)
 
