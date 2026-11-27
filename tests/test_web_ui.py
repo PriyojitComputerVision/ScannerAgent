@@ -187,3 +187,17 @@ def test_pentest_agent_starts_the_console(monkeypatch):
                          "open_browser": True, "start_target": True}
     main.run(["--no-browser", "--no-target", "--port", "9999"])
     assert calls[-1]["port"] == 9999 and not calls[-1]["open_browser"] and not calls[-1]["start_target"]
+
+
+def test_live_findings_merge_like_the_report():
+    """The console counts one finding per issue + URL, like pentest_agent/dedupe.py: its header
+    list must match the report's, and the grade explains its score."""
+    from pathlib import Path
+
+    from pentest_agent import dedupe
+
+    js = (Path(web_ui.__file__).parent / "webui" / "app.js").read_text(encoding="utf-8")
+    block = js[js.index("const HEADER_KEYS = ["):js.index("];", js.index("const HEADER_KEYS = ["))]
+    assert re.findall(r"\['([a-z-]+)'", block) == [key for key, _ in dedupe._HEADER_KEYS]
+    assert "missing|absent|no|not set|lacks?" in js and "if (addFinding(f)) addBlip(f);" in js
+    assert "Risk score = " in js and "$('grade').title" in js
