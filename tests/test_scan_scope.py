@@ -91,20 +91,39 @@ def _state(sid: str, principal=ADMIN, **target):
                                        "authorization_confirmed": True, **target}}
 
 
+@pytest.fixture(autouse=True)
+def _no_website(monkeypatch):
+    """Every tool that would talk to a website fails the test if a scan calls it."""
+    def touched(*_a, **_k):
+        raise AssertionError("a website tool was called")
+    for tool in ("authenticate", "run_sandbox_check", "run_native_dast", "plan_probes", "run_probes",
+                 "recon_and_crawl"):
+        monkeypatch.setattr(graph, tool, SimpleNamespace(invoke=touched))
+
+
 def _mini_graph():
-    """choose_scope and the code steps for real; every website step is a stub that records it ran."""
+    """choose_scope, sign-in, the code steps, sandbox check, DAST and the probes for real (their
+    website tools fail the test when called); recon (website only / website + code) is a stub that
+    ends the run, aggregate a stub."""
     g = StateGraph(graph.AgentState)
     g.add_node("choose_scope", graph.choose_scope_node)
     g.add_node("recon", lambda s: {"phase": "website_steps", "red_flags": ["WEBSITE_TOUCHED"]})
+    g.add_node("auth", graph.auth_node)
+    g.add_node("auth_challenge", graph.auth_challenge_node)
     g.add_node("code_source", graph.code_source_node)
     g.add_node("code_sast", graph.code_sast_node)
-    g.add_node("sandbox_check", lambda s: {"phase": "website_steps", "red_flags": ["WEBSITE_TOUCHED"]})
-    g.add_node("sast", lambda s: {"phase": "website_steps", "red_flags": ["WEBSITE_TOUCHED"]})
+    g.add_node("sandbox_check", graph.sandbox_check_node)
+    g.add_node("sast", lambda s: {"phase": "sast_complete"})
+    g.add_node("dast", graph.dast_node)
+    g.add_node("plan_probes", graph.plan_probes_node)
+    g.add_node("run_probes", graph.run_probes_node)
     g.add_node("aggregate", lambda s: {"phase": "aggregated"})
     g.add_edge(START, "choose_scope")
-    for n in ("recon", "sandbox_check", "sast", "aggregate"):
+    g.add_edge("sast", "sandbox_check")
+    for n in ("recon", "aggregate"):
         g.add_edge(n, END)
     return g.compile(checkpointer=InMemorySaver())
+
 
 
 def test_scan_pauses_and_the_operator_picks_code_only():
@@ -122,7 +141,12 @@ def test_scan_pauses_and_the_operator_picks_code_only():
     done = app.invoke(Command(resume={"action": "upload", "upload_id": meta["upload_id"]}), cfg)
     assert done["scan_scope"] == "code" and done["scope_choice"]["decided_by"] == "operator"
     assert done["phase"] == "aggregated" and done["findings"]
-    assert "WEBSITE_TOUCHED" not in done.get("red_flags", [])  # no website step ran
+    assert "WEBSITE_TOUCHED" not in done.get("red_flags", [])  # recon never ran
+    # every other step is in the path, the website steps passing straight on (no tool called)
+    for step in ("auth", "sandbox_check", "dast", "plan_probes", "run_probes"):
+        assert graph.with_iteration_limit(step, getattr(graph, f"{step}_node"))(
+            {**_state("x", scan_scope="code", upload_id="0" * 32), "scan_scope": "code"}
+        ).update["phase"] == f"{step}_code_only"
 
 
 def test_code_only_without_code_reports_that_nothing_was_analysed():
@@ -147,7 +171,7 @@ def test_website_only_skips_the_code_step():
 
 def test_named_scope_and_no_permission_do_not_pause():
     named = graph.choose_scope_node(_state("sc-4", scan_scope="code", upload_id="0" * 32))
-    assert named.goto == "code_source" and named.update["scope_choice"]["decided_by"] == "request"
+    assert named.goto == "auth" and named.update["scope_choice"]["decided_by"] == "request"
     plain = graph.choose_scope_node(_state("sc-5"))
     assert plain.goto == "recon" and plain.update["scan_scope"] == "website"
     # a scanner (no scan:source) has only one scope: no pause, the website is tested
@@ -275,7 +299,7 @@ def test_code_only_scan_needs_no_url(monkeypatch):
     assert cmd.goto == "choose_scope" and cmd.update["allowed_domains"] == []
     state = {"session_id": "nu-1", "principal": ADMIN.state_dict(), "target": t.model_dump(mode="json"),
              "scan_scope": "code", "profile": "standard", "started_at": "2026-01-01T00:00:00+00:00"}
-    assert graph.choose_scope_node(state).goto == "code_source"
+    assert graph.choose_scope_node(state).goto == "auth"  # code only skips the recon layer
     report = graph.FinalReport.model_validate_json(graph.aggregate_node(state).update["_final_report_json"])
     assert report.target_url == "source code (no website)"
 
@@ -292,3 +316,16 @@ def test_scan_service_code_only_without_target_url():
     target = svc._target(None, "standard", True, [], {"upload_id": "0" * 32, "scan_scope": "code"})
     svc.policy.check_target(target)  # no website: nothing to allowlist
     assert target.url is None
+
+
+@pytest.mark.parametrize("sandbox_check_enabled, js_step", [(True, []), (False, ["sast"])])
+def test_code_only_path_skips_only_recon(monkeypatch, sandbox_check_enabled, js_step):
+    monkeypatch.setattr(settings, "sandbox_check_enabled", sandbox_check_enabled)
+    meta = code_source.store_files(ADMIN, [{"name": "app/views.py", "content": VULN_PY}])
+    app, cfg = _mini_graph(), {"configurable": {"thread_id": f"sc-path-{sandbox_check_enabled}"}}
+    order = [n for chunk in app.stream(_state("sc-path", scan_scope="code", upload_id=meta["upload_id"]), cfg,
+                                       stream_mode="updates") for n in chunk]
+    assert order == ["choose_scope", "auth", "code_source", "code_sast", *js_step, "sandbox_check", "dast",
+                     "plan_probes", "run_probes", "aggregate"]
+    final = app.get_state(cfg).values
+    assert final["findings"] and not final.get("crawled_pages")  # only the code was analysed

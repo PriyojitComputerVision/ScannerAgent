@@ -18,8 +18,8 @@ A client signs in at `/auth/token` and sends the scan request over `/ws`. The re
 server-wide queue (1 scan runs at a time, up to 50 wait; see [API management](#api-management-queues)),
 then the server runs the LangGraph pipeline `validate → choose_scope → recon → auth → [auth_challenge] → code_source → [code_sast] → sast → sandbox_check → dast → plan_probes → run_probes → aggregate → summarize → report → audit`
 and streams progress back. `choose_scope` asks you first, before any request, what the scan tests:
-the **website + its source code**, the **website only**, or the **code only** (then the run goes
-`choose_scope → code_source → code_sast → aggregate` and nothing is sent to the site; see
+the **website + its source code**, the **website only**, or the **code only** (then the run skips the
+recon layer, `choose_scope → auth → code_source → code_sast → sandbox_check → dast → plan_probes → run_probes → aggregate`, and the website steps pass straight on, so nothing is sent to any site; see
 [What to test](#what-to-test-website--code-website-only-code-only-human-in-the-loop)). `auth_challenge` runs only when the target needs a human for SSO or MFA
 (see [Sign-in with SSO / MFA](#sign-in-with-sso--mfa-human-in-the-loop)); `code_source` is the SAST step's
 human in the loop: it pauses and asks you for code files, a .zip or a public repository's `.git` link (or skip), and
@@ -83,10 +83,13 @@ summary (each `[Sn]` jumps to its finding), attack coverage, a findings explorer
 reports with html/docx/md/json downloads, and the **agent integrations** (MCP and A2A endpoints,
 see below). Admins also see the **audit trail** (live chain check) and
 can tick **Pause for SSO / MFA sign-in** to complete a target's sign-in themselves when asked, and choose
-**What to test** in the New scan card (website + code, website only, code only with no link needed, or
+**What to test** in the New scan card (website + code, website only, code only, where you give files, a .zip or a git link
+right there instead of a link, or
 decide after launch). The page fits one
 screen: the top bar and footer stay put while the left rail and the main stage scroll on their own
-(on narrow screens it becomes one scrolling page). The built-in target (`127.0.0.1` only) is offered as a
+(on narrow screens it becomes one scrolling page). The **Agent pipeline** card follows the scope: code
+only shows every step but `recon`, the website steps marked "code only" as they pass on; website only
+and website + code show every step. The built-in target (`127.0.0.1` only) is offered as a
 one-click demo target. Flags: `--no-browser`, `--no-target`, `--host`, `--port`.
 
 There is no login screen, and API authentication stays on:
@@ -469,7 +472,7 @@ what the scan tests:
 | --- | --- | --- |
 | `website_and_code` | every website step, then the code at the SAST step (`code_source` → `code_sast`) | yes |
 | `website` | every website step; no code step | yes |
-| `code` | `choose_scope → code_source → code_sast → aggregate → summarize → report → audit` | **none**: no website is needed; a URL, if given, only labels the report |
+| `code` | every step but `recon`: `choose_scope → auth → code_source → code_sast → sandbox_check → dast → plan_probes → run_probes → aggregate → summarize → report → audit`; auth, sandbox_check, dast and the probes pass straight on (phase `<step>_code_only`) | **none**: no website is needed; a URL, if given, only labels the report |
 
 * **Ask me (human in the loop).** With `"ask_scan_scope": true` the run pauses (LangGraph `interrupt`,
   checkpointed) and the server sends `input_required` with `request.type == "scan_scope"`, the offered
@@ -478,8 +481,10 @@ what the scan tests:
   In the console pick **Decide after launch** in the New scan card; the scan then shows a
   **What should this scan test?** dialog.
 * **Named up front.** `"scan_scope": "..."` in the scan request (console: the **What to test** chips in
-  the New scan card, Website + code by default for admins; **Code only** makes the link optional and
-  turns the card into "Which code should ScopeGuard analyse?"; MCP `start_scan(scan_scope=...)`; A2A `"scan_scope"`; the MCP chatbot's approval card has a
+  the New scan card, Website + code by default for admins; **Code only** turns the card into "Which code
+  should ScopeGuard analyse?": the link field is replaced by the code itself (code files or one .zip,
+  uploaded when you launch, or a public `.git` link + optional branch/tag), sent with the request, so the
+  scan does not pause again; MCP `start_scan(scan_scope=...)`; A2A `"scan_scope"`; the MCP chatbot's approval card has a
   **What to test** choice). Code scopes need the code (`upload_id` / `git_url`, or `ask_for_code` for a
   client that answers the code pause); `website` together with code is refused.
 * **No website.** A code-only scan may omit `url` (MCP/A2A: `target_url`): nothing is checked against the
