@@ -1,3 +1,7 @@
 # Shell scripts run inside Linux containers: keep LF endings on Windows checkouts.
 *.sh text eol=lf
 Dockerfile text eol=lf
+# The agent skill's source: LF everywhere, so skills/scopeguard-scan.skill (built from it) matches the
+# files GitHub serves byte for byte (the code SAST compares bundles with their source by SHA-256).
+.claude/skills/** text eol=lf
+skills/*.skill binary

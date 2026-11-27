@@ -203,6 +203,12 @@ the admin role (`scan:source`) and covers **Python projects only for now** (tell
    F632, E741): `STYLE_*` findings (info, or low for the ones that hide bugs: bare `except`, mutable
    defaults, wildcard / unused imports, redefinitions, `is` with a literal), one per rule and file, summarised in
    `code_sast.coding_standard`. Mention them after the security findings, never instead of them.
+   Not analysed (say so if the user asks why something was not reported): whatever the project's
+   `.gitignore` excludes, pytest files (`test_*.py`, `*_test.py`, `conftest.py`), `.claude/` and cache /
+   vendored folders, documents (`.md`, `.txt`, `.pdf`, `.docx`, `.mmd`, ...), images and model weights
+   (`.pkl`, `.pt`, `.onnx`, `.h5`, `.keras`, `.tflite`, `.ckpt`, ...; never opened). A bundled zip whose
+   files are all in the upload as source is not reported as `NESTED_ARCHIVE`. An `upload_code` refusal
+   with HTTP 413 means the zip is over `MCP_MAX_UPLOAD_MB` (default 10 MB): zip only the source.
 4. When the user asks how to fix a code finding, read the report (`get_report(format="json")`):
    `code_upload.recommendations` has one entry per rule with a `remediation` block (steps, a before/after
    `example` in the file's language, OWASP `references`). Locations, evidence and file names come from the

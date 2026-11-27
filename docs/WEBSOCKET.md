@@ -191,10 +191,13 @@ path is the MCP tool `upload_code`, because a zip has to fit inside a JSON tool 
 by the server (`--depth 1`, hardened), so nothing is uploaded at all.
 
 `scripts/ws_client.py --code-path <.zip or folder>` (or the wizard's "local .zip file or project
-folder") does the upload for you: a folder is zipped in memory (`.git`, `node_modules`, virtualenvs,
-caches and symlinks are left out), sent as the raw `POST /api/uploads` body with the automatic token,
-and the returned `upload_id` goes into the scan request. Code needs the admin role (`scan:source`) and
-is analysed as Python (other languages: partial coverage, marked in the report).
+folder") does the upload for you: a folder is zipped in memory and sent as the raw `POST /api/uploads`
+body with the automatic token; the returned `upload_id` goes into the scan request. The zip leaves out
+what the folder's `.gitignore` files exclude (so `.env`, `keys/`, `data/` stay on your machine),
+vendored / cache folders (`.git`, `node_modules`, `.venv`, `.ruff_cache`, ...), symlinks, documents
+(`.md`, `.txt`, `.pdf`, `.docx`, `.mmd`, ...), images and model weights (`.pkl`, `.pt`, `.onnx`, `.h5`, ...).
+Code needs the admin role (`scan:source`) and is analysed as Python (other languages: partial coverage,
+marked in the report). Not analysed: whatever the project's .gitignore excludes, pytest files (test_*.py, *_test.py, conftest.py), .claude/ and cache / vendored folders, documents (.md, .txt, .pdf, .docx, .mmd, ...), images and model weights (never opened). A bundled zip whose files are all in the upload as source is not reported as a nested archive.
 
 ## 6a. Recipes: website only, website + code, code only
 
@@ -437,7 +440,7 @@ uv run python scripts/ws_client.py --help
 | `--i-have-authorization` | Required for a real URL or code: you own it or may test it. |
 | *(no arguments)* / `-i` | Interactive: numbered menus ask for everything (URL, code, git link, path, scope, profile, ...), show the frame, then ask "Start?". |
 | `--scope`, `--upload-id`, `--git-url`, `--git-ref` | Source code named up front (`--scope code --upload-id ...` needs no URL). |
-| `--code-path ZIP_OR_DIR` | Upload a local .zip or folder over HTTP first (raw zip body), then send its `upload_id`. |
+| `--code-path ZIP_OR_DIR` | Upload a local .zip or folder over HTTP first (raw zip body), then send its `upload_id`. A folder leaves out gitignored files, caches, documents, images and model weights. |
 | `--ask-scope`, `--ask-for-code`, `--interactive-auth` | Turn the pauses on; the client prompts in the terminal (secrets hidden). |
 | `--scope-answer`, `--code-answer-upload`, `--code-answer-git` | Answer pauses without a prompt. Without a TTY: default scope / skip. |
 | `--frames` | Print every received frame as pretty JSON (long strings shortened). `--full`: no shortening. |
