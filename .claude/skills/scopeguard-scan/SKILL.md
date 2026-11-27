@@ -166,7 +166,7 @@ After fixing, offer a re-scan with the same profile to confirm, and compare the 
 
 Source code is analysed as the scan's `code_sast` step. `start_scan(scan_scope=...)` chooses what is
 tested: `website_and_code` (the site, then the code; the default when code is given), `website` (the
-site only) or `code` (only the code: no request is sent to the site; its allowlisted URL just labels the
+site only) or `code` (only the code: no website needed; `target_url` is optional and only labels the
 report). When the user gives both a site and code but doesn't say which, ask them. It needs
 the admin role (`scan:source`) and covers **Python projects only for now** (tell the user).
 
@@ -184,8 +184,8 @@ the admin role (`scan:source`) and covers **Python projects only for now** (tell
      answer the console's source-code question at the SAST step instead (`ask_for_code`).
 2. Ask the user to confirm they own the target and the code, then
    `start_scan(target_url, authorization_confirmed=true, upload_id=...)` (or `git_url=...`; never both).
-   Add `scan_scope="code"` when they want only the code checked (still pick an allowlisted site: it labels
-   the report, nothing is sent to it), `scan_scope="website"` never goes with code.
+   Add `scan_scope="code"` when they want only the code checked: `target_url` may then be left out (no
+   website is needed or contacted). `scan_scope="website"` never goes with code.
 3. Follow with `get_scan` as usual. The code runs in a Kubernetes Job with no network (5x the code's size
    in memory, 10x on an out-of-memory retry that resumes from the checkpoint). Its findings
    (`source: code_upload`) are in the same `findings` list and report; `code_sast` summarises the code

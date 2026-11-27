@@ -133,13 +133,13 @@ message. Then ask for:
 
 - **a scan with the code**: the agent calls `start_scan` with the `upload_id`. You decide **what to test**
   in the approval card (human in the loop): **website + source code**, **website only** (the code is left
-  out) or **source code only** (no request is sent to the site; its URL only labels the report). The code
+  out) or **source code only** (no website needed: the target may stay empty). The code
   is analysed in the scan's code SAST step (sandbox) and its findings are in the same report.
 
 Or paste a **public git link** with the request ("scan http://localhost:3000 with the code at
 https://github.com/me/app.git"; the `.git` clone link): the agent passes it as `git_url` (branch/tag: `git_ref`) and the scanner
-checks it is reachable and the branch/tag exists, then clones it (shallow, no credentials, hosts on `GIT_ALLOWED_HOSTS`). Code-only scans still name an allowlisted
-site: it labels the report, and nothing is sent to it.
+checks it is reachable and the branch/tag exists, then clones it (shallow, no credentials, hosts on `GIT_ALLOWED_HOSTS`). Code-only scans need no site: leave the
+target empty in the approval card (a site you do give only labels the report; nothing is sent to it).
 
 Scans need your approval (that is the authorization confirmation) and the `admin` role
 (`CHATBOT_ROLES=admin`, upload needs `scan:source`). **Python only for now**: other languages are only

@@ -252,3 +252,43 @@ def test_scan_service_checks_the_scope_before_starting():
     assert scopes == {"website_and_code": True, "website": True, "code": True}
     scanner = ScanService(AccessPolicy(via="mcp", roles="scanner", allowed_targets="app.test"))
     assert {s["value"]: s["allowed"] for s in scanner.describe_policy()["scan_scopes"]}["code"] is False
+
+
+# ------------------------------------------------------------------ code only, no website at all
+def test_code_only_scan_needs_no_url(monkeypatch):
+    t = TargetInput(scan_scope="code", upload_id="0" * 32)
+    assert t.url is None and t.target_label == "source code (no website)"
+    with pytest.raises(ValueError) as exc:  # every other scope needs the website; the error points at "url"
+        TargetInput(scan_scope="website_and_code", upload_id="0" * 32)
+    assert exc.value.errors()[0]["loc"] == ("url",)
+    with pytest.raises(ValueError):
+        TargetInput(upload_id="0" * 32)
+    with pytest.raises(ValueError, match="no extra hosts or target credentials"):
+        TargetInput(scan_scope="code", upload_id="0" * 32, jwt="a.b.c")
+
+    # validate: no DNS / network-policy check and no scope for a scan that contacts no website
+    def no_network(*_a, **_k):
+        raise AssertionError("a code-only scan must not resolve or check any host")
+    monkeypatch.setattr(graph, "pre_run_guardrail", no_network)
+    cmd = graph.validate_input_node({"session_id": "nu-1", "principal": ADMIN.state_dict(),
+                                     "target": t.model_dump(mode="json")})
+    assert cmd.goto == "choose_scope" and cmd.update["allowed_domains"] == []
+    state = {"session_id": "nu-1", "principal": ADMIN.state_dict(), "target": t.model_dump(mode="json"),
+             "scan_scope": "code", "profile": "standard", "started_at": "2026-01-01T00:00:00+00:00"}
+    assert graph.choose_scope_node(state).goto == "code_source"
+    report = graph.FinalReport.model_validate_json(graph.aggregate_node(state).update["_final_report_json"])
+    assert report.target_url == "source code (no website)"
+
+
+def test_scan_service_code_only_without_target_url():
+    import asyncio
+
+    svc = ScanService(AccessPolicy(via="mcp", roles="admin", allowed_targets="app.test"))
+    with pytest.raises(PolicyError, match="target_url is required"):
+        asyncio.run(svc.start_scan(None, authorization_confirmed=True, upload_id="0" * 32))
+    with pytest.raises(PolicyError, match="no credentials or extra domains"):
+        asyncio.run(svc.start_scan("", authorization_confirmed=True, upload_id="0" * 32, scan_scope="code",
+                                   credentials="staging"))
+    target = svc._target(None, "standard", True, [], {"upload_id": "0" * 32, "scan_scope": "code"})
+    svc.policy.check_target(target)  # no website: nothing to allowlist
+    assert target.url is None

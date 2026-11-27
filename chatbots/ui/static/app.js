@@ -291,21 +291,27 @@ function approvalForm(req) {
     const check = () => {
       const host = hostOf(target.value.trim());
       const allowed = host && allowedHosts.some((h) => h === host || h === host.split(':')[0]);
-      hint.textContent = !host ? 'Enter a full URL (https://...).'
+      const codeOnly = scope.value === 'code';
+      target.placeholder = codeOnly ? 'optional for code only (labels the report)' : 'https://your-site.example/';
+      hint.textContent = !host ? (codeOnly && !target.value.trim() ? '' : 'Enter a full URL (https://...).')
         : (allowed || !allowedHosts.length ? '' : host + ' is not in Allowed targets: the scanner will refuse it.');
     };
     target.addEventListener('input', check);
+    scope.addEventListener('change', check);
     check();
     node.append(field('Target', target), list, scopeField(scope, args), profileField(profile), auth.wrap, hint);
     return {
       node,
       run: 'Run scan',
-      ready: () => auth.box.checked && !!hostOf(target.value.trim()) && profileOk(profile) && !scope.options[scope.selectedIndex].disabled,
+      ready: () => auth.box.checked && (scope.value === 'code' || !!hostOf(target.value.trim())) && profileOk(profile)
+        && !scope.options[scope.selectedIndex].disabled,
       watch: [auth.box, target, profile, scope],
       collect: () => {
         const out = { ...args, target_url: target.value.trim(), profile: profile.value, scan_scope: scope.value };
         // Website only: the code is not part of this scan (the scanner refuses the mix).
         if (scope.value === 'website') { delete out.upload_id; delete out.git_url; delete out.git_ref; }
+        // Code only: no website needed; an empty target is left out.
+        if (scope.value === 'code' && !out.target_url) delete out.target_url;
         return out;
       },
     };
