@@ -423,14 +423,27 @@ SKIP_DIRS = frozenset({".git", ".hg", ".svn", "node_modules", ".venv", "venv", "
 
 
 def zip_code(path: Path) -> tuple[bytes, str]:
-    """(zip bytes, file name) for a .zip file or a folder (zipped in memory, no symlinks)."""
+    """(zip bytes, file name) for a .zip file or a folder (zipped in memory, no symlinks). A folder
+    leaves out what its .gitignore files exclude (.env, keys, data, caches: never uploaded),
+    vendored / cache folders, and documents / diagrams / images (not analysed)."""
+    from scopeguard.codecheck import NOT_ANALYSED_EXT, is_model_weight
+    from scopeguard.gitignore import GitIgnore
+
     if path.is_file():
         return path.read_bytes(), path.name
+    ignore = GitIgnore()
+    for gi in sorted(path.rglob(".gitignore")):
+        if gi.is_file() and not gi.is_symlink():
+            base = gi.parent.relative_to(path).as_posix()
+            ignore.add(gi.read_text(encoding="utf-8", errors="replace")[:256 * 1024], "" if base == "." else base)
+    not_sent = tuple(NOT_ANALYSED_EXT)  # documents, diagrams, images: not analysed, so not uploaded
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for item in sorted(path.rglob("*")):
             rel = item.relative_to(path)
             if any(part in SKIP_DIRS for part in rel.parts) or item.is_symlink() or not item.is_file():
+                continue
+            if ignore.ignored(rel.as_posix()) or item.name.lower().endswith(not_sent) or is_model_weight(item.name):
                 continue
             zf.write(item, rel.as_posix())
     name = re.sub(r"[^A-Za-z0-9._-]", "_", path.resolve().name) or "code"

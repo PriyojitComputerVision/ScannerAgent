@@ -635,7 +635,9 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
 * **Type checks**: the name must end in `.zip`, the MIME type must be a zip type
   (`application/zip`, `application/x-zip-compressed`, `application/x-zip`, `application/octet-stream`),
   and the first bytes must be a zip signature (a renamed `.exe`/ELF/tarball is refused with 415).
-  Max `CODE_UPLOAD_MAX_MB` (50; MCP `MCP_MAX_UPLOAD_MB`, 10).
+  Max `CODE_UPLOAD_MAX_MB` (50; MCP `MCP_MAX_UPLOAD_MB`, 10). Over MCP the zip is base64-encoded inside the
+  request, so `/mcp` accepts request bodies up to about 4/3 of `MCP_MAX_UPLOAD_MB` plus 1 MiB (the MCP SDK's
+  default of 4 MiB would refuse zips above ~3 MB with HTTP 413).
 * **Archive safety** (flagged, never extracted): Zip Slip paths, symlinks, setuid bits, encrypted or
   duplicate entries, zip bombs (ratio and real decompressed bytes), executables/binaries, nested
   archives, names with control/bidi characters, and committed secrets files (`.env`, private keys,
@@ -695,10 +697,30 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
 * **Placeholder secrets** in source code (values containing EXAMPLE, FAKE, DUMMY, PLACEHOLDER, CHANGEME or
   REDACTED, e.g. AWS's documented key `AKIAIOSFODNN7EXAMPLE`) are not reported as credentials. The website
   scan still reports any key a site serves.
-* **Pytest files are not analysed**: `test_*.py`, `*_test.py` and `conftest.py` are skipped by the code SAST
-  (they hold deliberately vulnerable snippets). This applies to every entry point (console / WebSocket,
-  API, MCP, A2A), since all of them run the same sandboxed step. Code hidden in a file with such a name is
-  therefore not checked: review test files of untrusted code yourself.
+* **Not analysed** by the code SAST, at every entry point (console / WebSocket, API, MCP, A2A: they all run
+  the same sandboxed step):
+  - whatever the project's own **`.gitignore`** files exclude (nested ones too; `!` exceptions, `/` anchors,
+    `**` globs; a file inside an ignored folder stays ignored, as in git),
+  - vendored / cache / build folders (`.venv`, `node_modules`, `__pycache__`, `.pytest_cache`, `.ruff_cache`,
+    `.mypy_cache`, `dist`, `build`, ...) and `.claude/` (assistant configuration),
+  - pytest files (`test_*.py`, `*_test.py`, `conftest.py`),
+  - documents and diagrams (`.md`, `.txt`, `.rst`, `.pdf`, `.doc`/`.docx`, `.odt`, `.rtf`, slides,
+    spreadsheets, `.mmd` / Mermaid, PlantUML, draw.io),
+  - images (`.png`, `.jpg`/`.jpeg`, `.gif`, `.webp`, `.ico`, `.svg`, ...),
+  - model weights / serialized models (`.pkl`, `.joblib`, `.pt`/`.pth`, `.ckpt` and TensorFlow checkpoint /
+    SavedModel shards such as `model.ckpt.index`, `*.data-00000-of-00001`, `variables.index`, `.safetensors`, `.h5`,
+    `.keras`, `.pb`, `.tflite`, `.onnx`, `.npy`, `.gguf`, ...): skipped by name and never opened, not even
+    sniffed or hashed (a bundle that contains them is not compared). `.tf` stays analysed: it is Terraform.
+
+  The archive-safety checks (zip slip, bombs, sensitive file names, ...) still cover these files. Anything
+  hidden in them is not checked (a secret typed into a `.txt`, a script in an `.svg`, a malicious pickle):
+  review them yourself in untrusted uploads. `ws_client.py --code-path` does not even upload them, nor
+  anything the folder's `.gitignore` excludes (`.env`, `keys/`, `data/` stay on your machine).
+* **Bundled zips with their source**: a zip inside the upload (e.g. `skills/<name>.skill`, the packaged
+  `.claude/skills/<name>/`) is not reported as `NESTED_ARCHIVE` when every file in it is also in the upload,
+  at a matching path, with the same SHA-256 (CRC-32 alone can be forged). Compared in memory, at most
+  16 MB / 2000 files per bundle; anything that differs, is missing, encrypted or too large is still reported,
+  with the reason.
 * **Separate audit trail** (`CODE_AUDIT_LOG_PATH`, `data/audit/code_audit.jsonl`): a hash-chained record
   for every upload, refusal, pre/post guardrail verdict, sandbox attempt (Job name, memory, multiplier,
   OOMKilled, files done), completion (with report hashes) and deletion; also the agent's code-check

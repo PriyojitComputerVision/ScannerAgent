@@ -17,6 +17,7 @@ Flagged (``upload_archive`` findings) and never extracted:
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import os
 import posixpath
@@ -41,6 +42,10 @@ MAX_NAME = 1024
 MAX_FINDINGS = 300
 CHUNK = 64 * 1024
 SNIFF = 4096
+# Bundled zips (e.g. a packaged skill / plugin) are compared with the source in the same upload:
+# at most this many bytes per bundle (compressed and uncompressed) and this many files in it.
+MAX_BUNDLE_BYTES = 16 * 1024 * 1024
+MAX_BUNDLE_FILES = 2000
 
 _ARCHIVE_EXT = (".zip", ".jar", ".war", ".ear", ".apk", ".whl", ".egg", ".tar", ".tgz", ".gz", ".bz2",
                 ".xz", ".7z", ".rar", ".zst", ".nupkg", ".aar")
@@ -141,7 +146,13 @@ def inspect_and_extract(data: bytes, dest: str, *, skip: set[str] | frozenset[st
     """Inspect every entry of the zip in ``data``; write the text files the analyzer needs
     into ``dest`` (created). ``skip`` holds relative paths already analysed by an earlier
     attempt (checkpoint resume): they are inspected but not written again."""
-    from scopeguard.codecheck import MAX_FILE_BYTES, SKIP_DIRS
+    from scopeguard.codecheck import (
+        ANALYSIS_SKIP_DIRS,
+        MAX_FILE_BYTES,
+        is_model_weight,
+        is_not_analysed,
+    )
+    from scopeguard.gitignore import GitIgnore
 
     max_file = max_file_bytes or MAX_FILE_BYTES
     rep = ArchiveReport()
@@ -168,6 +179,9 @@ def inspect_and_extract(data: bytes, dest: str, *, skip: set[str] | frozenset[st
     root = os.path.realpath(dest)
     written_total = 0
     taken: dict[str, str] = {}
+    by_size: dict[int, list[tuple[str, zipfile.ZipInfo]]] = {}  # regular files, to compare bundles with
+    bundles: list[tuple[str, zipfile.ZipInfo]] = []
+    ignore = _project_gitignore(zf, infos, GitIgnore())  # what the project's .gitignore excludes is not analysed
     for info in infos:
         name = info.filename
         shown = _display(name)
@@ -215,6 +229,8 @@ def inspect_and_extract(data: bytes, dest: str, *, skip: set[str] | frozenset[st
                      evidence=f"also {taken[key]}")
             continue
         taken[key] = rel
+        if not is_model_weight(rel):  # weights are never opened, not even to compare
+            by_size.setdefault(info.file_size, []).append((rel, info))
         low = rel.lower()
         parts = low.split("/")
         if ".git" in parts[:-1]:
@@ -230,16 +246,23 @@ def inspect_and_extract(data: bytes, dest: str, *, skip: set[str] | frozenset[st
                      evidence=f"{info.file_size} / {info.compress_size} bytes")
             rep.stats["refused"] += 1
             continue
-        if any(p in SKIP_DIRS for p in rel.split("/")[:-1]):
-            continue  # the analyzer skips vendored / build folders anyway
-        if low.endswith(_ARCHIVE_EXT):
-            rep.flag("NESTED_ARCHIVE", "low", A08, "Nested archive inside the upload; it was not unpacked or analysed.",
-                     rel, "CWE-829", "Upload the source of bundled archives, or verify their checksums/signatures.")
-            continue
+        if any(p in ANALYSIS_SKIP_DIRS for p in rel.split("/")[:-1]) or is_not_analysed(rel.rsplit("/", 1)[-1]):
+            continue  # the analyzer skips vendored / build / .claude folders, pytest, Markdown and images anyway
+        if ignore and ignore.ignored(rel):
+            rep.stats["gitignored"] = rep.stats.get("gitignored", 0) + 1
+            continue  # excluded by the project's .gitignore
         try:
             head = _read_head(zf, info)
         except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError) as exc:
             rep.notice("read-error", f"{rel}: {exc}")
+            continue
+        if head.startswith(b"PK\x03\x04"):
+            bundles.append((rel, info))  # a zip: compared with the source after this loop
+            rep.stats["skipped_binary"] += 1
+            continue
+        if low.endswith(_ARCHIVE_EXT):
+            rep.flag("NESTED_ARCHIVE", "low", A08, "Nested archive inside the upload; it was not unpacked or analysed.",
+                     rel, "CWE-829", "Upload the source of bundled archives, or verify their checksums/signatures.")
             continue
         magic = next((desc for sig, desc in _BIN_MAGIC if head.startswith(sig)), None)
         if magic or head.startswith(_ARCHIVE_MAGIC):
@@ -288,7 +311,86 @@ def inspect_and_extract(data: bytes, dest: str, *, skip: set[str] | frozenset[st
         rep.stats["extracted_files"] += 1
         rep.stats["extracted_bytes"] = written_total
         rep.extracted.append(rel)
+    for rel, info in bundles:
+        same, why = _bundle_is_source(zf, info, by_size)
+        if same:
+            rep.notice("bundle", f"{rel}: a bundled zip whose files are all in this upload as source "
+                                 f"(same SHA-256); not reported as a nested archive")
+        else:
+            rep.flag("NESTED_ARCHIVE", "low", A08, "Nested archive inside the upload; not unpacked or analysed.",
+                     rel, "CWE-829", "Upload the source of bundled archives, or verify their checksums.",
+                     evidence=why)
     return rep
+
+
+def _project_gitignore(zf: zipfile.ZipFile, infos: list[zipfile.ZipInfo], ignore):
+    """The upload's .gitignore files (each at most 256 KB, at most 200 of them) as one matcher."""
+    count = 0
+    for info in infos:
+        rel = normalize_entry(info.filename)
+        if not rel or info.is_dir() or rel.rsplit("/", 1)[-1] != ".gitignore" or info.file_size > 256 * 1024:
+            continue
+        if info.flag_bits & 0x1 or count >= 200:
+            continue
+        try:
+            with zf.open(info) as fh:
+                text = fh.read(256 * 1024).decode("utf-8", errors="replace")
+        except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError):
+            continue
+        ignore.add(text, rel.rsplit("/", 1)[0] if "/" in rel else "")
+        count += 1
+    return ignore
+
+
+def low_name(rel: str) -> str:
+    return rel.rsplit("/", 1)[-1].lower()
+
+
+def _sha256(zf: zipfile.ZipFile, info: zipfile.ZipInfo) -> str:
+    """SHA-256 of one entry (zipfile checks its CRC while reading)."""
+    h = hashlib.sha256()
+    with zf.open(info) as fh:
+        for block in iter(lambda: fh.read(CHUNK), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _bundle_is_source(zf: zipfile.ZipFile, info: zipfile.ZipInfo,
+                      by_size: dict[int, list[tuple[str, zipfile.ZipInfo]]]) -> tuple[bool, str]:
+    """(True, "") when every file of the bundled zip ``info`` is also in the upload at a matching path
+    with the same SHA-256 (CRC-32 alone can be forged); else (False, why). Read in memory only and
+    bounded by MAX_BUNDLE_BYTES / MAX_BUNDLE_FILES; nothing is extracted."""
+    if info.file_size > MAX_BUNDLE_BYTES:
+        return False, f"larger than {MAX_BUNDLE_BYTES // 1048576} MB; not compared"
+    try:
+        inner = zipfile.ZipFile(io.BytesIO(zf.read(info)))
+        entries = [e for e in inner.infolist() if not e.is_dir()]
+    except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError):
+        return False, "not a readable zip"
+    if not entries:
+        return False, "empty"
+    if len(entries) > MAX_BUNDLE_FILES:
+        return False, f"more than {MAX_BUNDLE_FILES} files; not compared"
+    if sum(max(0, e.file_size) for e in entries) > MAX_BUNDLE_BYTES:
+        return False, f"unpacks to more than {MAX_BUNDLE_BYTES // 1048576} MB; not compared"
+    from scopeguard.codecheck import is_model_weight
+
+    if any(is_model_weight(e.filename) for e in entries):
+        return False, "contains model weight files; they are not read, so it was not compared"
+    for e in entries:
+        name = normalize_entry(e.filename)
+        if name is None or e.flag_bits & 0x1 or _BIDI.search(name) or _CTRL.search(name):
+            return False, "an entry is encrypted or has an unsafe name"
+        copies = [(r, i) for r, i in by_size.get(e.file_size, []) if r == name or r.endswith("/" + name)]
+        if not copies:
+            return False, f"{_display(name)[:120]} is not in the upload as source"
+        try:
+            digest = _sha256(inner, e)
+            if not any(_sha256(zf, i) == digest for _, i in copies):
+                return False, f"{_display(name)[:120]} differs from the source copy"
+        except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError):
+            return False, "an entry could not be read"
+    return True, ""
 
 
 class _SizeMismatch(Exception):

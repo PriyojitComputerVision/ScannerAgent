@@ -363,6 +363,44 @@ def _content_text(content) -> str:
     return "\n".join(parts)
 
 
+def _mb(size: int) -> str:
+    return f"{size / 1048576:.1f} MB"
+
+
+def upload_error_text(exc: BaseException, size: int | None = None) -> str:
+    """Why an upload failed, in plain words (the UI puts "Upload failed: " in front). The MCP client
+    wraps the real error in an exception group ("unhandled errors in a TaskGroup"); this finds the
+    innermost one and names it."""
+    seen = 0
+    while isinstance(exc, BaseExceptionGroup) and exc.exceptions and seen < 10:
+        exc, seen = exc.exceptions[0], seen + 1
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    what = f"the {_mb(size)} archive" if size else "the archive"
+    if status == 413:
+        return (f"the scanner refused {what} as too large (HTTP 413). The .zip travels base64-encoded inside "
+                f"the MCP request; MCP_MAX_UPLOAD_MB in the scanner's .env sets the limit (default 10 MB). "
+                f"Upload a smaller .zip (leave out node_modules, build output, data), or raise the limit "
+                f"and restart the scanner")
+    if status in (401, 403):
+        return (f"the scanner refused the request (HTTP {status}): uploads need the admin role "
+                f"(CHATBOT_ROLES=admin in chatbots/mcp_chatbot/.env)")
+    if status == 429:
+        return "the scanner is busy (HTTP 429): try again in a minute"
+    if isinstance(status, int):
+        return f"the scanner answered HTTP {status}"
+    if isinstance(exc, TimeoutError):
+        return "the scanner did not answer within 2 minutes"
+    if isinstance(exc, OSError):
+        return f"the scanner could not be reached ({type(exc).__name__})"
+    return f"{type(exc).__name__}: {exc}"[:300]
+
+
+def refusal_text(result: dict) -> str:
+    """The reason a tool call was refused: its ``error`` field, or the MCP error text."""
+    text = str(result.get("error") or result.get("text") or "no reason given")
+    return re.sub(r"^Error executing tool \w+:\s*", "", text)[:300]
+
+
 def mcp_json(result) -> dict:
     """An MCP tool result (text content blocks) -> its JSON object, or {"text": ...}."""
     text = _content_text(result).strip()
@@ -999,8 +1037,12 @@ class ApiServer:
                 if not tid or not name.lower().endswith(".zip"):
                     self._reply(400, {"error": "thread_id and a .zip filename are required"})
                     return
-                if length <= 0 or length > MAX_UPLOAD_BYTES:
-                    self._reply(413, {"error": f"the archive must be 1 byte to {MAX_UPLOAD_BYTES // 1048576} MB"})
+                if length <= 0:
+                    self._reply(400, {"error": "the archive is empty"})
+                    return
+                if length > MAX_UPLOAD_BYTES:
+                    self._reply(413, {"error": f"the archive is {_mb(length)}; at most "
+                                               f"{MAX_UPLOAD_BYTES // 1048576} MB can be attached"})
                     return
                 data = self.rfile.read(length)
                 if not data.startswith(b"PK\x03\x04"):
@@ -1014,10 +1056,13 @@ class ApiServer:
                     meta = asyncio.run_coroutine_threadsafe(
                         api.engine.upload(name, base64.b64encode(data).decode()), api.loop).result(120)
                 except Exception as exc:  # noqa: BLE001 - reported to the UI
-                    self._reply(502, {"error": f"upload failed: {str(exc)[:300]}"})
+                    reason = upload_error_text(exc, length)
+                    log.warning("Upload of %s failed: %s", name, reason)
+                    self._reply(502, {"error": reason})
                     return
                 if not isinstance(meta, dict) or not UPLOAD_ID_RE.match(str(meta.get("upload_id") or "")):
-                    self._reply(502, {"error": str((meta or {}).get("error") or "upload refused")[:300]})
+                    self._reply(502, {"error": "the scanner refused it: "
+                                               + refusal_text(meta if isinstance(meta, dict) else {})})
                     return
                 att = {"upload_id": meta["upload_id"], "filename": str(meta.get("filename") or name)[:120],
                        "sha256": str(meta.get("sha256") or "")[:64], "size": length,

@@ -520,7 +520,11 @@ function showAttachment(att) {
 async function zipProblem(file) {
   if (!file) return 'Choose a .zip file.';
   if (!/\.zip$/i.test(file.name)) return 'Only .zip archives are accepted.';
-  if (file.size === 0 || file.size > MAX_ZIP) return 'The archive must be at most 10 MB.';
+  if (file.size === 0) return 'The archive is empty.';
+  if (file.size > MAX_ZIP) {
+    return 'The archive is ' + (file.size / 1048576).toFixed(1) + ' MB; at most ' + (MAX_ZIP / 1048576)
+      + ' MB can be attached. Leave out node_modules, build output and data, then zip again.';
+  }
   const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
   if (!(head[0] === 0x50 && head[1] === 0x4b && head[2] === 0x03 && head[3] === 0x04)) return 'This is not a zip archive.';
   return '';
