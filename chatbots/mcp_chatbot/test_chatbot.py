@@ -356,3 +356,27 @@ def test_scope_is_shown_in_the_approval_and_the_result():
     r = {"target_url": "https://app.example/", "scan_scope": "code", "severity_counts": {}, "findings": []}
     assert "source code only" in sc.scan_result_markdown(r)
     assert "**tested:** website only" in sc.scan_result_markdown({**r, "scan_scope": None})
+
+
+def test_upload_errors_name_the_real_cause():
+    import httpx
+
+    req = httpx.Request("POST", "http://127.0.0.1:8765/mcp")
+    too_big = httpx.HTTPStatusError("413", request=req, response=httpx.Response(413, request=req))
+    wrapped = ExceptionGroup("unhandled errors in a TaskGroup", [too_big])
+    msg = sc.upload_error_text(wrapped, 9 * 1048576 + 500_000)
+    assert msg.startswith("the scanner refused the 9.5 MB archive as too large (HTTP 413)")
+    assert "MCP_MAX_UPLOAD_MB" in msg and "TaskGroup" not in msg
+    assert "busy" in sc.upload_error_text(httpx.HTTPStatusError(
+        "429", request=req, response=httpx.Response(429, request=req)))
+    assert sc.upload_error_text(ExceptionGroup("g", [ConnectionRefusedError()])).startswith("the scanner could not")
+    assert "HTTP 401" in sc.upload_error_text(httpx.HTTPStatusError(
+        "401", request=req, response=httpx.Response(401, request=req)))
+    assert sc.upload_error_text(ExceptionGroup("g", [ValueError("bad zip")])) == "ValueError: bad zip"
+
+
+def test_refusals_show_the_servers_reason():
+    text = {"text": "Error executing tool upload_code: role(s) scanner lack permission 'scan:source'."}
+    assert sc.refusal_text(text) == "role(s) scanner lack permission 'scan:source'."
+    assert sc.refusal_text({"error": "not a zip"}) == "not a zip"
+    assert sc.refusal_text({}) == "no reason given"

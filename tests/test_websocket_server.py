@@ -161,3 +161,23 @@ def test_no_api_documentation_endpoints():
         assert client.get(path).status_code in (401, 404), path
     routes = {getattr(r, "path", "") for r in app.routes}
     assert not routes & {"/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"}
+
+
+def test_mcp_accepts_bodies_as_large_as_mcp_max_upload_mb_allows(monkeypatch):
+    """upload_code sends the .zip base64-encoded: the /mcp body limit follows MCP_MAX_UPLOAD_MB
+    (the SDK's 4 MiB default answered HTTP 413 for zips above ~3 MB)."""
+    from pentest_agent import websocket_server as ws
+    from pentest_agent.config import settings
+
+    monkeypatch.setattr(settings, "mcp_max_upload_mb", 10)
+    limit = ws.mcp_request_body_limit()
+    assert limit >= 10 * 1024 * 1024 * 4 // 3 + 1024 * 1024
+    monkeypatch.setattr(settings, "mcp_max_upload_mb", 1)
+    assert ws.mcp_request_body_limit() == 4 * 1024 * 1024  # never below the SDK default
+    monkeypatch.setattr(settings, "mcp_max_upload_mb", 10)
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    with TestClient(app) as client:
+        big = b'{"jsonrpc": "2.0", "id": 1, "method": "ping", "pad": "' + b"A" * (6 * 1024 * 1024) + b'"}'
+        assert client.post("/mcp", content=big, headers=headers).status_code != 413
+        huge = b'{"pad": "' + b"A" * (limit + 10) + b'"}'
+        assert client.post("/mcp", content=huge, headers=headers).status_code == 413

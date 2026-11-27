@@ -145,6 +145,22 @@ Scans need your approval (that is the authorization confirmation) and the `admin
 (`CHATBOT_ROLES=admin`, upload needs `scan:source`). **Python only for now**: other languages are only
 partly covered. Remove an attachment with **Remove**.
 
+### When an upload fails
+
+The message after **Upload failed:** says why:
+
+| Message | Cause | What to do |
+| --- | --- | --- |
+| *the archive is 12.3 MB; at most 10 MB can be attached* | Checked in the page / backend before sending | Zip only the source (leave out `node_modules`, build output, data). |
+| *the scanner refused the 9.5 MB archive as too large (HTTP 413)* | The scanner's limit is lower than 10 MB, or it runs an older version whose `/mcp` endpoint stopped at 4 MB | Lower the size, or raise `MCP_MAX_UPLOAD_MB` in the main `.env` and restart the scanner (the launcher restarts it with the UI). |
+| *the scanner refused the request (HTTP 401/403)* | The chatbot's token lacks the admin role | Set `CHATBOT_ROLES=admin` in `chatbots/mcp_chatbot/.env`. |
+| *the scanner refused it: role(s) scanner lack permission 'scan:source'* | The tool answered with a refusal; its reason is shown as is | Follow the reason (role, file type, size). |
+| *the scanner is busy (HTTP 429)* / *could not be reached* | Rate limit or queue / scanner not running | Wait a minute / start the UI launcher again. |
+
+The archive is sent base64-encoded inside the MCP request (about 4/3 of its size); the scanner sizes
+its `/mcp` request limit from `MCP_MAX_UPLOAD_MB` for that. Earlier versions kept the MCP SDK's 4 MiB
+default, so zips above about 3 MB failed with *unhandled errors in a TaskGroup*.
+
 ## Guardrails
 
 Three deterministic layers in `mcp_chatbot/guardrails.py`. They need no LLM call, so they cost no

@@ -31,7 +31,7 @@ import urllib.parse as up
 from typing import ClassVar
 
 # codestyle: PEP 8 coding standard (stdlib; imported here, so before the sandbox audit hook)
-from scopeguard import codestyle
+from scopeguard import codestyle, gitignore
 from scopeguard.engine import A01, A02, A03, A05, A07, JS_RECOMMENDATIONS, JS_RULES, XSS
 from scopeguard.limits import OOM_EXIT_CODE
 from scopeguard.textsafe import strip_hyperlinks
@@ -48,7 +48,39 @@ MAX_TOTAL_BYTES = 60_000_000
 MAX_FINDINGS = 500
 SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "venv", ".venv", "env", "__pycache__", "dist",
              "build", ".next", ".nuxt", "vendor", "bower_components", ".tox", ".mypy_cache",
-             ".pytest_cache", "coverage", ".idea", ".vscode", "target"}
+             ".pytest_cache", ".ruff_cache", "coverage", ".idea", ".vscode", "target"}
+# Folders the code SAST does not analyse although they are packed and inspected (archive safety,
+# bundle comparison): assistant / editor configuration such as Claude Code's .claude/.
+NOT_ANALYSED_DIRS = frozenset({".claude"})
+ANALYSIS_SKIP_DIRS = frozenset(SKIP_DIRS) | NOT_ANALYSED_DIRS
+# Model weights / serialized models: skipped by name and never opened (not even sniffed or hashed).
+# .tf stays analysed: it is Terraform. A pickle is code that runs when loaded; it is not reported.
+MODEL_WEIGHT_EXT = (".pkl", ".pickle", ".joblib", ".pt", ".pth", ".ckpt", ".safetensors", ".bin", ".params",
+                    ".h5", ".hdf5", ".keras", ".pb", ".tflite", ".onnx", ".npy", ".npz", ".gguf", ".ggml",
+                    ".mlmodel", ".caffemodel")
+# TensorFlow checkpoint / SavedModel shards: model.ckpt.index, model.ckpt.meta,
+# model.ckpt.data-00000-of-00001, variables/variables.index, variables.data-00000-of-00001.
+_MODEL_SHARD = re.compile(r"(?:\.ckpt(?:-\d+)?\.(?:index|meta|data-\d+-of-\d+)|\.data-\d{5}-of-\d{5}"
+                          r"|^variables\.index|^checkpoint)$", re.IGNORECASE)
+
+
+def is_model_weight(name: str) -> bool:
+    """A model weight / serialized model / checkpoint shard, by file name only (never opened)."""
+    base = name.replace("\\", "/").rsplit("/", 1)[-1]
+    return base.lower().endswith(MODEL_WEIGHT_EXT) or bool(_MODEL_SHARD.search(base))
+
+
+# Documentation files are not analysed (secrets in them are still caught by the archive checks of
+# sensitive files only); Markdown prose is not code.
+NOT_ANALYSED_EXT = (".md", ".markdown",
+                    # documents and diagrams (secrets typed into them are not reported)
+                    ".txt", ".text", ".rst", ".adoc", ".asciidoc", ".tex", ".rtf", ".pdf", ".doc", ".docx", ".odt",
+                    ".pages", ".epub", ".ppt", ".pptx", ".odp", ".key", ".xls", ".xlsx", ".ods", ".numbers",
+                    ".mmd", ".mermaid", ".puml", ".plantuml", ".drawio",
+                    *MODEL_WEIGHT_EXT,
+                    # images (SVG too: an SVG with script is not reported)
+                    ".png", ".jpg", ".jpeg", ".jpe", ".jfif", ".gif", ".bmp", ".dib", ".webp", ".ico", ".icns",
+                    ".tif", ".tiff", ".avif", ".heic", ".heif", ".svg", ".svgz", ".psd", ".raw", ".cr2", ".nef")
 TEXT_EXT = {".py", ".pyw", ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".php", ".rb", ".go", ".java",
             ".kt", ".cs", ".rs", ".scala", ".sh", ".bash", ".ps1", ".sql", ".env", ".ini", ".cfg",
             ".conf", ".toml", ".yml", ".yaml", ".json", ".xml", ".properties", ".tf", ".html", ".htm",
@@ -1000,6 +1032,11 @@ def scan_style(res: Results, text: str, *, where: str) -> None:
         res.style_findings += 1
 
 
+def is_not_analysed(name: str) -> bool:
+    """Files the code SAST leaves out: pytest files, documents / diagrams / images, model weights."""
+    return is_pytest_file(name) or name.lower().endswith(NOT_ANALYSED_EXT) or is_model_weight(name)
+
+
 def is_pytest_file(name: str) -> bool:
     """A pytest test module or fixture file (pytest's discovery names: test_*.py, *_test.py,
     conftest.py). Not part of the SAST: tests hold deliberately vulnerable snippets."""
@@ -1007,17 +1044,35 @@ def is_pytest_file(name: str) -> bool:
     return low.endswith(".py") and (low.startswith("test_") or low.endswith("_test.py") or low == "conftest.py")
 
 
+def _read_gitignore(dirpath: str, root: str, ignore: gitignore.GitIgnore) -> None:
+    """Add the rules of ``dirpath``/.gitignore (if any) to ``ignore``."""
+    path = os.path.join(dirpath, ".gitignore")
+    if os.path.isfile(path) and not os.path.islink(path):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read(256 * 1024)
+        except OSError:
+            return
+        base = os.path.relpath(dirpath, root).replace(os.sep, "/")
+        ignore.add(text, "" if base == "." else base)
+
+
 def scan_source(res: Results, root: str, progress: Progress | None = None) -> None:
     progress = progress or Progress()
     root_real = _norm(root)
     total = 0
+    ignore = gitignore.GitIgnore()  # the project's own .gitignore files: what it ignores is not analysed
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
-        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        _read_gitignore(dirpath, root, ignore)
+        here = os.path.relpath(dirpath, root).replace(os.sep, "/")
+        prefix = "" if here == "." else here + "/"
+        dirnames[:] = sorted(d for d in dirnames if d not in ANALYSIS_SKIP_DIRS
+                             and not ignore.ignored(prefix + d, is_dir=True))
         for name in sorted(filenames):
             path = os.path.join(dirpath, name)
             rel = os.path.relpath(path, root).replace(os.sep, "/")
             key = f"source:{rel}"
-            if progress.skip(key) or is_pytest_file(name):
+            if progress.skip(key) or is_not_analysed(name) or ignore.ignored(rel):
                 continue
             if os.path.islink(path) and not _under(path, [root_real]):
                 res.stats["symlinks_outside"] += 1

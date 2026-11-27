@@ -270,6 +270,7 @@ Run everything with `uv run pytest` (no real network or LLM calls; the golden li
 | `tests/test_dast_native.py` | Native DAST end to end against the built-in vulnerable target, unknown profiles, unreachable targets. |
 | `tests/test_dedupe.py` | Findings from recon, DAST and probes that describe the same issue are merged. |
 | `tests/test_engine_read_timeout.py` | A page whose body stalls after the headers must not abort the whole scan. |
+| `tests/test_gitignore.py` | The project's .gitignore decides what the code SAST leaves out (scopeguard/gitignore.py). |
 | `tests/test_golden_dataset.py` | Golden dataset: schema, deterministic data checks, model checks, judge gate, drift verdict. |
 | `tests/test_graph_structure.py` | Graph wiring: the SAST sub-agent as a subgraph node, edges declared for drawing, and message compaction with LangChain's SummarizationMiddleware. |
 | `tests/test_graph_validate_node.py` | The graph's first node: authorization flag, guardrails, allowed domains. |
