@@ -130,7 +130,7 @@
     <div class="card"><span class="n">14</span><h3>The Prober</h3><code>run_probes</code><span class="chip c-web">visits your website</span>
       <p>Double-checks the plan, then runs those checks with reading requests only. If your site is slow to answer, it waits a little longer each time and tries again (up to 5 times); a check that still gets no answer is listed as not run. A resumed scan doesn't ask the AI again.</p></div>
     <div class="card"><span class="n">15</span><h3>The Collector</h3><code>aggregate</code>
-      <p>Gathers every finding, removes duplicates, notes what couldn't be tested, and writes a factual summary where each statement points to its source, like [S1].</p></div>
+      <p>Gathers every finding, removes duplicates (one issue on one page counts once, even when several helpers found it; the console's live counts and risk grade count the same way), notes what couldn't be tested, and writes a factual summary where each statement points to its source, like [S1].</p></div>
     <div class="card"><span class="n">16</span><h3>The AI writer</h3><code>summarize</code><span class="chip c-ai">uses the AI</span>
       <p>Drafts a friendlier executive summary, kept only if every claim cites a real finding; otherwise the Collector's summary stays.</p></div>
     <div class="card"><span class="n">17</span><h3>The Publisher</h3><code>report</code>
