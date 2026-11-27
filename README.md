@@ -608,7 +608,10 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
   line length (79), tabs / indentation not a multiple of four, trailing whitespace, missing final newline,
   several imports on one line, wildcard imports, bare `except`, `== None` / `== True`, lambdas assigned to
   names, mutable default arguments (flake8-bugbear B006), CapWords classes and snake_case functions, and
-  files that do not parse. Each rule is **one finding per file** (count + first line numbers), `info`, or
+  files that do not parse, plus **ruff lint rules** re-implemented with `ast` (ruff itself cannot run in the
+  sandbox): unused imports (F401), unused variables (F841), f-strings without placeholders (F541),
+  redefinitions (F811), `is` with a literal (F632) and ambiguous names `l`/`O`/`I` (E741). Each rule is
+  **one finding per file** (count + first line numbers), `info`, or
   `low` for the ones that hide bugs; at most 150 per scan so they never crowd out security findings. The
   report gets a **Coding standard (PEP 8)** table with a fix per rule and the PEP 8 link; MCP
   `get_scan.code_sast.coding_standard`, the console and the chatbot show the same summary.
@@ -646,7 +649,11 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
   CLI; only into context `kind-<cluster>`; the first run takes minutes); apply `k8s/sandbox.yaml` if missing, ship the
   analyzer, run the isolation probe; at most `K8S_STARTUP_WAIT_SECONDS`), then serve the console; the start-up
   banner's **Code sandbox** line says where scans run. No `kubectl`, no Docker, or any step failing: scans run
-  in the Python process sandbox (`SANDBOX_REQUIRE_KUBERNETES=false`, the default). By hand:
+  in the Python process sandbox (`SANDBOX_REQUIRE_KUBERNETES=false`, the default). **Auto-check at start**
+  (`code_upload.autodetect_sandbox`, also in `scopeguard-mcp`): with no `kubectl` on the machine the run switches
+  to the process sandbox by itself and skips the bring-up and its retries, so a machine without Docker /
+  Kubernetes / Calico works without editing `.env` (`.env` is not changed; install kubectl later and the next
+  start tries Kubernetes again). The console's Source code card shows the auto-check line. By hand:
   `uv run python -m scopeguard.k8s --bootstrap`.
 * **Retried until ready**: while the cluster is down (Docker or the kind node started later), the server retries
   the bring-up every `K8S_RETRY_SECONDS` (60; 0 = start-up only) and switches new scans to Kubernetes Jobs once
@@ -767,10 +774,18 @@ Reports end with a **Sources** section; finding headings carry their `[Sn]` anch
 
 ## What the native DAST does (all GET/HEAD/OPTIONS/TRACE, non-destructive)
 
-Spider (same-scope only) • security headers • cookie flags • CORS origin reflection • directory listing •
-verbose errors • exposed `.env`/`.git`/phpinfo (soft-404 aware) • reflected input (unencoded `< " '`) •
-error-based SQLi signature • open redirect (never followed) • path traversal signature • risky HTTP methods
-(TRACE) • password-over-HTTP • POST form without CSRF token • JS static rules (eval, innerHTML, secrets...).
+**Every check, rule and test file is listed in [docs/SECURITY_CHECKS.md](docs/SECURITY_CHECKS.md)**
+(generated from the code by `uv run python scripts/gen_checks_doc.py`; a test fails when it is stale).
+
+Spider (same-scope only) • security headers, weak CSP and short HSTS • cookie flags • CORS (arbitrary, null,
+prefix/suffix origins, preflight) • host header injection • directory listing • verbose errors • exposed
+files (`.env*`, `.git`, `.svn`, `.npmrc`, SSH keys, AWS credentials, Spring actuator, pprof, dumps, admin
+tools, cross-domain policies; soft-404 aware, content never copied) • API docs and GraphQL introspection •
+third-party scripts without Subresource Integrity • HTTPS forms posting to HTTP • reverse tabnabbing •
+reflected / script-context / javascript: URL XSS • SSTI • CRLF • SQLi (error, boolean, time) • command
+injection (time) • open redirect (never followed) • path traversal • risky HTTP methods (TRACE) •
+password-over-HTTP • POST form without CSRF token • JS static rules (eval, DOM XSS, innerHTML, string timers,
+source maps, secrets and API tokens...).
 
 `quick` = passive only. `standard` = + active checks. `aggressive`/`auth_deep` = more targets + payload variants.
 

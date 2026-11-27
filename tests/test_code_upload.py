@@ -635,3 +635,31 @@ def test_missing_kubernetes_is_a_normal_python_sandbox_run_not_a_red_flag():
                         "fallback_expected": False}}
     assert red_flags_from_result(quiet) == [] and red_flags_from_result(loud)
     assert code_upload.red_flags(quiet) == [] and code_upload.red_flags(loud)
+
+
+# ---------------------------------------------------------------- sandbox auto-check at startup
+@pytest.mark.parametrize("tools, require, expected, changed", [
+    ({}, False, "process", True),                               # no kubectl: process sandbox for this run
+    ({"kubectl": "/usr/bin/kubectl"}, False, "kubernetes", False),  # kubectl: Kubernetes tried first
+    ({}, True, "kubernetes", False),                            # required: refuse instead of switching
+])
+def test_sandbox_autodetect_picks_the_backend_the_machine_supports(monkeypatch, tools, require, expected, changed):
+    import shutil
+
+    monkeypatch.setattr(settings, "sandbox_backend", "kubernetes")
+    monkeypatch.setattr(settings, "sandbox_require_kubernetes", require)
+    monkeypatch.setattr(shutil, "which", lambda name: tools.get(name))
+    result = code_upload.autodetect_sandbox()
+    assert result["backend"] == expected and result["changed"] is changed
+    assert settings.sandbox_backend == expected  # the effective setting for this run (.env untouched)
+    assert code_upload.sandbox_status(refresh=True)["autodetect"]["reason"] == result["reason"]
+
+
+def test_sandbox_autodetect_leaves_an_explicit_process_backend_alone(monkeypatch):
+    import shutil
+
+    monkeypatch.setattr(settings, "sandbox_backend", "process")
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    assert code_upload.autodetect_sandbox() == {"configured_backend": "process", "tools": {"kubectl": False,
+                                                "docker": False}, "changed": False, "backend": "process",
+                                                "reason": "SANDBOX_BACKEND=process"}
