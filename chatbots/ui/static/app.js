@@ -213,6 +213,45 @@ function profileField(sel) {
   return wrap;
 }
 
+// What the scan tests (human in the loop: you decide in the approval card). Code scopes need
+// source code in the request (an attached .zip or a git link) and the admin role.
+const SCOPES = [
+  { value: 'website_and_code', label: 'Website + source code', desc: 'The site, then your code (sandbox). One report.' },
+  { value: 'website', label: 'Website only', desc: 'The site only; any attached code is left out.' },
+  { value: 'code', label: 'Source code only', desc: 'Only your code (sandbox). No request is sent to the site; its URL only labels the report.' },
+];
+
+function scopeSelect(args) {
+  const sel = el('select');
+  const hasCode = !!(args.upload_id || args.git_url);
+  SCOPES.forEach((s) => {
+    const codeScope = s.value !== 'website';
+    const opt = el('option', null, s.label + (codeScope && !hasCode ? ' (attach code first)' : ''));
+    opt.value = s.value;
+    opt.disabled = codeScope && (!hasCode || !isAdmin());
+    sel.appendChild(opt);
+  });
+  const wanted = SCOPES.some((s) => s.value === args.scan_scope) ? args.scan_scope : (hasCode ? 'website_and_code' : 'website');
+  const usable = Array.from(sel.options).filter((o) => !o.disabled).map((o) => o.value);
+  sel.value = usable.indexOf(wanted) >= 0 ? wanted : 'website';
+  return sel;
+}
+
+function scopeField(sel, args) {
+  const wrap = field('What to test', sel);
+  const desc = el('div', 'desc');
+  const show = () => {
+    const s = SCOPES.find((x) => x.value === sel.value);
+    desc.textContent = s ? s.desc : '';
+    if (!(args.upload_id || args.git_url)) desc.textContent += ' To include code: attach a .zip (+ Code) or give a public .git link.';
+    else if (!isAdmin()) desc.textContent += ' Code scopes ' + ADMIN_HINT + '.';
+  };
+  sel.addEventListener('change', show);
+  show();
+  wrap.appendChild(desc);
+  return wrap;
+}
+
 function profileOk(sel) {
   return scannerProfiles.some((p) => p.profile === sel.value && p.allowed);
 }
@@ -246,7 +285,8 @@ function approvalForm(req) {
     allowedHosts.forEach((h) => { const o = el('option'); o.value = 'https://' + h + '/'; list.appendChild(o); });
     target.setAttribute('list', listId);
     const profile = profileSelect(args.profile);
-    const auth = checkbox('I own this site or am authorized to test it', false);
+    const scope = scopeSelect(args);
+    const auth = checkbox('I own this site (and the code, if any) or am authorized to test it', false);
     const hint = el('div', 'hint');
     const check = () => {
       const host = hostOf(target.value.trim());
@@ -256,13 +296,18 @@ function approvalForm(req) {
     };
     target.addEventListener('input', check);
     check();
-    node.append(field('Target', target), list, profileField(profile), auth.wrap, hint);
+    node.append(field('Target', target), list, scopeField(scope, args), profileField(profile), auth.wrap, hint);
     return {
       node,
       run: 'Run scan',
-      ready: () => auth.box.checked && !!hostOf(target.value.trim()) && profileOk(profile),
-      watch: [auth.box, target, profile],
-      collect: () => ({ ...args, target_url: target.value.trim(), profile: profile.value }),
+      ready: () => auth.box.checked && !!hostOf(target.value.trim()) && profileOk(profile) && !scope.options[scope.selectedIndex].disabled,
+      watch: [auth.box, target, profile, scope],
+      collect: () => {
+        const out = { ...args, target_url: target.value.trim(), profile: profile.value, scan_scope: scope.value };
+        // Website only: the code is not part of this scan (the scanner refuses the mix).
+        if (scope.value === 'website') { delete out.upload_id; delete out.git_url; delete out.git_ref; }
+        return out;
+      },
     };
   }
   if (req.name === 'start_demo_scan') {

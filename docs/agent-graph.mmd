@@ -6,6 +6,7 @@ config:
 graph TD;
 	__start__([<p>__start__</p>]):::first
 	validate(validate)
+	choose_scope(choose_scope)
 	recon(recon)
 	auth(auth)
 	auth_challenge(auth_challenge)
@@ -29,6 +30,9 @@ graph TD;
 	auth -.-> code_source;
 	auth_challenge -.-> aggregate;
 	auth_challenge -.-> code_source;
+	choose_scope -.-> aggregate;
+	choose_scope -.-> code_source;
+	choose_scope -.-> recon;
 	code_sast -.-> aggregate;
 	code_sast -.-> sandbox_check;
 	code_sast -.-> sast\3arun_sast;
@@ -50,7 +54,7 @@ graph TD;
 	summarize -.-> report;
 	validate -.-> aggregate;
 	validate -.-> audit;
-	validate -.-> recon;
+	validate -.-> choose_scope;
 	subgraph sast
 	sast\3arun_sast(run_sast)
 	end

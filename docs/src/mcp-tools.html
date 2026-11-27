@@ -151,7 +151,8 @@ every scan.</p>
         <h3>2 · Run</h3>
         <div class="tool"><span class="n">start_scan</span>
           <span class="d">target_url, authorization_confirmed, profile (quick / standard / aggressive / auth_deep),
-            credentials by name, optional upload_id or git_url (code analysed in the code_sast step, same report)</span>
+            credentials by name, optional upload_id or git_url (code analysed in the code_sast step, same report),
+            scan_scope: website_and_code / website / code (code only: no request to the site)</span>
           <div class="tags"><span class="tag you">you approve</span><span class="tag web">target</span><span class="tag guard">rules</span></div></div>
         <div class="tool"><span class="n">start_demo_scan</span>
           <span class="d">built-in vulnerable app on loopback; no allowlist entry needed</span>
@@ -187,7 +188,7 @@ every scan.</p>
         <div class="tool"><span class="n">upload_code</span>
           <span class="d">a .zip (name, MIME type, zip signature checked) or code files; admin; nothing unpacked here; Python only for now</span>
           <div class="tags"><span class="tag guard">rules</span><span class="tag disk">disk</span></div></div>
-        <div class="tool"><span class="n">start_scan(upload_id | git_url)</span>
+        <div class="tool"><span class="n">start_scan(upload_id | git_url, scan_scope)</span>
           <span class="d">the code is analysed only as the scan's code_sast step (git: .git link, reachability checked, optional branch/tag): Kubernetes Job, no network; non-Python files marked partial, executables/batch files as warnings, shell scripts as notes; get_scan.code_sast</span>
           <div class="tags"><span class="tag you">you approve</span><span class="tag guard">rules</span></div></div>
       </div>
@@ -232,7 +233,7 @@ every scan.</p>
   <div class="label">A typical session (chatbot)</div>
   <div class="steps">
     <div class="step"><div class="num">1</div><b>scan_policy</b><span>the agent checks the target is allowed and which profiles it may use</span></div>
-    <div class="step you"><div class="num">2</div><b>approval form</b><span>you pick target and profile and tick "I own or may test this site"</span></div>
+    <div class="step you"><div class="num">2</div><b>approval form</b><span>you pick target, what to test (website + code / website only / code only) and profile, and tick "I own or may test this"</span></div>
     <div class="step"><div class="num">3</div><b>start_scan</b><span>runs with authorization_confirmed=true, set by your approval</span></div>
     <div class="step"><div class="num">4</div><b>get_scan · watch_scan</b><span>each step streams in; the verified result block appears</span></div>
     <div class="step"><div class="num">5</div><b>explain · get_report</b><span>the agent explains the findings; full report on request</span></div>

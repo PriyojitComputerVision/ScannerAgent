@@ -29,6 +29,7 @@ from urllib.parse import urlsplit
 
 MAX_INPUT_CHARS = 4000
 SCAN_PROFILES = ("quick", "standard", "aggressive", "auth_deep")
+SCAN_SCOPES = ("website_and_code", "website", "code")
 
 # Zero-width, bidi override/isolate and other invisible format characters.
 _INVISIBLE = re.compile("[\u00ad\u034f\u061c\u115f\u1160\u17b4\u17b5\u180e\u200b-\u200f\u202a-\u202e"
@@ -239,6 +240,14 @@ def check_tool_args(name: str, args: dict | None) -> str | None:
             return "pass either upload_id or git_url, not both"
         if not (isinstance(args["git_url"], str) and _GIT_URL_RE.match(args["git_url"])):
             return "git_url must be a public repository's .git clone link, e.g. https://github.com/owner/repo.git"
+    if name == "start_scan" and args.get("scan_scope") is not None:
+        if args["scan_scope"] not in SCAN_SCOPES:
+            return f"scan_scope must be one of: {', '.join(SCAN_SCOPES)}"
+        has_code = args.get("upload_id") is not None or args.get("git_url") is not None
+        if args["scan_scope"] != "website" and not has_code:
+            return "scan_scope website_and_code / code needs source code (an attached .zip or a git_url)"
+        if args["scan_scope"] == "website" and has_code:
+            return "scan_scope website tests no source code: drop upload_id / git_url"
     if name == "start_scan" and args.get("git_ref") is not None and not (
             isinstance(args["git_ref"], str) and _GIT_REF_RE.match(args["git_ref"])):
         return "git_ref must be a branch or tag name"

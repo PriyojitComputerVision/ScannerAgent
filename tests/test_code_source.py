@@ -212,9 +212,11 @@ def _mini_graph():
     g.add_node("code_sast", graph.code_sast_node)
     g.add_node("sandbox_check", lambda s: {"phase": "next_step"})
     g.add_node("sast", lambda s: {"phase": "next_step"})
+    g.add_node("aggregate", lambda s: {"phase": "aggregate_step"})  # code-only scans end their code steps here
     g.add_edge(START, "code_source")
     g.add_edge("sandbox_check", END)
     g.add_edge("sast", END)
+    g.add_edge("aggregate", END)
     return g.compile(checkpointer=InMemorySaver())
 
 

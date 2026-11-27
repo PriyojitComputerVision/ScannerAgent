@@ -190,3 +190,14 @@ async def test_leaking_answer_is_replaced():
     answer = next(e for e in events if e["type"] == "answer")
     assert answer["replaced"] and "can't share my instructions" in answer["text"]
     assert any(e["type"] == "guardrail" and e["stage"] == "output" for e in events)
+
+
+def test_scan_scope_argument_is_checked():
+    url = "https://app.example/"
+    ok = {"target_url": url, "upload_id": "a" * 32}
+    assert g.check_tool_args("start_scan", {**ok, "scan_scope": "code"}) is None
+    assert g.check_tool_args("start_scan", {**ok, "scan_scope": "website_and_code"}) is None
+    assert g.check_tool_args("start_scan", {"target_url": url, "scan_scope": "website"}) is None
+    assert "one of" in g.check_tool_args("start_scan", {**ok, "scan_scope": "all"})
+    assert "needs source code" in g.check_tool_args("start_scan", {"target_url": url, "scan_scope": "code"})
+    assert "tests no source code" in g.check_tool_args("start_scan", {**ok, "scan_scope": "website"})
