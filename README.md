@@ -92,7 +92,12 @@ decide after launch). The page fits one
 screen: the top bar and footer stay put while the left rail and the main stage scroll on their own
 (on narrow screens it becomes one scrolling page). The **Agent pipeline** card follows the scope: code
 only shows every step but `recon`, the website steps marked "code only" as they pass on; website only
-and website + code show every step. The built-in target (`127.0.0.1` only) is offered as a
+and website + code show every step.
+**Risk grade**: score = critical × 10 + high × 6 + medium × 3 + low × 1 (info counts 0); F for any
+critical finding or a score of 60 or more, D ≥ 30, C ≥ 12, B > 0, A = 0. The live counters, radar, grade
+and findings list count each issue once per URL, merged exactly as the report merges them
+(`pentest_agent/dedupe.py`: recon, DAST and the probes often report the same missing header), so the live
+numbers match the final report; hover the gauge for the breakdown. The built-in target (`127.0.0.1` only) is offered as a
 one-click demo target. Flags: `--no-browser`, `--no-target`, `--host`, `--port`.
 
 There is no login screen, and API authentication stays on:
