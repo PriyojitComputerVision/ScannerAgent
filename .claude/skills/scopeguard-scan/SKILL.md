@@ -130,7 +130,9 @@ Severity: critical N · high N · medium N · low N · info N
   reflected parameter), so recommend checking each one before treating it as confirmed.
 - Group the long tail of identical header findings ("Missing CSP" on 12 pages) into one line
   instead of listing each.
-- Mention coverage limits from red flags, for example "login area not tested: no credentials".
+- Mention coverage limits from red flags, for example "login area not tested: no credentials", or
+  "csp_weakness at /: the site sent no response ... (tried 5 times), so this check was not run" (the site
+  was slow or throttling; a later scan may cover it). That is a coverage gap, not a vulnerability.
   A clean scan of half the app is not a clean app.
 
 ## Fixing findings in the user's code

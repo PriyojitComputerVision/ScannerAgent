@@ -137,7 +137,7 @@
         <div class="tags"><i class="tag llm">LLM</i></div>
 
         <div class="node"><span class="t">run_probes</span><span>runs the stored plan</span></div>
-        <div class="mod"><b>tools/probe_runner.py</b><span>re-validates the plan; GET/OPTIONS only, no generated code</span></div>
+        <div class="mod"><b>tools/probe_runner.py</b><span>re-validates the plan; GET/OPTIONS only, no generated code; timeouts retried (tenacity: up to 5 tries, backoff 2-16 s, at least Retry-After, 180 s budget per scan)</span></div>
         <div class="tags"><i class="tag web">target</i></div>
 
         <div class="node"><span class="t">aggregate</span><span>deterministic</span></div>
