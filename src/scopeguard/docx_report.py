@@ -448,12 +448,19 @@ def build_docx(path: str | Path, *, title: str, target: str, meta: list[tuple[st
         row.cells[0].width, row.cells[1].width, row.cells[2].width = b.Cm(2.6), b.Cm(1.8), b.Cm(12.6)
     b.para(space_after=2)
 
-    if red_flags:
-        doc.add_heading("Red Flags", level=2)
-        for rf in red_flags:
+    if red_flags:  # errors red, warnings amber, notes grey (scope notices are not failures)
+        from scopeguard import flag_levels
+
+        doc.add_heading("Red Flags and Notes", level=2)
+        colours = {"error": "9B2C2C", "warn": "9A5B0B", "note": "5B6475"}
+        for rf in flag_levels.ordered(red_flags):
             p = doc.add_paragraph(style="List Bullet")
+            tag = p.add_run(flag_levels.label(rf).upper() + "  ")
+            tag.bold = True
+            tag.font.color.rgb = b.RGB.from_string(colours[flag_levels.level(rf)])
             r = p.add_run(_clean(rf))
-            r.font.color.rgb = b.RGB.from_string("9B2C2C")
+            if flag_levels.level(rf) != "note":
+                r.font.color.rgb = b.RGB.from_string(colours[flag_levels.level(rf)])
 
     if recommendations:
         doc.add_heading("Source Code: How to Fix (per rule)", level=2)

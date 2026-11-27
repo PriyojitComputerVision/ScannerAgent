@@ -28,7 +28,17 @@ every route, including
 refused and safety-stopped runs, ends in `audit` (see [Audit log](#audit-log)). `sast` runs only when the sandbox check is off (`SANDBOX_CHECK_ENABLED=false`):
 otherwise `sandbox_check` applies the same JavaScript rules inside its Kubernetes Job
 (`scopeguard-job-<session_id>`, deleted after the run). Orange lines mark the only traffic to the target website (in scope only).
-Only `plan_probes` and `summarize` call the LLM, and both have offline fallbacks. Reports,
+Only `plan_probes` and `summarize` call the LLM, and both have offline fallbacks. When the probe
+planner's context is larger than one chunk, `PROBE_CONTEXT_CHUNK_CHARS` (60000 characters, about 15k tokens;
+lower it for a model with a smaller request limit), it is not cut off: the crawled paths are compressed
+to real paths only (parameterized, API, auth, admin and upload paths first, one per folder), the findings
+are split into chunks of that size with LangChain's `RecursiveCharacterTextSplitter`, each chunk is
+summarized (`prompts/probe_context_summary.md`, wrapped as untrusted data; deterministic without an
+LLM or when a call fails), the summaries are summarized again until they fit, and then the plan runs
+(`subagents/probe_context.py`). Red flags come in three levels (`scopeguard/flag_levels.py`): **errors**
+(something failed, e.g. "SSO login failed"), **warnings** (less coverage) and **notes** (scope information
+such as hosts outside the scan scope, which are recorded and never contacted). Reports, `get_scan`
+(`red_flags_by_level`), the console log and the chatbot label them so. Reports,
 SQLite checkpoints (AES-encrypted with `CHECKPOINT_ENCRYPTION_KEY`) and the audit log are written under `data/`.
 Checkpoints are written asynchronously (aiosqlite + LangGraph's `AsyncSqliteSaver`, no synchronous SQLite anywhere);
 the server and every MCP / A2A scan share the file through WAL mode with a busy timeout
@@ -948,6 +958,7 @@ root, committed with the repository. Each step loads its prompt with
 | `run_summary.md` | rolling summary of the run once the message history grows long (`graph.maybe_summarize`) |
 | `executive_summary.md` | executive summary in the report, citing `[Sn]` sources (`graph.generate_executive_summary`) |
 | `probe_plan_system.md` | custom probe plan (`subagents/codegen_subagent.generate_probe_plan`) |
+| `probe_context_summary.md` | summary of one part of a large probe-planner context (`subagents/probe_context`) |
 | `golden_judge.md` | LLM-as-judge in the golden-dataset drift check (`evals/golden.judge_messages`) |
 | `content_injection_reminder.md` | reminder paired with untrusted page content (`guardrails.content_injection_system_reminder`); `{{start}}` and `{{end}}` are replaced with the untrusted-content markers |
 
@@ -956,6 +967,7 @@ is set. The scanner still runs and still writes reports, but without LLM-written
 
 * the executive summary is the deterministic, fully cited summary, and `fallback_reason` names the missing file;
 * the probe plan is the built-in default plan;
+* a large probe-planner context is summarized deterministically (most severe lines first);
 * the golden check reports `NOT_EVALUATED` when the judge prompt is missing.
 
 Notes:

@@ -12,7 +12,7 @@ import json
 import re
 from pathlib import Path
 
-from scopeguard import citations
+from scopeguard import citations, flag_levels
 
 ORDER = ["critical", "high", "medium", "low", "info"]
 
@@ -44,7 +44,9 @@ table{border-collapse:collapse;margin:.6em 0}td,th{border:1px solid var(--line);
 .critical{--sev:var(--critical)}.high{--sev:var(--high)}.medium{--sev:var(--medium)}.low{--sev:var(--low)}.info{--sev:var(--info)}
 .small{color:var(--mut);font-size:.88rem;overflow-wrap:anywhere}
 pre{background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px 10px;overflow-x:auto;white-space:pre-wrap;overflow-wrap:anywhere}
-ol.sources li{margin:4px 0;overflow-wrap:anywhere}:target{outline:2px solid var(--link);outline-offset:2px}
+ol.sources li{margin:4px 0;overflow-wrap:anywhere}
+ul.flags{padding-left:1.1em}.flag{margin:4px 0;overflow-wrap:anywhere}.flag b{font-size:.75rem;text-transform:uppercase;margin-right:.4em}
+.flag.error b{color:var(--critical)}.flag.warn b{color:var(--medium)}.flag.note b{color:var(--info)}.flag.note{color:var(--mut)}:target{outline:2px solid var(--link);outline-offset:2px}
 """
 
 
@@ -140,8 +142,10 @@ def render_html(*, title: str, meta: list[tuple[str, str]], summary: str | None,
     b += ["<h2>Findings by severity</h2>", "<table><tr><th>Severity</th><th>Count</th></tr>"]
     b += [f'<tr><td><span class="sev {s}">{s}</span></td><td>{counts[s]}</td></tr>' for s in ORDER]
     b.append("</table>")
-    if red_flags:
-        b += ["<h2>Red flags</h2>", "<ul>"] + [f"<li>{_e(r)}</li>" for r in red_flags] + ["</ul>"]
+    if red_flags:  # errors, then warnings, then notes (out-of-scope hosts etc. are notes, not failures)
+        b += ["<h2>Red flags and notes</h2>", '<ul class="flags">'] + [
+            f'<li class="flag {flag_levels.level(r)}"><b>{flag_levels.label(r)}</b> {_e(r)}</li>'
+            for r in flag_levels.ordered(red_flags)] + ["</ul>"]
     if recommendations:
         b += ["<h2>Recommendations</h2>",
               "<table><tr><th>Severity</th><th>Issue</th><th>Count</th><th>What to do</th></tr>"]
@@ -269,7 +273,8 @@ def render_markdown(target: str, result: dict, mode: str, sources: dict[str, dic
     if result.get("endpoints"):
         L += ["## Backend/API endpoints referenced", ""] + [f"- {e}" for e in result["endpoints"][:50]] + [""]
     if result["red_flags"]:
-        L += ["", "## Red flags", ""] + [f"- {x}" for x in result["red_flags"]]
+        L += ["", "## Red flags and notes", ""] + [f"- **{flag_levels.label(x)}:** {x}"
+                                                  for x in flag_levels.ordered(result["red_flags"])]
     L += ["", "## Detailed findings", ""]
     for x in f:
         sid = citations.source_for_finding(sources, x)

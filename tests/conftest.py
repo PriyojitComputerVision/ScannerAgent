@@ -47,7 +47,7 @@ os.environ.setdefault("SQUID_ACL_TARGET_FILE", str(_TMP_ROOT / "squid" / "allowe
 if not os.environ.get("GOLDEN_LIVE"):
     _PROMPTS = _TMP_ROOT / "prompts"
     _PROMPTS.mkdir()
-    for _name in ("run_summary", "executive_summary", "probe_plan_system", "golden_judge"):
+    for _name in ("run_summary", "executive_summary", "probe_plan_system", "golden_judge", "probe_context_summary"):
         (_PROMPTS / f"{_name}.md").write_text(f"stub {_name} prompt", encoding="utf-8")
     (_PROMPTS / "content_injection_reminder.md").write_text(
         "stub reminder {{start}} {{end}}", encoding="utf-8")

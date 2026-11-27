@@ -119,7 +119,7 @@ def test_docx_report_is_structured(tmp_path):
 
     assert "Security Test Report" in text
     assert "Executive Summary" in headings and "Detailed Findings" in headings
-    assert "Sources" in headings and "Red Flags" in headings
+    assert "Sources" in headings and "Red Flags and Notes" in headings
     assert any("F-01" in h and "Reflected XSS" in h for h in headings)  # most severe first
     # real tables (facts, severity strip, overview, per-finding details), not "| a | b |" text
     assert len(document.tables) >= 5 and "|---" not in text
