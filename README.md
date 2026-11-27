@@ -480,10 +480,20 @@ attribute rule.
 Attributes live on the server in `keys/abac_subjects.json` (`ABAC_SUBJECTS_FILE`), keyed by the
 token's `sub`: the client id of `/auth/token`, the `--sub` of `pentest-auth token`, `mcp` for
 stdio MCP, `mcp-chatbot` for the chatbot. Nothing new goes into the JWT, so a change applies on
-the next request without a new token. When it is missing, the file is created with no limits
-(`{"default": {}, "subjects": {}}`) as soon as anything starts: every command (server, CLI,
-`pentest-auth`, scripts) loads the settings first, and that creates it. An existing file is
-never overwritten. A subject with its own entry uses that entry; everyone else uses `default`.
+the next request without a new token. It is one file for every entry point (console, MCP stdio
+and HTTP, A2A, chatbot, scripts): a relative path is taken from the repo root, not the current
+folder. When it is missing or empty (0 bytes, `{}`, or `{"default": {}, "subjects": {}}`), it is
+filled with defaults as soon as anything starts, because every command loads the settings first:
+
+- `default` lists every value of each attribute (all entry points, all four profiles, all three
+  scopes, no tenant sharing). That allows everything, the same as no limits, and shows what can
+  be narrowed.
+- `subjects` has entries for the token subjects the repo itself uses, each limited to the entry
+  point it scans through: `mcp` (stdio MCP), `mcp-chatbot`, `mcp-test-client`
+  (`scripts/mcp_client.py`) and `demo-console` (the browser console) for their own channel, and
+  `a2a-test-client` (`scripts/a2a_client.py`) for A2A.
+
+A file with any entry of its own is never overwritten. A subject with its own entry uses that entry; everyone else uses `default`.
 An attribute you leave out adds no limit.
 
 ```bash

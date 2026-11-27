@@ -202,3 +202,41 @@ def test_file_is_created_when_the_settings_load(subjects_file, tmp_path, monkeyp
     env = {**os.environ, "ABAC_SUBJECTS_FILE": str(other), "PYTHONPATH": src}
     subprocess.run([sys.executable, "-c", "import pentest_agent.config"], env=env, check=True, timeout=120)
     assert json.loads(other.read_text(encoding="utf-8")) == abac.STARTER
+
+
+def test_defaults_hold_data_and_change_nothing(subjects_file):
+    """The starter spells out every attribute and the repo's own subjects; nothing is refused."""
+    data = abac.STARTER
+    assert set(data["default"]["allowed_via"]) == set(abac.VIA)
+    assert set(data["default"]["allowed_profiles"]) == set(abac.PROFILES)
+    assert set(data["default"]["allowed_scan_scopes"]) == set(abac.SCOPES)
+    assert {"mcp", "mcp-chatbot", "mcp-test-client", "a2a-test-client", "demo-console"} <= set(data["subjects"])
+    abac.AttributesFile.model_validate(data)  # a valid attributes file
+    abac.ensure_file()
+    for via in abac.VIA:  # any other subject: every entry point, profile and scope
+        assert _decide(via=via, profile="auth_deep").allowed
+    mcp = rbac.Principal(sub="mcp", roles=["admin"])
+    assert _decide(mcp, via="mcp").allowed and not _decide(mcp, via="a2a").allowed
+
+
+@pytest.mark.parametrize("content", ["", "  \n", "{}", '{"default": {}}', '{"default": {}, "subjects": {}}',
+                                     '{"default": null, "subjects": {}}'])
+def test_an_empty_file_is_filled_with_the_defaults_at_start(subjects_file, content):
+    subjects_file.write_text(content, encoding="utf-8")
+    assert abac.ensure_file() == subjects_file
+    assert json.loads(subjects_file.read_text(encoding="utf-8")) == abac.STARTER
+
+
+@pytest.mark.parametrize("content", ['{"subjects": {"bob": {}}}', '{"default": {"tenant": "x"}}', "{broken"])
+def test_a_file_with_data_or_an_invalid_one_is_never_touched(subjects_file, content):
+    subjects_file.write_text(content, encoding="utf-8")
+    assert abac.ensure_file() is None
+    assert subjects_file.read_text(encoding="utf-8") == content
+
+
+def test_a_relative_path_is_the_one_file_under_the_repo_root(monkeypatch, tmp_path):
+    from pentest_agent import config
+
+    monkeypatch.setattr(settings, "abac_subjects_file", "./keys/abac_subjects.json")
+    monkeypatch.chdir(tmp_path)  # started from another folder: still the repo's file
+    assert abac.subjects_file() == (config.REPO_ROOT / "keys" / "abac_subjects.json").resolve()
