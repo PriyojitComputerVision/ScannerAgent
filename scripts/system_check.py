@@ -255,8 +255,7 @@ def check_kubernetes(bootstrap: bool):
     if ok:
         record("sandbox", "kubernetes sandbox", PASS, f"Jobs in {settings.k8s_namespace}, isolation verified{steps}")
     else:
-        status = FAIL if settings.sandbox_require_kubernetes else WARN
-        record("sandbox", "kubernetes sandbox", status, f"{why}{steps}")
+        record("sandbox", "kubernetes sandbox", WARN, f"{why}{steps} (code scans use the Python process sandbox)")
 
 
 @guarded("sandbox", "where code scans run")
@@ -272,9 +271,7 @@ def check_effective(skip_k8s: bool):
         from pentest_agent import code_upload
 
         ok, _why = k8s.cluster_status(code_upload.k8s_config())
-        where = ("Kubernetes Jobs" if ok else
-                 "error: Kubernetes required but not ready" if settings.sandbox_require_kubernetes
-                 else "Python process sandbox (Kubernetes not ready)")
+        where = "Kubernetes Jobs" if ok else "Python process sandbox (Kubernetes not ready)"
     record("sandbox", "where code scans run", FAIL if where.startswith("error") else INFO, where)
 
 

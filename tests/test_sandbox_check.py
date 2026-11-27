@@ -203,18 +203,8 @@ def test_pid_check_never_kills_the_process():
 
 
 # ------------------------------------------------------------------ Kubernetes Job backend
-def test_kubernetes_required_but_unavailable_fails_the_check_with_a_reason(planted, monkeypatch):
-    monkeypatch.setattr(settings, "sandbox_backend", "kubernetes")
-    monkeypatch.setattr(settings, "sandbox_require_kubernetes", True)
-    update = sc.execute_sandbox_check(crawled_pages=[], allowed_domains=["x.test"],
-                                      source_path=str(planted / "backend"))
-    assert update["phase"] == "sandbox_check_failed"
-    assert any("Kubernetes sandbox unavailable" in f for f in update["red_flags"])
-
-
 def test_kubernetes_unavailable_falls_back_to_process_with_a_red_flag(planted, monkeypatch):
     monkeypatch.setattr(settings, "sandbox_backend", "kubernetes")
-    monkeypatch.setattr(settings, "sandbox_require_kubernetes", False)
     update = sc.execute_sandbox_check(crawled_pages=[], allowed_domains=["x.test"],
                                       source_path=str(planted / "backend"))
     assert update["phase"] == "sandbox_check_complete"

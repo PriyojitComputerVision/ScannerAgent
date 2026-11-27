@@ -87,12 +87,10 @@ def test_tampered_archive_is_refused():
         code_upload.analyse_for_scan(meta["upload_id"], ADMIN, session_id="web-g")
 
 
-def test_kubernetes_not_ready_is_a_pre_guardrail_failure(monkeypatch):
+def test_kubernetes_not_ready_falls_back_to_the_process_sandbox(monkeypatch):
     monkeypatch.setattr(settings, "sandbox_backend", "kubernetes")
-    monkeypatch.setattr(settings, "sandbox_require_kubernetes", True)
-    meta = code_upload.store_bytes(ADMIN, "a.zip", "application/zip", _zip([("a.py", "x = 1")]))
-    with pytest.raises(code_upload.UploadError, match="sandbox_ready"):
-        code_upload.analyse_for_scan(meta["upload_id"], ADMIN, session_id="web-g")
+    ok, why = code_upload._sandbox_ready()  # no cluster in tests: never a refusal, always the fallback
+    assert ok is True and "process sandbox is used instead" in why
 
 
 # ------------------------------------------------------------------ post-guardrails

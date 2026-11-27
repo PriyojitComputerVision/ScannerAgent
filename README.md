@@ -437,8 +437,8 @@ source code and the website content it fetched from the target:
   deny-all NetworkPolicy, read-only root filesystem, dropped capabilities, non-root user;
   the analyzer also installs an audit hook, so any attempt to reach the network, run a
   process, or write/read outside the inputs is **blocked and reported as a red flag**.
-  Without a cluster the check fails with the reason (`SANDBOX_REQUIRE_KUBERNETES=true`,
-  the default) or runs in the local process sandbox with a red flag (`false`).
+  Without a usable cluster the check always runs in the local Python process sandbox instead
+  (a note says why); there is no setting that refuses.
 * **Website content** is fetched by the agent from the **target only** (scope-checked,
   no redirects followed); links, redirects and `fetch()`/script `src` to other hosts
   are listed and flagged, never downloaded. Page text that tries to steer an AI agent
@@ -648,8 +648,8 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
   `k8s/kind-calico.yaml` and install the pinned, SHA-256-checked Calico (`K8S_AUTO_CREATE_CLUSTER`, needs the kind
   CLI; only into context `kind-<cluster>`; the first run takes minutes); apply `k8s/sandbox.yaml` if missing, ship the
   analyzer, run the isolation probe; at most `K8S_STARTUP_WAIT_SECONDS`), then serve the console; the start-up
-  banner's **Code sandbox** line says where scans run. No `kubectl`, no Docker, or any step failing: scans run
-  in the Python process sandbox (`SANDBOX_REQUIRE_KUBERNETES=false`, the default). **Auto-check at start**
+  banner's **Code sandbox** line says where scans run. No `kubectl`, no Docker / kind / Calico, or any step
+  failing: scans run in the Python process sandbox, always (falling back is not a setting). **Auto-check at start**
   (`code_upload.autodetect_sandbox`, also in `scopeguard-mcp`): with no `kubectl` on the machine the run switches
   to the process sandbox by itself and skips the bring-up and its retries, so a machine without Docker /
   Kubernetes / Calico works without editing `.env` (`.env` is not changed; install kubectl later and the next
@@ -661,7 +661,8 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
   after) and shows the last check and retry.
 * **Network isolation is proven, not assumed** (`K8S_VERIFY_NETWORK_ISOLATION=true`): before trusting a
   cluster, a probe Job in the sandbox namespace tries to reach the Kubernetes API and the internet; if
-  either connects, scans are refused ("NetworkPolicy ... is NOT enforced"). Some network plugins (kind's
+  either connects, the cluster is not trusted ("NetworkPolicy ... is NOT enforced") and code scans run in the
+  Python process sandbox instead, with a red flag (code is never sent to an unisolated pod). Some network plugins (kind's
   default, Docker Desktop) ignore NetworkPolicy: use Calico or Cilium. Local kind cluster with Calico: see [k8s/README.md](k8s/README.md).
 * **Memory and out-of-memory crashes**: the limit is **5×** the content size
   (`SANDBOX_MEMORY_MULTIPLIER`; floor 256 MB, ceiling 4 GB). If the pod is OOMKilled (or the analyzer
