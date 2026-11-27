@@ -68,6 +68,24 @@ STYLE_RULES: dict[str, tuple[str, str, str, str, str]] = {
     "STYLE_SYNTAX_ERROR": ("E999", "low", "the file does not parse as Python 3",
                            ("Fix the syntax error so the file can be analysed (and run); only the line-based style "
                            "checks were applied to it."), STYLE_CWE),
+    # ---- ruff lint rules (Pyflakes F, pycodestyle E741)
+    "STYLE_UNUSED_IMPORT": ("F401", "low", "imported but unused",
+                            ("Remove unused imports (ruff F401); if the import is a re-export, list it in __all__ "
+                            "or import it 'as' itself."), "CWE-1164"),
+    "STYLE_UNUSED_VARIABLE": ("F841", "info", "local variable assigned but never used",
+                              ("Remove the assignment (ruff F841), or name it '_' when the value is deliberately "
+                              "ignored; unused variables often mean a forgotten check."), "CWE-563"),
+    "STYLE_FSTRING_NO_PLACEHOLDER": ("F541", "info", "f-string without any placeholders",
+                                     "Drop the f prefix (ruff F541), or add the {value} that was meant to be there.",
+                                     STYLE_CWE),
+    "STYLE_REDEFINED": ("F811", "low", "function or class redefined in the same scope",
+                        ("Rename or remove one definition (ruff F811): the later one silently replaces the first, "
+                        "so the first is dead code."), "CWE-561"),
+    "STYLE_IS_LITERAL": ("F632", "low", "'is' / 'is not' compared with a str, bytes or number literal",
+                         ("Use == / != for values (ruff F632); 'is' checks identity, which for literals depends on "
+                         "interpreter caching and is a real bug."), "CWE-597"),
+    "STYLE_AMBIGUOUS_NAME": ("E741", "info", "ambiguous variable name (l, O or I)",
+                             "Don't name variables l, O or I (ruff E741, PEP 8): they look like 1 and 0.", STYLE_CWE),
 }
 RECOMMENDATIONS = {rid: rule[3] for rid, rule in STYLE_RULES.items()}
 
@@ -171,8 +189,115 @@ class _Visitor(ast.NodeVisitor):
     visit_AsyncFunctionDef = _function
 
 
+# ---------------------------------------------------------------- ruff lint rules (ast, never executed)
+_FUNCS = (ast.FunctionDef, ast.AsyncFunctionDef)
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+_NOT_REDEFINITION = re.compile(r"overload|setter|getter|deleter|register|dispatch")
+
+
+def _shallow(node: ast.AST):
+    """Every node inside ``node`` except the insides of nested functions, classes and lambdas."""
+    stack = list(ast.iter_child_nodes(node))
+    while stack:
+        child = stack.pop()
+        yield child
+        if not isinstance(child, _SCOPES):
+            stack.extend(ast.iter_child_nodes(child))
+
+
+def _annotation_names(tree: ast.AST) -> set[str]:
+    """Names used inside string annotations ("Order", "list[Item]"): they count as used imports."""
+    out: set[str] = set()
+    for node in ast.walk(tree):
+        anns = []
+        if isinstance(node, _FUNCS):
+            anns = [a.annotation for a in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)]
+            anns.append(node.returns)
+        elif isinstance(node, ast.AnnAssign):
+            anns = [node.annotation]
+        for ann in anns:
+            for sub in ast.walk(ann) if ann is not None else ():
+                if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
+                    out.update(re.findall(r"[A-Za-z_]\w*", sub.value))
+    return out
+
+
+def _unused_imports(tree: ast.Module, hits: dict[str, list[int]]) -> None:
+    """F401: module-level imports no code refers to (re-exports via __all__ or 'import x as x' are kept)."""
+    used = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | _annotation_names(tree)
+    for node in ast.walk(tree):  # __all__ = ["name", ...]
+        if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "__all__" for t in node.targets):
+            used |= {e.value for e in ast.walk(node.value) if isinstance(e, ast.Constant) and isinstance(e.value, str)}
+    body = [n for n in tree.body]
+    for node in tree.body:  # imports inside top-level try/if blocks count too
+        if isinstance(node, ast.Try | ast.If):
+            body += [n for n in ast.walk(node) if isinstance(n, ast.Import | ast.ImportFrom)]
+    for node in body:
+        if isinstance(node, ast.ImportFrom) and node.module == "__future__":
+            continue
+        if isinstance(node, ast.Import | ast.ImportFrom):
+            for alias in node.names:
+                if alias.name == "*" or (alias.asname and alias.asname == alias.name.split(".")[-1]):
+                    continue
+                bound = alias.asname or (alias.name.split(".")[0] if isinstance(node, ast.Import) else alias.name)
+                if bound not in used:
+                    _add(hits, "STYLE_UNUSED_IMPORT", node.lineno)
+
+
+def _unused_variables(fn: ast.FunctionDef | ast.AsyncFunctionDef, hits: dict[str, list[int]]) -> None:
+    """F841: a local assigned with a plain 'name = ...' and never read (closures count as reads)."""
+    nodes = list(_shallow(fn))
+    if any(isinstance(n, ast.Global | ast.Nonlocal) for n in nodes) or any(
+            isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("locals", "vars")
+            for n in nodes):
+        return
+    loads = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    for n in nodes:
+        targets = n.targets if isinstance(n, ast.Assign) else [n.target] if (
+            isinstance(n, ast.AnnAssign) and n.value is not None) else []
+        for t in targets:
+            if isinstance(t, ast.Name) and not t.id.startswith("_") and t.id not in loads:
+                _add(hits, "STYLE_UNUSED_VARIABLE", n.lineno)
+
+
+def _redefinitions(body: list[ast.stmt], hits: dict[str, list[int]]) -> None:
+    """F811: the same function / class name defined twice in one block (overloads, property setters and
+    singledispatch registrations are not redefinitions)."""
+    seen: dict[str, ast.AST] = {}
+    for node in body:
+        if not isinstance(node, (*_FUNCS, ast.ClassDef)):
+            continue
+        decorators = " ".join(ast.dump(d) for d in getattr(node, "decorator_list", []))
+        if node.name in seen and not _NOT_REDEFINITION.search(decorators):
+            _add(hits, "STYLE_REDEFINED", node.lineno)
+        seen[node.name] = node
+
+
+def _lint_checks(tree: ast.Module, hits: dict[str, list[int]]) -> None:
+    _unused_imports(tree, hits)
+    format_specs = {id(n.format_spec) for n in ast.walk(tree)
+                    if isinstance(n, ast.FormattedValue) and n.format_spec is not None}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, *_FUNCS)):
+            _redefinitions(node.body, hits)
+        if isinstance(node, ast.JoinedStr) and id(node) not in format_specs \
+                and not any(isinstance(v, ast.FormattedValue) for v in node.values):
+            _add(hits, "STYLE_FSTRING_NO_PLACEHOLDER", node.lineno)
+        elif isinstance(node, ast.Compare):
+            operands = [node.left, *node.comparators]
+            for i, op in enumerate(node.ops):
+                if isinstance(op, ast.Is | ast.IsNot) and any(
+                        isinstance(s, ast.Constant) and isinstance(s.value, str | bytes | int | float)
+                        and not isinstance(s.value, bool) for s in (operands[i], operands[i + 1])):
+                    _add(hits, "STYLE_IS_LITERAL", node.lineno)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store) and node.id in ("l", "O", "I") or isinstance(node, ast.arg) and node.arg in ("l", "O", "I"):
+            _add(hits, "STYLE_AMBIGUOUS_NAME", node.lineno)
+        elif isinstance(node, _FUNCS):
+            _unused_variables(node, hits)
+
+
 def check_python(text: str) -> dict[str, list[int]]:
-    """Rule id -> line numbers (1-based) of PEP 8 issues in one Python file."""
+    """Rule id -> line numbers (1-based) of PEP 8 and ruff lint issues in one Python file."""
     hits: dict[str, list[int]] = {}
     _line_checks(text, hits)
     try:
@@ -182,6 +307,7 @@ def check_python(text: str) -> dict[str, list[int]]:
         return hits
     _indent_checks(text, hits)
     _Visitor(hits).visit(tree)
+    _lint_checks(tree, hits)
     return hits
 
 
@@ -207,9 +333,19 @@ def findings_for_file(text: str, where: str) -> list[dict]:
     return out
 
 
+_RUFF_FAMILIES = {"F": "Pyflakes", "E741": "pycodestyle"}
+
+
 def code_label(code: str) -> str:
-    """'PEP 8 E501'; B-codes are flake8-bugbear checks that go beyond PEP 8."""
-    return f"flake8-bugbear {code}" if code.startswith("B") else f"PEP 8 {code}"
+    """'PEP 8 E501'; B-codes are flake8-bugbear checks that go beyond PEP 8; the ruff lint rules are named
+    after their family ('ruff F401 (Pyflakes)'). F403 stays 'PEP 8' (PEP 8 itself says no wildcard imports)."""
+    if code.startswith("B"):
+        return f"flake8-bugbear {code}"
+    if code != "F403":
+        for prefix, family in _RUFF_FAMILIES.items():
+            if code.startswith(prefix):
+                return f"ruff {code} ({family})"
+    return f"PEP 8 {code}"
 
 
 def summary(findings: list[dict]) -> dict:

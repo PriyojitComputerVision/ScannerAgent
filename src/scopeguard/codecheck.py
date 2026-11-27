@@ -62,7 +62,8 @@ CODE_EXT = PY_EXT | JS_EXT | PHP_EXT | {".rb", ".go", ".java", ".kt", ".cs", ".s
 # (id, regex, severity, category, description, cwe, recommendation, languages or None=all)
 # "languages" holds file extensions and/or lower-case base names (e.g. "package.json").
 _SECRET_RULE_IDS = {"AWS_ACCESS_KEY", "PRIVATE_KEY", "HARDCODED_SECRET", "PASSWORD_LITERAL",
-                    "GENERIC_TOKEN", "HARDCODED_JWT_SECRET"}
+                    "GENERIC_TOKEN", "HARDCODED_JWT_SECRET", "JS_API_TOKEN", "GOOGLE_API_KEY",
+                    "DB_URL_WITH_PASSWORD"}
 # Untrusted request input, per framework (Express, Flask/Django/FastAPI, PHP, Java servlets).
 REQ = (r"(?:\breq\.(?:query|params|body|headers|cookies)\b|\brequest\.(?:args|form|values|GET|POST|json|data|"
        r"query_params|path_params|cookies|headers|get_json)\b|\$_(?:GET|POST|REQUEST|COOKIE|SERVER)\b|"
@@ -362,6 +363,73 @@ BACKEND_RULES = [
      "Parse untrusted XML with defusedxml (defusedxml.ElementTree.fromstring).", PY_EXT),
     ("WORLD_WRITABLE", re.compile(r"\bchmod\s+(?:-R\s+)?0?777\b|\bos\.chmod\([^)\n]*0o?777"), "medium", A05,
      "World-writable permissions (777).", "CWE-732", "Grant the narrowest permissions needed (e.g. 750/640).", None),
+
+    # ---- More Python weaknesses
+    ("PY_ARCHIVE_EXTRACTALL", re.compile(r"\.extractall\s*\((?![^)\n]*\bfilter\s*=)"), "medium", A01,
+     "Archive extracted without a path filter (Zip Slip / tar path traversal: '../' or absolute member names).",
+     "CWE-22", ("Use tarfile's extraction filter (tar.extractall(dest, filter='data'), Python 3.12+) and, for zip "
+                "files, check every member's resolved path stays inside the target folder."), PY_EXT),
+    ("PY_TEMPFILE_MKTEMP", re.compile(r"\btempfile\.mktemp\s*\("), "medium", A01,
+     "tempfile.mktemp() returns a name another process can claim first (race condition).", "CWE-377",
+     "Use tempfile.mkstemp() / NamedTemporaryFile / TemporaryDirectory, which create the file atomically.", PY_EXT),
+    ("PY_ASSERT_SECURITY", re.compile(
+        r"^\s*assert\b[^\n]*\b(?:is_admin|is_staff|is_superuser|is_authenticated|authorized|has_perm\w*|"
+        r"permission\w*|role|owner\w*|current_user|request\.user)\b"), "medium", A01,
+     "Security check written as assert (removed when Python runs with -O).", "CWE-617",
+     "Use an explicit if-check that raises / returns 403 (e.g. if not user.is_admin: abort(403)).", PY_EXT),
+    ("WEAK_CIPHER", re.compile(
+        r"\b(?:DES3?|ARC4|ARC2|Blowfish|RC4)\.new\s*\(|\bMODE_ECB\b|\balgorithms\.(?:TripleDES|Blowfish|ARC4|"
+        r"IDEA|CAST5)\b|\bmodes\.ECB\s*\(|createCipheriv?\s*\(\s*['\"](?:des|rc4|bf|aes-\d+-ecb)"),
+     "medium", A02, "Weak or broken cipher / ECB mode (patterns in the plaintext stay visible).", "CWE-327",
+     "Use AES-GCM or ChaCha20-Poly1305 (cryptography's AESGCM / Fernet) with a random nonce per message.", None),
+    ("STATIC_IV", re.compile(r"(?i)\b(?:iv|nonce)\s*=\s*(?:b['\"][^'\"\n]*['\"]|bytes\s*\(\s*\d+\s*\)|['\"]"
+                             r"[0-9a-f]{16,}['\"])"), "medium", A02,
+     "Constant IV / nonce (reusing it breaks the cipher's security).", "CWE-329",
+     ("Generate a fresh random IV/nonce per encryption (os.urandom(12) for AES-GCM) and store it with the "
+     "ciphertext."), PY_EXT | JS_EXT),
+    ("FAST_HASH_PASSWORD", re.compile(
+        r"(?i)\bhashlib\.(?:md5|sha1|sha224|sha256|sha384|sha512|blake2b|blake2s)\s*\([^)\n]*passw"
+        r"|createHash\s*\([^)\n]*\)\s*\.update\s*\([^)\n]*passw"), "high", A02,
+     "Password hashed with a fast general-purpose hash (cheap to brute-force).", "CWE-916",
+     "Hash passwords with argon2id, bcrypt or scrypt (argon2-cffi, passlib, bcrypt); never plain SHA/MD5.",
+     PY_EXT | JS_EXT),
+    ("TIMING_UNSAFE_COMPARE", re.compile(
+        r"(?i)\b\w*(?:signature|hmac|digest|api_?key|secret|token)\w*\s*[!=]==?\s*\w*(?:signature|hmac|digest|"
+        r"key|secret|token|expected|provided)\w*\b"), "low", A02,
+     "Secret compared with == (the time taken leaks how many characters matched).", "CWE-208",
+     "Compare secrets in constant time: hmac.compare_digest(a, b) / crypto.timingSafeEqual.", PY_EXT | JS_EXT),
+    ("SQLALCHEMY_TEXT_FORMAT", re.compile(r"""(?<![\w.])text\s*\(\s*(?:f["']|["'][^"'\n]*["']\s*(?:%|\.format\(|\+))"""),
+     "high", A03, "SQLAlchemy text() built with string formatting (SQL injection).", "CWE-89",
+     "Use bound parameters: text('SELECT ... WHERE id = :id') with .bindparams(id=value) / execute(stmt, {...}).",
+     PY_EXT),
+    ("DB_URL_WITH_PASSWORD", re.compile(
+        r"""(?i)\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|redis|amqp|mssql)(?:\+\w+)?://"""
+        r"""[^:/\s'"@]+:(?P<v>[^@\s'"/{}$]{3,})@"""), "high", A07,
+     "Database / broker URL with an embedded password.", "CWE-798",
+     "Read the connection URL (or at least the password) from the environment or a secret store; rotate it now.",
+     None),
+    ("OLD_TLS_VERSION", re.compile(
+        r"\bssl\.PROTOCOL_(?:SSLv2|SSLv3|TLSv1(?:_1)?)\b|\bTLSVersion\.(?:TLSv1|TLSv1_1|SSLv3)\b|"
+        r"""\b(?:secureProtocol|minVersion)\s*:\s*['"](?:SSLv3_method|TLSv1_method|TLSv1_1_method|TLSv1|TLSv1\.1)['"]"""),
+     "medium", A02, "Old SSL/TLS version allowed (SSLv3 / TLS 1.0 / 1.1 are broken or deprecated).", "CWE-326",
+     "Require TLS 1.2 or newer (ssl.TLSVersion.TLSv1_2 as minimum_version; minVersion: 'TLSv1.2').", None),
+    ("NODE_VM_RUN", re.compile(r"\bvm\.(?:runInNewContext|runInThisContext|runInContext|compileFunction)\s*\("),
+     "medium", A03, "Node vm runs code; it is not a security sandbox (escape to the host process).", "CWE-94",
+     "Never run untrusted code with vm; use an isolated process/container, or avoid dynamic code.", JS_EXT),
+    ("PY_HTTP_PLAINTEXT_CALL", re.compile(
+        r"""\b(?:requests|httpx)\.(?:get|post|put|patch|delete|request)\s*\(\s*(?:['"]GET['"]\s*,\s*)?['"]"""
+        r"""http://(?!localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\])"""), "low", A02,
+     "API called over plaintext HTTP (credentials and data travel unencrypted).", "CWE-319",
+     "Call the API over https://.", PY_EXT),
+    ("DJANGO_ALLOWED_HOSTS_ALL", re.compile(r"""\bALLOWED_HOSTS\s*=\s*\[\s*['"]\*['"]"""), "medium", A05,
+     "Django ALLOWED_HOSTS accepts any host (Host header attacks, password-reset poisoning).", "CWE-644",
+     "List your real domain names in ALLOWED_HOSTS.", PY_EXT),
+    ("BIND_ALL_INTERFACES_DEBUG", re.compile(
+        r"""\.run\([^)\n]*host\s*=\s*['"]0\.0\.0\.0['"][^)\n]*debug\s*=\s*True|\.run\([^)\n]*debug\s*=\s*True"""
+        r"""[^)\n]*host\s*=\s*['"]0\.0\.0\.0['"]"""), "high", A05,
+     "Debug server listening on every network interface (the debugger allows remote code execution).",
+     "CWE-489", "Never run the debug server on 0.0.0.0; use a production server (gunicorn/uvicorn) with debug off.",
+     PY_EXT),
 ]
 
 # Routes with a path id, per framework: (regex, group with the path, group with the method or None).

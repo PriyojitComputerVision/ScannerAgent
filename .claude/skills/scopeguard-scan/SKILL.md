@@ -198,8 +198,9 @@ the admin role (`scan:source`) and covers **Python projects only for now** (tell
    executable / script files with a `level`: `warning` for .exe/.bat/.cmd (point them out, ask the user to
    review them), `note` for .sh shell scripts (mention briefly).
    The report's Guardrails table has the code step's pre- and post-guardrail verdicts.
-   Python files are also checked against PEP 8: `STYLE_*` findings (info, or low for bare `except`,
-   mutable defaults and wildcard imports), one per rule and file, summarised in
+   Python files are also checked against PEP 8 and ruff lint rules (unused imports/variables, F541, F811,
+   F632, E741): `STYLE_*` findings (info, or low for the ones that hide bugs: bare `except`, mutable
+   defaults, wildcard / unused imports, redefinitions, `is` with a literal), one per rule and file, summarised in
    `code_sast.coding_standard`. Mention them after the security findings, never instead of them.
 4. When the user asks how to fix a code finding, read the report (`get_report(format="json")`):
    `code_upload.recommendations` has one entry per rule with a `remediation` block (steps, a before/after

@@ -29,7 +29,8 @@ def test_every_rule_is_found_once_per_file():
     assert set(hits) == {"STYLE_MULTIPLE_IMPORTS", "STYLE_WILDCARD_IMPORT", "STYLE_CLASS_NAME", "STYLE_FUNCTION_NAME",
                          "STYLE_MUTABLE_DEFAULT", "STYLE_BARE_EXCEPT", "STYLE_COMPARE_TO_NONE",
                          "STYLE_COMPARE_TO_BOOL", "STYLE_LAMBDA_ASSIGNMENT", "STYLE_TRAILING_WHITESPACE",
-                         "STYLE_LINE_TOO_LONG", "STYLE_NO_FINAL_NEWLINE"}
+                         "STYLE_LINE_TOO_LONG", "STYLE_NO_FINAL_NEWLINE",
+                         "STYLE_UNUSED_IMPORT"}  # ruff F401: os and sys are never used
     findings = codestyle.findings_for_file("\n".join(["x = '" + "a" * 90 + "'"] * 20) + "\n", "source/a.py")
     (long_lines,) = findings
     assert long_lines["rid"] == "STYLE_LINE_TOO_LONG" and "20 time(s)" in long_lines["description"]
@@ -45,7 +46,7 @@ def test_clean_code_and_framework_names_are_not_flagged():
 def test_bugs_hidden_by_style_are_low_and_the_rest_info():
     by = {f["rid"]: f for f in codestyle.findings_for_file(BAD.replace("\tprint(value)\n", ""), "source/a.py")}
     assert {r for r, f in by.items() if f["severity"] == "low"} == {
-        "STYLE_BARE_EXCEPT", "STYLE_MUTABLE_DEFAULT", "STYLE_WILDCARD_IMPORT"}
+        "STYLE_BARE_EXCEPT", "STYLE_MUTABLE_DEFAULT", "STYLE_WILDCARD_IMPORT", "STYLE_UNUSED_IMPORT"}
     assert by["STYLE_BARE_EXCEPT"]["cwe"] == "CWE-396" and "(PEP 8 E722)" in by["STYLE_BARE_EXCEPT"]["title"]
     assert "(flake8-bugbear B006)" in by["STYLE_MUTABLE_DEFAULT"]["title"]  # not a PEP 8 code: said so
 

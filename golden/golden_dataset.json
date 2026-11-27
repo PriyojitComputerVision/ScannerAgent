@@ -47,6 +47,7 @@
           "Exposed environment file (.env)",
           "HARDCODED_SECRET: potentially unsafe JavaScript pattern",
           "HTTP TRACE method enabled",
+          "JS_API_TOKEN: potentially unsafe JavaScript pattern",
           "JS_EVAL: potentially unsafe JavaScript pattern",
           "JS_HTTP_URL: potentially unsafe JavaScript pattern",
           "JS_INNERHTML: potentially unsafe JavaScript pattern",
@@ -70,7 +71,7 @@
         ],
         "min_title_jaccard": 0.9,
         "severity_counts": {
-          "high": 11,
+          "high": 12,
           "info": 6,
           "low": 7,
           "medium": 9
@@ -80,7 +81,7 @@
         "max_pages": 30,
         "min_blocked_links": 1,
         "input_sha256": null,
-        "reference_sha256": "75e97106a6dfa719c4e3730bb1e8c1b0cddc26efc90d5465f8151a47d3be0d6e"
+        "reference_sha256": "ec55933d2d2f74a8bc2da20be131ee3d2a9b3f73affbe89c3af840779c3566ed"
       },
       "expectations": {
         "min_citations": 3,
@@ -97,7 +98,7 @@
         "min_words": 80,
         "max_words": 260
       },
-      "reference_summary": "The authorized standard-profile test crawled the in-scope pages and produced 33 findings: 11 high, 9 medium, 7 low and 6 informational. The high-severity issues need prompt remediation: a possible SQL injection on the product page, a path traversal that disclosed a local file, CRLF injection into a response header, an exposed .env file, four CORS misconfigurations that trust untrusted origins (arbitrary, null, prefix and suffix matches) with credentials, and client-side JavaScript containing a hardcoded secret, an AWS access key and use of eval. Medium-severity issues include reflected input without output encoding (possible XSS), an open redirect, directory listing, a password form served over plain HTTP, an enabled TRACE method, a session cookie without HttpOnly, a missing Content-Security-Policy, and JavaScript that writes to innerHTML and keeps tokens in web storage. Lower-severity items are missing hardening headers, a cookie without SameSite, a POST form without an anti-CSRF token, risky HTTP methods, and weak randomness and plain-HTTP URLs in JavaScript. Each statement cites its source finding under its own severity. Fix the injection, traversal, CORS and exposed secrets first, rotate any leaked keys, then re-test; results come from automated checks and should be validated before disclosure."
+      "reference_summary": "The authorized standard-profile test crawled the in-scope pages and produced 34 findings: 12 high, 9 medium, 7 low and 6 informational. The high-severity issues need prompt remediation: a possible SQL injection on the product page, a path traversal that disclosed a local file, CRLF injection into a response header, an exposed .env file, four CORS misconfigurations that trust untrusted origins (arbitrary, null, prefix and suffix matches) with credentials, and client-side JavaScript containing a hardcoded secret, an API token, an AWS access key and use of eval. Medium-severity issues include reflected input without output encoding (possible XSS), an open redirect, directory listing, a password form served over plain HTTP, an enabled TRACE method, a session cookie without HttpOnly, a missing Content-Security-Policy, and JavaScript that writes to innerHTML and keeps tokens in web storage. Lower-severity items are missing hardening headers, a cookie without SameSite, a POST form without an anti-CSRF token, risky HTTP methods, and weak randomness and plain-HTTP URLs in JavaScript. Each statement cites its source finding under its own severity. Fix the injection, traversal, CORS and exposed secrets first, rotate any leaked keys, then re-test; results come from automated checks and should be validated before disclosure."
     },
     {
       "id": "sim-quick",
@@ -133,6 +134,7 @@
           "Exposed environment file (.env)",
           "HARDCODED_SECRET: potentially unsafe JavaScript pattern",
           "HTTP TRACE method enabled",
+          "JS_API_TOKEN: potentially unsafe JavaScript pattern",
           "JS_EVAL: potentially unsafe JavaScript pattern",
           "JS_HTTP_URL: potentially unsafe JavaScript pattern",
           "JS_INNERHTML: potentially unsafe JavaScript pattern",
@@ -152,7 +154,7 @@
         ],
         "min_title_jaccard": 0.9,
         "severity_counts": {
-          "high": 8,
+          "high": 9,
           "info": 6,
           "low": 7,
           "medium": 7
@@ -162,7 +164,7 @@
         "max_pages": 30,
         "min_blocked_links": 1,
         "input_sha256": null,
-        "reference_sha256": "7c9d34a839ab0c166f3edb5a86337649aa0a9aa23555eadbd8f1c627b42dd302"
+        "reference_sha256": "45df99629a8948aef5dd79a3116d7811ecca07ada9f0915f88d0ca997394142e"
       },
       "expectations": {
         "min_citations": 2,
@@ -176,7 +178,7 @@
         "min_words": 60,
         "max_words": 260
       },
-      "reference_summary": "This passive (quick) test examined the in-scope pages without sending attack payloads, so injection-style issues were not tested. It produced 28 findings: 8 high, 7 medium, 7 low and 6 informational. The high-severity exposure is an accessible .env environment file, four CORS misconfigurations that trust untrusted origins (arbitrary, null, prefix and suffix matches) with credentials, and client-side JavaScript containing a hardcoded secret, an AWS access key and use of eval. Medium-severity issues include directory listing, a password form over plaintext HTTP, a session cookie without HttpOnly, the TRACE method enabled, a missing Content-Security-Policy, and JavaScript that writes to innerHTML and keeps tokens in web storage. Lower-severity items are header and cookie hardening gaps, a POST form without an anti-CSRF token, risky HTTP methods, and weak randomness and plain-HTTP URLs in JavaScript. Each claim cites its source finding under its own severity. Remove the exposed file and secrets and fix CORS first, then harden headers and cookies, and run a standard-profile test for active coverage."
+      "reference_summary": "This passive (quick) test examined the in-scope pages without sending attack payloads, so injection-style issues were not tested. It produced 29 findings: 9 high, 7 medium, 7 low and 6 informational. The high-severity exposure is an accessible .env environment file, four CORS misconfigurations that trust untrusted origins (arbitrary, null, prefix and suffix matches) with credentials, and client-side JavaScript containing a hardcoded secret, an API token, an AWS access key and use of eval. Medium-severity issues include directory listing, a password form over plaintext HTTP, a session cookie without HttpOnly, the TRACE method enabled, a missing Content-Security-Policy, and JavaScript that writes to innerHTML and keeps tokens in web storage. Lower-severity items are header and cookie hardening gaps, a POST form without an anti-CSRF token, risky HTTP methods, and weak randomness and plain-HTTP URLs in JavaScript. Each claim cites its source finding under its own severity. Remove the exposed file and secrets and fix CORS first, then harden headers and cookies, and run a standard-profile test for active coverage."
     },
     {
       "id": "static-two-findings",

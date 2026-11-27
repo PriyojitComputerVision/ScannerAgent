@@ -117,7 +117,7 @@
         <div class="tags"><i class="tag you">human</i></div>
 
         <div class="node"><span class="t">code_sast</span><span>your source code, sandboxed</span></div>
-        <div class="mod"><b>code_upload.analyse_for_scan → Kubernetes Job</b><span>pre/post guardrails (sandbox + code step); no network; non-Python files marked partial; .exe/.bat/.cmd = warnings, .sh = notes; PEP 8 coding standard for Python; one report</span></div>
+        <div class="mod"><b>code_upload.analyse_for_scan → Kubernetes Job</b><span>pre/post guardrails (sandbox + code step); no network; non-Python files marked partial; .exe/.bat/.cmd = warnings, .sh = notes; PEP 8 + ruff lint rules for Python; one report</span></div>
         <div class="tags"><i class="tag box">sandbox</i></div>
 
         <div class="node"><span class="t">sast</span><span>only if sandbox check is off</span></div>
@@ -125,11 +125,11 @@
         <div class="tags"><i class="tag web">target</i></div>
 
         <div class="node"><span class="t">sandbox_check</span><span>also does the website's JS SAST</span></div>
-        <div class="mod"><b>Kubernetes Job scopeguard-job-&lt;session_id&gt;</b><span>source + page/script text as a zip on stdin; deny-all NetworkPolicy; memory 5x, 10x on OOM retry (resumes from checkpoint); deleted after</span></div>
+        <div class="mod"><b>Kubernetes Job scopeguard-job-&lt;session_id&gt;</b><span>source + page/script text as a zip on stdin; deny-all NetworkPolicy; memory 5x, 10x on OOM retry (resumes from checkpoint); deleted after · no kubectl (auto-check at start) or cluster not ready → Python process sandbox</span></div>
         <div class="tags"><i class="tag web">target</i><i class="tag box">sandbox</i></div>
 
         <div class="node"><span class="t">dast</span><span>sandboxed child process</span></div>
-        <div class="mod"><b>scopeguard sandbox.py → worker.py → engine.py</b><span>python -I, audit hook, pinned egress IPs; GET/HEAD/OPTIONS/TRACE; session cookie/bearer</span></div>
+        <div class="mod"><b>scopeguard sandbox.py → worker.py → engine.py</b><span>python -I, audit hook, pinned egress IPs; GET/HEAD/OPTIONS/TRACE; session cookie/bearer; headers, CORS, exposed files, GraphQL introspection, SRI, XSS/SSTI/SQLi/CRLF … (docs/SECURITY_CHECKS.md)</span></div>
         <div class="tags"><i class="tag web">target</i><i class="tag box">sandbox</i></div>
 
         <div class="node"><span class="t">plan_probes</span><span>LLM plan · scan:probes</span></div>

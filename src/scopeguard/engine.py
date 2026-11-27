@@ -32,6 +32,7 @@ A02 = "A02:2021-Cryptographic Failures"
 A03 = "A03:2021-Injection"
 A05 = "A05:2021-Security Misconfiguration"
 A07 = "A07:2021-Identification and Authentication Failures"
+A08 = "A08:2021-Software and Data Integrity Failures"
 XSS = "Cross-Site Scripting"
 OTHER = "Other"
 
@@ -130,7 +131,45 @@ SENSITIVE_PATHS = [
     ("/config.json", r'"(?:password|secret|api_?key)"', "high", "Exposed configuration file", "CWE-538"),
     ("/backup.sql", r"(?i)CREATE TABLE|INSERT INTO", "high", "Exposed database backup", "CWE-530"),
     ("/.DS_Store", r"Bud1", "low", "Exposed .DS_Store file", "CWE-538"),
+    ("/.git/config", r"\[core\]|\[remote ", "high", "Exposed .git/config (repository settings, remote URLs)",
+     "CWE-538"),
+    ("/.svn/entries", r"^\d+\s*$|svn:", "medium", "Exposed Subversion metadata (.svn)", "CWE-538"),
+    ("/.env.local", r"(?m)^[A-Z][A-Z0-9_]{2,}=", "high", "Exposed environment file (.env.local)", "CWE-538"),
+    ("/.env.production", r"(?m)^[A-Z][A-Z0-9_]{2,}=", "high", "Exposed environment file (.env.production)",
+     "CWE-538"),
+    ("/docker-compose.yml", r"(?m)^services:\s*$", "medium", ("Exposed docker-compose.yml (services, images, "
+     "environment)"), "CWE-538"),
+    ("/.npmrc", r"_authToken\s*=|//registry", "high", "Exposed .npmrc (package registry token)", "CWE-522"),
+    ("/web.config", r"<configuration[\s>]", "medium", "Exposed web.config (IIS / ASP.NET settings)", "CWE-538"),
+    ("/id_rsa", r"-----BEGIN (?:RSA |OPENSSH |EC )?PRIVATE KEY-----", "critical", "Exposed SSH private key",
+     "CWE-321"),
+    ("/.aws/credentials", r"aws_access_key_id\s*=", "critical", "Exposed AWS credentials file", "CWE-522"),
+    ("/actuator", r'"_links"\s*:\s*\{', "medium", "Spring Boot actuator endpoints exposed", "CWE-200"),
+    ("/actuator/env", r'"(?:propertySources|activeProfiles)"', "high", ("Spring Boot actuator /env exposed "
+     "(configuration and secrets)"), "CWE-200"),
+    ("/debug/pprof/", r"Types of profiles available|/debug/pprof/goroutine", "medium", ("Go pprof debug endpoint "
+     "exposed"), "CWE-489"),
+    ("/elmah.axd", r"Error Log for", "medium", "ELMAH error log exposed", "CWE-532"),
+    ("/dump.sql", r"(?i)CREATE TABLE|INSERT INTO", "high", "Exposed database dump (dump.sql)", "CWE-530"),
+    ("/phpmyadmin/", r"(?i)<title>[^<]*phpMyAdmin", "medium", "phpMyAdmin login exposed", "CWE-200"),
+    ("/adminer.php", r"(?i)<title>[^<]*Adminer|adminer\.org", "medium", "Adminer database tool exposed",
+     "CWE-200"),
+    ("/wp-json/wp/v2/users", r'"slug"\s*:\s*"[^"]+"', "medium", ("WordPress user list exposed (user "
+     "enumeration)"), "CWE-200"),
+    ("/server-info", r"Apache Server Information", "medium", "Apache server-info exposed", "CWE-200"),
+    ("/crossdomain.xml", r'allow-access-from\s+domain\s*=\s*"\*"', "medium", ("Flash cross-domain policy allows "
+     "any domain"), "CWE-942"),
+    ("/clientaccesspolicy.xml", r'<domain\s+uri\s*=\s*"\*"', "medium", ("Silverlight client access policy "
+     "allows any domain"), "CWE-942"),
 ]
+# GraphQL endpoints tried for introspection (GET only: ?query={__schema{...}}).
+GRAPHQL_PATHS = ["/graphql", "/api/graphql", "/v1/graphql"]
+GRAPHQL_INTROSPECTION = "{__schema{queryType{name}types{name}}}"
+# HSTS shorter than this (seconds; 180 days) is weak.
+HSTS_MIN_MAX_AGE = 15552000
+_BLANK_LINK = re.compile(r"<a\b[^>]*\btarget\s*=\s*[\"']?_blank[^>]*>", re.IGNORECASE)
+_SOURCE_MAP = re.compile(r"^\s*//[#@]\s*sourceMappingURL\s*=\s*(\S+)", re.MULTILINE)
+_SCRIPT_TAG = re.compile(r"<script\b[^>]*?\bsrc\s*=\s*[\"']?([^\"'\s>]+)[^>]*>", re.IGNORECASE)
 
 JS_RULES = [
     ("JS_EVAL", re.compile(r"\beval\s*\("), "high", A03, "eval() executes dynamic code.", "CWE-95"),
@@ -158,7 +197,20 @@ JS_RULES = [
     ("HARDCODED_SECRET", re.compile(
         r"""(?i)\b(?:api[_-]?key|client[_-]?secret|access[_-]?token|secret[_-]?key)\b\s*[:=]\s*['"][A-Za-z0-9_./+=-]{12,}['"]"""),
      "high", A02, "Possible hardcoded secret/token.", "CWE-798"),
+    ("JS_DOM_XSS", re.compile(
+        r"(?:\.(?:inner|outer)HTML\s*=|document\.write(?:ln)?\s*\(|\.insertAdjacentHTML\s*\(|\beval\s*\()[^;\n]*"
+        r"(?:location\.(?:hash|search|href)|document\.(?:URL|documentURI|referrer)|window\.name|URLSearchParams)"),
+     "high", XSS, "URL / referrer / window.name value written to an HTML or code sink (DOM-based XSS).", "CWE-79"),
+    ("JS_STRING_TIMER", re.compile(r"""\bset(?:Timeout|Interval)\s*\(\s*['"`]"""), "medium", A03,
+     "setTimeout/setInterval with a string evaluates code (like eval).", "CWE-95"),
+    ("JS_API_TOKEN", re.compile(
+        r"""\b(?:ghp|gho|github_pat|glpat|xox[baprs]|sk_live|rk_live)_[A-Za-z0-9_]{16,}"""),
+     "high", A02, "API token (GitHub / GitLab / Slack / Stripe secret) in client-side code.", "CWE-798"),
+    ("GOOGLE_API_KEY", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b"), "low", A02,
+     "Google API key in client-side code (fine only if restricted to your domains and APIs).", "CWE-798"),
 ]
+# Rules whose match is a secret: the evidence never shows the value.
+JS_SECRET_RULES = {"AWS_ACCESS_KEY", "HARDCODED_SECRET", "PRIVATE_KEY", "JS_API_TOKEN", "GOOGLE_API_KEY"}
 
 # Rule-specific remediation (falls back to a generic review note).
 JS_RECOMMENDATIONS = {
@@ -178,6 +230,13 @@ JS_RECOMMENDATIONS = {
     "AWS_ACCESS_KEY": "Revoke and rotate the key now, remove it from client code, and sign requests server-side.",
     "PRIVATE_KEY": "Revoke the key pair, remove it from client code and history, and keep keys server-side.",
     "HARDCODED_SECRET": "Rotate the secret, remove it from client code, and proxy the call through your backend.",
+    "JS_DOM_XSS": "Treat location.hash/search, document.referrer and window.name as untrusted: write them with "
+                  "textContent, or sanitize with DOMPurify before any HTML sink; never eval them.",
+    "JS_STRING_TIMER": "Pass a function instead of a string: setTimeout(() => doWork(value), ms).",
+    "JS_API_TOKEN": "Revoke the token now, remove it from client code (and git history), and call the API "
+                    "from your backend.",
+    "GOOGLE_API_KEY": "Restrict the key to your HTTP referrers and the APIs you use in Google Cloud Console; "
+                      "move server-side keys to the backend.",
 }
 
 PROFILES = {
@@ -455,6 +514,12 @@ def _norm(url: str) -> str:
     return up.urldefrag(url)[0]
 
 
+def _host_path(url: str) -> str:
+    """host/path of a URL without the scheme (finding evidence is link-stripped, this text survives)."""
+    p = up.urlparse(url)
+    return (p.netloc + (p.path or "/"))[:200]
+
+
 # --------------------------------------------------------------------------
 # Finding helper
 # --------------------------------------------------------------------------
@@ -623,6 +688,7 @@ class Scanner:
                            recommendation="Suppress or genericize the Server header.")
             for ck in r.set_cookies:
                 self._cookie(ck, pg.url)
+            self._passive_extras(pg, r)
             for rx, label in INFO_LEAKS:
                 m = rx.search(r.body)
                 if m:
@@ -671,6 +737,55 @@ class Scanner:
             self.f.add(source="dast_native", category=A05, severity=sev, title=title,
                        description=f"`{h}` absent on {len(urls)} page(s).", url=urls[0],
                        evidence="; ".join(urls[:3]), cwe="CWE-693", confidence="high", recommendation=rec)
+
+    def _passive_extras(self, pg, r):
+        """Checks on the response already fetched (no extra request): third-party scripts without
+        Subresource Integrity, weak HSTS, HTTPS pages whose forms post to plain HTTP."""
+        page_host = (up.urlparse(pg.url).hostname or "").lower()
+        no_sri = []
+        for m in _SCRIPT_TAG.finditer(r.body[:500000]):
+            src = up.urljoin(pg.url, m.group(1))
+            host = (up.urlparse(src).hostname or "").lower()
+            if host and host != page_host and not host.endswith("." + page_host) \
+                    and not re.search(r"\bintegrity\s*=", m.group(0), re.IGNORECASE):
+                no_sri.append(_host_path(src))  # evidence is link-stripped: host + path, no scheme
+        if no_sri:
+            self.f.add(source="dast_native", category=A08, severity="low",
+                       title="Third-party script loaded without Subresource Integrity",
+                       description=f"{len(no_sri)} script(s) from other hosts have no integrity attribute: a "
+                                   "compromised CDN or host could serve modified code.",
+                       url=pg.url, evidence="; ".join(no_sri[:3])[:300], cwe="CWE-353", confidence="high",
+                       recommendation="Add integrity=\"sha384-...\" crossorigin=\"anonymous\" to third-party "
+                                      "<script> tags, or self-host the files.")
+        blank = [m.group(0)[:120] for m in _BLANK_LINK.finditer(r.body[:500000])
+                 if not re.search(r"\brel\s*=\s*[\"'][^\"']*\bno(?:opener|referrer)\b", m.group(0), re.IGNORECASE)]
+        if blank:
+            self.f.add(source="dast_native", category=A01, severity="info",
+                       title="Links open in a new tab without rel=\"noopener\" (reverse tabnabbing)",
+                       description=f"{len(blank)} link(s) use target=\"_blank\" without rel=\"noopener\": the "
+                                   "opened page can navigate this tab (older browsers).", url=pg.url,
+                       evidence=f"{len(blank)} link(s)", cwe="CWE-1022", confidence="high",
+                       recommendation="Add rel=\"noopener noreferrer\" to links with target=\"_blank\".")
+        hsts = r.headers.get("strict-transport-security", "")
+        if pg.url.startswith("https://") and hsts:
+            m = re.search(r"max-age\s*=\s*\"?(\d+)", hsts, re.IGNORECASE)
+            if not m or int(m.group(1)) < HSTS_MIN_MAX_AGE:
+                self.f.add(source="dast_native", category=A05, severity="low",
+                           title="Weak Strict-Transport-Security (short max-age)",
+                           description="HSTS max-age is below 180 days (or missing), so browsers forget to "
+                                       "force HTTPS quickly.", url=pg.url, evidence=hsts[:200], cwe="CWE-523",
+                           confidence="high",
+                           recommendation="Use max-age=31536000; includeSubDomains (add preload once ready).")
+        if pg.url.startswith("https://"):
+            for form in pg.forms:
+                action = up.urljoin(pg.url, form["action"] or pg.url)
+                if action.startswith("http://"):
+                    self.f.add(source="dast_native", category=A02, severity="medium",
+                               title="HTTPS page submits a form over plaintext HTTP",
+                               description="The form's action is an http:// URL, so its fields are sent without "
+                                           "TLS.", url=pg.url, evidence=f"action posts to http: {_host_path(action)}",
+                               cwe="CWE-319",
+                               confidence="high", recommendation="Post forms to https:// URLs only.")
 
     def _cookie(self, raw: str, url: str):
         name = raw.split("=", 1)[0].strip()
@@ -800,6 +915,20 @@ class Scanner:
                            url=self.origin + path, evidence=f"GET {path} -> {r.status}", cwe="CWE-200",
                            confidence="high", recommendation="Disable API docs in production or put them "
                                                              "behind authentication.")
+        for path in GRAPHQL_PATHS:
+            g = self._safe(self.client.get, self.origin + path + "?" + up.urlencode({"query": GRAPHQL_INTROSPECTION}))
+            self._cov("GraphQL introspection", tested=1)
+            if g and g.status == 200 and '"__schema"' in g.body[:200000] and '"types"' in g.body[:200000]:
+                self._cov("GraphQL introspection", found=1, note=path)
+                self.f.add(source="dast_native", category=A05, severity="medium",
+                           title=f"GraphQL introspection enabled ({path})",
+                           description="The GraphQL endpoint returns its full schema to anyone, mapping every "
+                                       "query, mutation and field for an attacker.", url=self.origin + path,
+                           evidence=f"GET {path}?query={{__schema...}} -> {g.status}", cwe="CWE-200",
+                           confidence="high",
+                           recommendation="Disable introspection in production (or allow it only for signed-in "
+                                          "developers).")
+                break
         for path, sig, sev, title, cwe in SENSITIVE_PATHS:
             r = self._safe(self.client.get, self.origin + path)
             self._cov("Sensitive files (.env, .git, backups)", tested=1)
@@ -811,7 +940,10 @@ class Scanner:
                 self._cov("Sensitive files (.env, .git, backups)", found=1, note=path)
                 self.f.add(source="dast_native", category=A05, severity=sev, title=title,
                            description=f"{path} is publicly retrievable and matches a sensitive-content signature.",
-                           url=self.origin + path, evidence=re.sub(r"=.*", "=<redacted>", r.body[:80]),
+                           # Never copy the file into the report: it may hold keys, passwords or tokens.
+                           url=self.origin + path,
+                           evidence=f"GET {path} -> {r.status}, {len(r.body)} bytes; content matched the "
+                                    "signature (not copied into the report)",
                            cwe=cwe, confidence="high", recommendation="Remove from web root / deny access.")
 
     # ---- active (non-destructive) ---------------------------------------
@@ -1043,11 +1175,21 @@ class Scanner:
                     if absu.startswith(("http://", "https://")):
                         self.endpoints.setdefault(absu, url.split(" ")[0])
             for url, code in blobs:
+                sm = _SOURCE_MAP.search(code[-2000:])  # the comment sits at the end of the file
+                if sm and not sm.group(1).startswith("data:"):
+                    self.f.add(source="python_sast", category=A05, severity="low",
+                               title="JavaScript source map published",
+                               description="The script points at a source map, which (if served) hands out the "
+                                           "original, unminified source with comments and file paths.",
+                               url=url.split(" ")[0], evidence=f"sourceMappingURL={_host_path(sm.group(1))[:120]}",
+                               cwe="CWE-540", confidence="medium",
+                               recommendation="Do not deploy .map files publicly (or restrict them to your "
+                                              "error-tracking service).")
                 for n, line in enumerate(code.splitlines(), 1):
                     for rid, rx, sev, cat, desc, cwe in JS_RULES:
                         if rx.search(line):
                             ev = f"Line {n}: {line.strip()[:200]}"
-                            if rid in ("AWS_ACCESS_KEY", "HARDCODED_SECRET", "PRIVATE_KEY"):
+                            if rid in JS_SECRET_RULES:
                                 ev = f"Line {n}: <secret pattern {rid} matched; value redacted>"
                             self.f.add(source="python_sast", category=cat, severity=sev,
                                        title=f"{rid}: potentially unsafe JavaScript pattern",
