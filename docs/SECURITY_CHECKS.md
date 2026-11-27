@@ -257,6 +257,8 @@ Run everything with `uv run pytest` (no real network or LLM calls; the golden li
 | `tests/test_citations.py` | Source citations ([Sn]) — grounding of LLM prose and safe link rendering. |
 | `tests/test_code_exec_scope_guard.py` | Custom probes stay in scope: URL building and host allowlist checks. |
 | `tests/test_code_guardrails.py` | Pre/post guardrails of uploaded-code scans, the separate code audit trail, and the structured remediations (IDOR, XSS, DOM, DoS). |
+| `tests/test_code_locations.py` | Per-rule file + line lists in code recommendations, and project paths without internal folders. |
+| `tests/test_code_precision.py` | Sharper SAST rules (no false positives from strings, docstrings, comments, Markdown prose, BroadcastChannel, 'del x') and the post-guardrail that re-checks every finding against the source. |
 | `tests/test_code_rules.py` | SAST rules for uploaded / backend code: XSS, IDOR, injection, SSRF, supply chain, IaC, with a recommendation for every rule and no false alarm on the safe variants. |
 | `tests/test_code_source.py` | Source code at the SAST step: human in the loop (graph code_source -> code_sast), code files without a zip, git links (validation, hardened shallow clone, network policy), and the WebSocket question/answer. No real network: git is faked, DNS is stubbed by conftest. |
 | `tests/test_code_upload.py` | Source-code uploads: HTTP API and MCP tools, type checks, RBAC/ownership, the sandbox scan (process backend here), reports, audit, and the Kubernetes pod runner (faked kubectl). |
@@ -282,6 +284,7 @@ Run everything with `uv run pytest` (no real network or LLM calls; the golden li
 | `tests/test_rate_limit.py` | HTTP 429 handling: target links (engine + httpx transport), LLM retries, backend limits. |
 | `tests/test_recon_helpers.py` | Recon / crawl helpers: link extraction, scope filtering, discovery. |
 | `tests/test_report_downloads.py` | Report downloads are named after the session id / report folder, not report.*. |
+| `tests/test_report_retention.py` | Old and checkpoint-less report folders are deleted with the checkpoint cleanup, and audited. |
 | `tests/test_report_tool.py` | Report rendering: Markdown, HTML, JSON and DOCX from the same structured data. |
 | `tests/test_sandbox_check.py` | Code check of backend code + website content (Kubernetes Job sandbox or process sandbox), egress flagging, and the per-node iteration cap. No Docker is used. |
 | `tests/test_sandbox_limits.py` | Memory sizing (x5 / x10 of the content), hard memory caps, OOM detection, checkpoints. |

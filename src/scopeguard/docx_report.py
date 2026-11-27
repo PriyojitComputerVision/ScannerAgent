@@ -21,6 +21,7 @@ import re
 from pathlib import Path
 
 from scopeguard import citations
+from scopeguard.report import distinct_steps, location_lines, where_heading
 
 ORDER = ["critical", "high", "medium", "low", "info"]
 SEV_COLORS = {  # badge fill, text on fill
@@ -464,8 +465,18 @@ def build_docx(path: str | Path, *, title: str, target: str, meta: list[tuple[st
             r = p.add_run(f"{_clean(rec.get('rule'))} x{int(rec.get('count') or 0)}"
                           + (f"  ({_clean(rec.get('cwe'))})" if rec.get("cwe") else ""))
             r.bold = True
-            b.para(_clean(rem.get("summary") or rec.get("recommendation") or ""), size=9.5, space_after=2)
-            for step in (rem.get("steps") or [])[:10]:
+            # Every place it was found: the project file and its line numbers.
+            b.para(f"{where_heading(rec)}:", italic=True, color=MUTED, size=8.5, space_after=0)
+            for file, lines in location_lines(rec, max_files=30):
+                lp = doc.add_paragraph(style="List Bullet")
+                if file:
+                    fr = lp.add_run(_clean(file))
+                    fr.font.name, fr.font.size = "Consolas", b.Pt(8.5)
+                tr = lp.add_run(f"{': ' if file and lines else ''}{_clean(lines)}")
+                tr.font.size = b.Pt(8.5)
+            summary = _clean(rem.get("summary") or rec.get("recommendation") or "")
+            b.para(summary, size=9.5, space_after=2)
+            for step in distinct_steps(rem, summary)[:10]:
                 doc.add_paragraph(_clean(step), style="List Number")
             example = rem.get("example") or {}
             if example.get("after"):
@@ -505,7 +516,8 @@ def build_docx(path: str | Path, *, title: str, target: str, meta: list[tuple[st
             [("Category", _val(f, "category") or "n/a"), ("CWE", cwe_cell),
              ("Confidence", str(_val(f, "confidence") or "n/a").capitalize()),
              ("Detected by", _val(f, "source") or "n/a")],
-            wide=("Affected URL", lambda p, u=affected_url: b.link_or_text(p, u, size=8.5, mono=True)),
+            wide=("Affected URL" if str(affected_url or "").startswith(("http://", "https://")) else "File and line",
+                  lambda p, u=affected_url: b.link_or_text(p, u, size=8.5, mono=True)),
         )
 
         desc = _val(f, "description")

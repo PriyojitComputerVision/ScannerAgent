@@ -251,7 +251,8 @@ def _unused_variables(fn: ast.FunctionDef | ast.AsyncFunctionDef, hits: dict[str
             isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in ("locals", "vars")
             for n in nodes):
         return
-    loads = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load)}
+    # A read or a 'del name' uses the variable (e.g. a memory reserve that is only released).
+    loads = {n.id for n in ast.walk(fn) if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Load | ast.Del)}
     for n in nodes:
         targets = n.targets if isinstance(n, ast.Assign) else [n.target] if (
             isinstance(n, ast.AnnAssign) and n.value is not None) else []

@@ -24,10 +24,12 @@ _MD_LINK = re.compile(r"!?\[([^\]\n]*)\]\(\s*[^)\s]*(?:\s+\"[^\"]*\")?\s*\)")
 _LINK_ATTR = re.compile(r"\b(href|src|action|formaction|xlink:href|srcset|poster|data)\s*=\s*"
                         r"(\"[^\"]*\"|'[^']*'|[^\s>]+)", re.IGNORECASE)
 _END = r"[^\s<>\"'`)\]}]+"
+# host.name (at least one dot), as one character class: no nested repetition, linear matching.
+_HOST = r"[a-z0-9-]+\.[a-z0-9.-]*[a-z0-9-]"
 _URL = re.compile(
     rf"\b(?:https?|ftp|wss?|file|javascript|data|mailto|vbscript):{_END}"   # scheme:...
-    rf"|\bwww\.[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:/{_END})?"                     # www.host/path
-    rf"|(?<![\w:/])//[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?(?:/{_END})?",     # //host/path
+    rf"|\bwww\.{_HOST}(?:/{_END})?"                                        # www.host/path
+    rf"|(?<![\w:/])//{_HOST}(?::\d+)?(?:/{_END})?",                        # //host/path
     re.IGNORECASE,
 )
 

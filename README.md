@@ -37,7 +37,13 @@ Old checkpoints are deleted to keep the database small: scan threads whose newes
 `CHECKPOINT_RETENTION_HOURS` (24; `0` keeps everything) go, with old code-check checkpoint files, and the file
 is compacted (VACUUM). The server checks at start and every `CHECKPOINT_CLEANUP_INTERVAL_MINUTES` (60); every
 MCP / A2A scan also offers a round (at most once per interval per process), never touching a running scan.
-A deleted scan can no longer be resumed; its report and audit record are kept.
+A deleted scan can no longer be resumed. **Old reports go in the same round**: a report folder is deleted
+when its newest file is older than `CHECKPOINT_RETENTION_HOURS` (the same setting; `0` keeps every
+checkpoint and report), or when its scan has no checkpoint any more (pruned, or never had one, e.g. a CLI
+report) and it is over an hour old. Running scans are never touched. Every deletion is first written to the
+audit chain (`report.deleted`, with the deleted files' SHA-256), so `pentest-audit verify --reports-dir`
+still passes; a report removed any other way is still reported as missing. If that record cannot be
+written, the report is kept.
 The diagrams are rendered from `docs/src/*.html` with `uv run python scripts/render_docs.py`. The same scan engine (`src/scopeguard/`) also runs
 standalone through `python -m scopeguard.cli`.
 
@@ -233,7 +239,7 @@ After editing the skill, rebuild the package with the skill-creator's `package_s
 ```bash
 uv sync
 cp .env.example .env            # GROQ_API_KEY is optional; empty = deterministic offline mode
-uv run python scripts/get_token.py       # creates keys/ if needed and prints a 60-min access token
+uv run python scripts/get_token.py       # creates keys/ if needed, saves a 60-min token to keys/token.json
 uv run python scripts/simulate_full.py   # whole pipeline against the built-in target (auth on)
 uv run pentest-agent                      # console at http://127.0.0.1:8765/ + ws://127.0.0.1:8765/ws?session_id=<id>
 uv run python scripts/ws_client.py --simulate   # Postman-free client for the running server (see --help)
@@ -382,11 +388,12 @@ Every call to the agent server needs an access token, except `GET /healthz`,
 the key pair in `keys/` (gitignored, along with `*.pem`; never commit it).
 
 ```bash
-uv run python scripts/get_token.py        # no arguments: creates keys/ if missing, prints a token
+uv run python scripts/get_token.py        # no arguments: creates keys/ if missing, saves keys/token.json
+T=$(uv run python -c "import json; print(json.load(open('keys/token.json'))['access_token'])")   # load it (never printed)
 uv run pentest-auth keys                  # (re)create the key pair (--force replaces it)
 uv run pentest-auth secret                # random value for AUTH_CLIENT_SECRET
 uv run pentest-auth token --roles scanner # mint a token locally
-uv run pentest-auth add-client --id ci-bot --roles viewer   # extra client; secret printed once, stored hashed
+uv run pentest-auth add-client --id ci-bot --roles viewer   # extra client; secret written once to keys/client-ci-bot.secret (owner-only), stored hashed
 uv run pentest-auth list-clients | remove-client --id ci-bot | verify <token>
 ```
 
@@ -566,6 +573,12 @@ the code is never run. Its findings (`source: code_upload`) go into the scan's o
 **One document per scan**: the website findings, the JavaScript SAST, the source-code findings, the
 code's per-rule fixes and its guardrail verdicts are all in the same report (HTML, Markdown, JSON and
 DOCX); there is no separate code report.
+**Every file and line.** Each rule in the code section lists where it was found: the file's path in
+your project and its line numbers, grouped per file ("Where (15 locations in 11 files)", then e.g.
+`src/app/views.py: lines 38, 39`). Paths never show the sandbox's internal folders (`source/`,
+`upload/`); the detailed findings say **File and line** (`src/app/views.py#L38`). Up to 200 locations
+per rule are listed (30 files per rule in the DOCX); `report.json` keeps them all under
+`code_upload.recommendations[].locations`.
 **Non-Python files are marked.** The code's files are classified from the zip's file list (nothing is
 unpacked on the server): every program file that is not Python is listed in the report as "not Python,
 partial coverage", its findings get a `[<language>, not Python: partial coverage]` prefix and `low`
@@ -663,6 +676,29 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
   confined to the upload, secrets re-masked, control/bidi characters removed, prompt-injection text in the
   code flagged, size caps, and sandbox violations / partial scans turned into red flags. Both verdict lists
   are stored with the result, shown in the console, returned by MCP and printed in the report.
+* **Finding verification** (post-guardrail `finding_verification`): before results leave the sandbox, every
+  finding a line rule reported is re-checked against the source file. It is removed as a false positive
+  when the line is not in the file, the rule's pattern is not on it, the match is only inside a string,
+  docstring or comment (call rules such as `eval`/`exec`, `os.system`, `pickle.load`, `shell=True`, and
+  logging of secrets), or it is Markdown prose rather than a fenced code block. The report's guardrail
+  table says how many were re-checked, confirmed and removed, per reason.
+* **Precision**: Python call rules look at code only (string literals, docstrings and comments are
+  blanked with `tokenize`; f-string expressions stay code). Logging rules need a sensitive *value*
+  (`print(token)`), not the word in a message (`print("token renewed")`). Markdown is scanned only inside
+  fenced code blocks, except for secrets. `BroadcastChannel` listeners (same-origin only) are not
+  reported as unchecked `postMessage` handlers (nor WebSocket / Worker / EventSource ones). `del x` counts
+  as using `x`.
+* **Text in Python strings is not code**: in a Python file, a match that lies entirely inside one string
+  literal or comment is ignored (e.g. a JavaScript example in a string), except for rules whose problem
+  lives in the text: secrets, `curl | sh`, hidden bidi characters, obfuscated payloads. A match that
+  only touches a string (`'SELECT ...' + request.args['id']`) still counts.
+* **Placeholder secrets** in source code (values containing EXAMPLE, FAKE, DUMMY, PLACEHOLDER, CHANGEME or
+  REDACTED, e.g. AWS's documented key `AKIAIOSFODNN7EXAMPLE`) are not reported as credentials. The website
+  scan still reports any key a site serves.
+* **Pytest files are not analysed**: `test_*.py`, `*_test.py` and `conftest.py` are skipped by the code SAST
+  (they hold deliberately vulnerable snippets). This applies to every entry point (console / WebSocket,
+  API, MCP, A2A), since all of them run the same sandboxed step. Code hidden in a file with such a name is
+  therefore not checked: review test files of untrusted code yourself.
 * **Separate audit trail** (`CODE_AUDIT_LOG_PATH`, `data/audit/code_audit.jsonl`): a hash-chained record
   for every upload, refusal, pre/post guardrail verdict, sandbox attempt (Job name, memory, multiplier,
   OOMKilled, files done), completion (with report hashes) and deletion; also the agent's code-check

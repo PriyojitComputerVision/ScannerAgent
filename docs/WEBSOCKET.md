@@ -201,7 +201,8 @@ is analysed as Python (other languages: partial coverage, marked in the report).
 `scan_scope` decides what is tested. Leave it out and the server derives it: code named or
 `ask_for_code` = `website_and_code`, otherwise `website`. Nothing is sent to a website with `code`.
 Every recipe needs `authorization_confirmed: true`, so only use targets and code you own or may test.
-`$T` is an access token (`uv run python scripts/get_token.py`). `ws_client.py` gets one itself.
+`$T` is an access token: `uv run python scripts/get_token.py` saves one to `keys/token.json` (it is not printed),
+then `T=$(uv run python -c "import json; print(json.load(open('keys/token.json'))['access_token'])")`. `ws_client.py` gets one itself.
 
 In every recipe you can also run `uv run python scripts/ws_client.py` with no arguments. It asks the
 same questions as numbered menus: target, URL, authorization, code (local path / git / upload id),

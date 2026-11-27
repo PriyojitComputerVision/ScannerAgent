@@ -21,10 +21,42 @@ import urllib.parse as up
 # Range dashes include the Unicode hyphens/dashes LLMs emit (U+2010..U+2015, U+2212).
 _DASH = r"\-" + "‐‑‒–—―−"
 _ITEM = rf"[Ss]\d+(?:\s*[{_DASH}]\s*[Ss]?\d+)?"
-CITATION_RE = re.compile(rf"\[\s*({_ITEM}(?:\s*[,;]\s*{_ITEM})*)\s*\]")
+_ITEM_RE = re.compile(_ITEM)
+_LIST_SEP = re.compile(r"\s*[,;]\s*")
+
+
+def _id_list(group: str) -> bool:
+    """True when ``group`` is exactly source ids / ranges separated by ',' or ';'."""
+    return all(_ITEM_RE.fullmatch(part) for part in _LIST_SEP.split(group.strip()))
+
+
+class _CitationPattern:
+    """A bracketed list of source ids. The regex only finds a candidate (one bounded character
+    class, so no nested repetition and no catastrophic backtracking); ``_id_list`` then checks the
+    exact grammar ``item ([,;] item)*``. finditer / sub / search behave like the compiled regex's,
+    but only for real citation lists; other candidates are left as they are."""
+
+    def __init__(self, opening: str, closing: str) -> None:
+        self._rx = re.compile(rf"{opening}\s*([Ss][\sSs\d,;{_DASH}]{{0,400}}?)\s*{closing}")
+
+    def finditer(self, text: str):
+        return (m for m in self._rx.finditer(text) if _id_list(m.group(1)))
+
+    def search(self, text: str):
+        return next(self.finditer(text), None)
+
+    def sub(self, repl, text: str) -> str:
+        def one(m: re.Match) -> str:
+            if not _id_list(m.group(1)):
+                return m.group(0)
+            return repl(m) if callable(repl) else m.expand(repl)
+        return self._rx.sub(one, text)
+
+
+CITATION_RE = _CitationPattern(r"\[", r"\]")
 # LLMs sometimes cite as (S1) / (S1, S3-S5). Only parentheses that hold nothing
 # but source ids are treated as citations; ordinary parenthesised text is untouched.
-_PAREN_CITATION_RE = re.compile(rf"\(\s*({_ITEM}(?:\s*[,;]\s*{_ITEM})*)\s*\)")
+_PAREN_CITATION_RE = _CitationPattern(r"\(", r"\)")
 _RANGE_RE = re.compile(rf"[Ss](\d+)(?:\s*[{_DASH}]\s*[Ss]?(\d+))?")
 _MAX_RANGE = 200  # a longer "range" is a typo, not a citation list
 

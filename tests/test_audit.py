@@ -36,7 +36,7 @@ def test_chain_appends_and_verifies(log):
     assert [r["seq"] for r in records] == [1, 2, 3]
     assert records[1]["prev"] == records[0]["hash"] and records[0]["prev"] == ""
     assert audit.verify(log) == {"ok": True, "records": 3, "problems": [], "unverifiable_hmac_records": 0,
-                                 "last_hash": records[2]["hash"]}
+                                 "report_files_removed_by_retention": 0, "last_hash": records[2]["hash"]}
 
 
 @pytest.mark.parametrize("tamper, problem", [

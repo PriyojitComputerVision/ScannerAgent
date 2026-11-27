@@ -21,10 +21,12 @@ from __future__ import annotations
 
 import argparse
 import html.parser
+import io
 import json
 import os
 import re
 import sys
+import tokenize
 import urllib.parse as up
 from typing import ClassVar
 
@@ -357,7 +359,7 @@ BACKEND_RULES = [
      "medium", A04, "Loop count / allocation size taken from the request (CPU or memory exhaustion).", "CWE-770",
      "Validate numbers against a hard maximum (e.g. min(int(n), 100)) before looping or allocating.", None),
     ("XML_ENTITY_EXPANSION", re.compile(
-        r"\b(?:xml\.etree\.ElementTree|ElementTree|ET|minidom|xml\.dom\.minidom|xml\.sax)\.(?:parse|fromstring|"
+        r"(?<!defusedxml\.)\b(?:xml\.etree\.ElementTree|ElementTree|ET|minidom|xml\.dom\.minidom|xml\.sax)\.(?:parse|fromstring|"
         r"parseString|XMLParser)\s*\("),
      "low", A04, "Stdlib XML parser on possibly untrusted input (billion-laughs entity expansion).", "CWE-776",
      "Parse untrusted XML with defusedxml (defusedxml.ElementTree.fromstring).", PY_EXT),
@@ -444,7 +446,7 @@ _LOOKUP = re.compile(r"(?i)\b(?:findById|findByPk|findOne|findUnique|findFirst|f
                      r"objects\.(?:get|filter)|getById|query\.get|session\.get|\.get|\.find|\.where|"
                      r"Repository\.\w+|SELECT\b)")
 _OWNERSHIP = re.compile(
-    r"(?i)owner|user_?id\b|userId|req\.user|request\.user|current_?user|currentUser|authorize|permission|\bcan\(|"
+    r"(?i)owner|user_?id\b|userId|req\.user|request\.user|current_?user|currentUser|\bprincipal\b|authorize|permission|\bcan\(|"
     r"policy|tenant|account_?id|session\.user|@PreAuthorize|@Secured|has_perm|abort\(\s*403|status\(\s*403|"
     r"Forbidden|HTTP_403|check_object_permissions|IsOwner|belongs_?to|created_?by|\$this->authorize|Gate::")
 _RATE_LIMIT = re.compile(r"(?i)rate.?limit|limiter|throttl|slow.?down|brute|lockout|captcha|@ratelimit")
@@ -549,9 +551,13 @@ class Results:
                       "symlinks_outside": 0}
         self._seen: set[tuple] = set()
         self.style_findings = 0  # coding-standard findings, capped at codestyle.MAX_STYLE_FINDINGS
+        # Post-guardrail (verify_findings): line-rule findings are re-checked against the source.
+        self._line_rule: set[int] = set()
+        self.verification = {"checked": 0, "verified": 0, "dropped": 0, "reasons": {}}
+        self.stats["verification"] = self.verification
 
     def add(self, *, source, rid, severity, category, title, description, where, line_no, evidence,
-            cwe, recommendation, confidence="medium") -> None:
+            cwe, recommendation, confidence="medium", line_rule=False) -> None:
         key = (source, rid, where, evidence[:120])
         if key in self._seen or len(self.findings) >= MAX_FINDINGS:
             return
@@ -561,6 +567,8 @@ class Results:
             "source": source, "category": category, "severity": severity, "title": title,
             "description": description, "affected_url": loc, "evidence": evidence or None,
             "cwe": cwe, "confidence": confidence, "recommendation": recommendation})
+        if line_rule:
+            self._line_rule.add(id(self.findings[-1]))
 
     def add_raw(self, finding: dict) -> None:
         """Add an already-built finding (e.g. from scopeguard.archive), de-duplicated."""
@@ -589,9 +597,202 @@ def _read_text(path: str) -> str | None:
     return raw.decode("utf-8", errors="replace")
 
 
+# --------------------------------------------------------------------------- precision
+# Rules that look for a *call* in Python code: matched against the code view of the line, where
+# string literals, docstrings and comments are blanked (an "eval(" in a docstring is not a call).
+_PY_CODE_ONLY_RULES = frozenset({"PY_EVAL_EXEC", "PY_OS_SYSTEM", "PY_PICKLE_LOAD", "PY_SHELL_TRUE",
+                                 "LOG_SENSITIVE_DATA"})
+# Rules that flag a sensitive *value* in a call: quoted message text does not count ("token renewed").
+_VALUE_RULES = frozenset({"LOG_SENSITIVE_DATA"})
+# Prose documents: only fenced code blocks are code; secret rules still check every line.
+DOC_EXT = frozenset({".md", ".markdown"})
+_BLANK_TOKENS = frozenset({tokenize.STRING, tokenize.COMMENT}
+                          | ({tokenize.FSTRING_MIDDLE} if hasattr(tokenize, "FSTRING_MIDDLE") else set()))
+_QUOTED = re.compile(r"""'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*\"""")
+_OWN_DOLLAR = re.compile(r"(?:\b(?:const|let|var)\s+\$\s*=|\bfunction\s+\$\s*\()")
+_JQUERY_REF = re.compile(r"(?i)jquery|\$\.(?:ajax|fn|each|get|post|extend)\b|\$\(\s*(?:document|window)\s*\)")
+_FENCE = re.compile(r"^\s{0,3}(```|~~~)")
+
+
+# Rules whose problem lives *inside* a string or comment, so a match there still counts: secrets,
+# shell pipelines run from a string, invisible bidi characters, encoded payloads. Every other rule
+# ignores a match that lies entirely inside one Python string literal or comment: that is text
+# (an example snippet, a message, a regex), not code that runs.
+_STRING_CONTENT_RULES = frozenset({"PIPE_TO_SHELL", "TROJAN_SOURCE_BIDI", "OBFUSCATED_CODE"}) | frozenset(
+    _SECRET_RULE_IDS)
+
+
+# A secret value that says it is a placeholder is not a credential: AWS's documented example key
+# (AKIAIOSFODNN7EXAMPLE), "sk_live_FAKE...", "changeme", ... (secret scanners such as gitleaks skip
+# these too). Source SAST only: the website scan still reports what a site serves.
+_PLACEHOLDER_SECRET = re.compile(r"(?i)example|fake|dummy|placeholder|changeme|redacted")
+
+
+def _real_secret(rid: str, m: re.Match | None) -> re.Match | None:
+    """``m`` unless it is a secret rule's match on a placeholder value."""
+    if m is not None and rid in _SECRET_RULE_IDS and _PLACEHOLDER_SECRET.search(m.group(0)):
+        return None
+    return m
+
+
+def python_literal_spans(text: str) -> list[list[tuple[int, int]]] | None:
+    """Per line of a Python file: the (start, end) columns covered by string literals, docstrings
+    and comments (a multi-line string covers its middle lines whole). None when the file does not
+    tokenize or its lines do not line up."""
+    rows = text.split("\n")
+    spans: list[list[tuple[int, int]]] = [[] for _ in rows]
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type not in _BLANK_TOKENS:
+                continue
+            (sr, sc), (er, ec) = tok.start, tok.end
+            for r in range(sr, er + 1):
+                spans[r - 1].append((sc if r == sr else 0, ec if r == er else len(rows[r - 1])))
+    except (tokenize.TokenError, SyntaxError, IndexError):
+        return None
+    if text.endswith("\n"):
+        spans = spans[:-1]
+    return spans if len(spans) == len(text.splitlines()) else None
+
+
+def _code_match(rx: re.Pattern, line: str, literal: list[tuple[int, int]]) -> re.Match | None:
+    """The first match of ``rx`` that is not entirely inside one literal / comment span."""
+    for m in rx.finditer(line):
+        if not any(s <= m.start() and m.end() <= e for s, e in literal):
+            return m
+    return None
+
+
+def python_code_view(text: str) -> list[str] | None:
+    """The lines of a Python file with every string literal, docstring and comment blanked (same
+    length, so match positions still point into the real line). f-string expressions stay: they are
+    code. None when the file does not tokenize or its lines do not line up (then rules see the raw text)."""
+    rows = [list(row) for row in text.split("\n")]
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            if tok.type not in _BLANK_TOKENS:
+                continue
+            (sr, sc), (er, ec) = tok.start, tok.end
+            for r in range(sr, er + 1):
+                row = rows[r - 1]
+                for c in range(sc if r == sr else 0, ec if r == er else len(row)):
+                    if row[c] != "\r":
+                        row[c] = " "
+    except (tokenize.TokenError, SyntaxError, IndexError):
+        return None
+    view = ["".join(row).rstrip("\r") for row in rows]
+    if text.endswith("\n"):
+        view = view[:-1]
+    return view if len(view) == len(text.splitlines()) else None
+
+
+def _without_quoted(line: str) -> str:
+    """The line with quoted text blanked (same length): '...' and "..." on one line."""
+    return _QUOTED.sub(lambda m: m.group(0)[0] + " " * (len(m.group(0)) - 2) + m.group(0)[-1], line)
+
+
+def _fenced_lines(text: str) -> set[int]:
+    """Line numbers inside fenced code blocks (``` / ~~~) of a Markdown file."""
+    inside, out, fence = False, set(), ""
+    for no, line in enumerate(text.splitlines(), 1):
+        m = _FENCE.match(line)
+        if m and (not inside or m.group(1) == fence):
+            inside, fence = not inside, m.group(1)
+            continue
+        if inside:
+            out.add(no)
+    return out
+
+
+# --------------------------------------------------------------------------- post-guardrail
+# Every finding a line rule reports is re-checked against the file before it leaves the sandbox;
+# one that does not hold up is removed as a false positive and counted under its reason.
+FP_REASONS = {
+    "line": "reported line is not in the file",
+    "pattern": "rule pattern not on the reported line",
+    "string": "only inside a string, docstring or comment",
+    "prose": "Markdown prose, not code",
+    "placeholder": "placeholder value, not a real secret",
+}
+
+
+def _line_rule_patterns() -> dict[str, list[re.Pattern]]:
+    out: dict[str, list[re.Pattern]] = {}
+    for rid, rx, *_ in BACKEND_RULES:
+        if rx is not None:
+            out.setdefault(rid, []).append(rx)
+    for rid, rx, *_ in JS_RULES:
+        out.setdefault(rid, []).append(rx)
+    return out
+
+
+def _false_positive(f: dict, lines: list[str], view: list[str] | None, fenced: set[int] | None,
+                    literal: list[list[tuple[int, int]]] | None = None) -> str | None:
+    """Why a line-rule finding does not hold up against the source, or None when it does."""
+    _, no = split_location(f.get("affected_url"))
+    if not no or no > len(lines):
+        return "line"
+    rid = str(f.get("title", "")).split(":", 1)[0]
+    raw = lines[no - 1][:5000]
+    if fenced is not None and no not in fenced and rid not in _SECRET_RULE_IDS:
+        return "prose"
+    patterns = _LINE_RULE_PATTERNS.get(rid)
+    if not patterns:
+        return None
+    if rid in _SECRET_RULE_IDS and any(rx.search(raw) for rx in patterns) and not any(
+            _real_secret(rid, m) for rx in patterns for m in rx.finditer(raw)):
+        return "placeholder"
+    target = raw
+    if view is not None and rid in _PY_CODE_ONLY_RULES:
+        target = view[no - 1][:5000]
+    elif rid in _VALUE_RULES:
+        target = _without_quoted(raw)
+    if literal is not None and rid not in _STRING_CONTENT_RULES and rid not in _PY_CODE_ONLY_RULES:
+        if any(_code_match(rx, target, literal[no - 1]) for rx in patterns):
+            return None
+    elif any(rx.search(target) for rx in patterns):
+        return None
+    return "string" if any(rx.search(raw) for rx in patterns) else "pattern"
+
+
+_LINE_RULE_PATTERNS = _line_rule_patterns()
+
+
+def verify_findings(res: Results, start: int, text: str, ext: str) -> None:
+    """Post-guardrail for one file: re-check the line-rule findings added since ``start``."""
+    new = res.findings[start:]
+    if not any(id(f) in res._line_rule for f in new):
+        return
+    lines = text.splitlines()
+    view = python_code_view(text) if ext in PY_EXT else None
+    literal = python_literal_spans(text) if ext in PY_EXT else None
+    fenced = _fenced_lines(text) if ext in DOC_EXT else None
+    kept = []
+    for f in new:
+        if id(f) not in res._line_rule:
+            kept.append(f)
+            continue
+        res.verification["checked"] += 1
+        reason = _false_positive(f, lines, view, fenced, literal)
+        if reason is None:
+            res.verification["verified"] += 1
+            kept.append(f)
+        else:
+            res.verification["dropped"] += 1
+            res.verification["reasons"][reason] = res.verification["reasons"].get(reason, 0) + 1
+    res.findings[start:] = kept
+
+
 def _scan_lines(res: Results, text: str, *, source: str, where: str, ext: str, js: bool,
                 backend: bool, name: str = "") -> None:
     base = name.lower()
+    code_view = python_code_view(text) if backend and ext in PY_EXT else None
+    # A script that defines its own `$` (e.g. a getElementById helper) and never uses jQuery: the
+    # jQuery rules do not apply (DOM append() inserts strings as text, not HTML).
+    own_dollar = bool(backend and ext in JS_EXT | {".html", ".htm"} and _OWN_DOLLAR.search(text[:2_000_000])
+                      and not _JQUERY_REF.search(text[:2_000_000]))
+    literal = python_literal_spans(text) if code_view is not None else None
+    doc_code = _fenced_lines(text) if ext in DOC_EXT else None
     for no, line in enumerate(text.splitlines(), 1):
         if len(line) > 5000:
             line = line[:5000]
@@ -599,9 +800,22 @@ def _scan_lines(res: Results, text: str, *, source: str, where: str, ext: str, j
             for rid, rx, sev, cat, desc, cwe, rec, langs in BACKEND_RULES:
                 if rx is None or (langs is not None and ext not in langs and base not in langs):
                     continue
-                m = rx.search(line)
+                if doc_code is not None and no not in doc_code and rid not in _SECRET_RULE_IDS:
+                    continue  # Markdown prose is not code
+                if own_dollar and rid == "XSS_JQUERY_HTML":
+                    continue
+                target = line
+                if code_view is not None and rid in _PY_CODE_ONLY_RULES:
+                    target = code_view[no - 1][:5000]
+                elif rid in _VALUE_RULES:
+                    target = _without_quoted(line)
+                if literal is not None and rid not in _STRING_CONTENT_RULES and rid not in _PY_CODE_ONLY_RULES:
+                    m = _code_match(rx, target, literal[no - 1])  # text in a string / comment is not code
+                else:
+                    m = rx.search(target)
+                m = _real_secret(rid, m)
                 if m:
-                    res.add(source=source, rid=rid, severity=sev, category=cat, title=f"{rid}: {desc}",
+                    res.add(source=source, rid=rid, line_rule=True, severity=sev, category=cat, title=f"{rid}: {desc}",
                             description=desc, where=where, line_no=no, evidence=_excerpt(line, rid, m),
                             cwe=cwe, recommendation=rec)
         if js or not backend:
@@ -610,17 +824,17 @@ def _scan_lines(res: Results, text: str, *, source: str, where: str, ext: str, j
                     continue  # non-JS text: only secret rules
                 if rid == "JS_HTTP_URL" and not js:
                     continue
-                m = rx.search(line)
+                m = _real_secret(rid, rx.search(line))
                 if m:
-                    res.add(source=source, rid=rid, severity=sev, category=cat, title=f"{rid}: {desc}",
+                    res.add(source=source, rid=rid, line_rule=True, severity=sev, category=cat, title=f"{rid}: {desc}",
                             description=desc, where=where, line_no=no, evidence=_excerpt(line, rid, m),
                             cwe=cwe, recommendation=JS_RECOMMENDATIONS.get(rid, ""))
         elif backend:
             for rid, rx, sev, cat, desc, cwe in JS_RULES:
                 if rid in _SECRET_RULE_IDS:
-                    m = rx.search(line)
+                    m = _real_secret(rid, rx.search(line))
                     if m:
-                        res.add(source=source, rid=rid, severity=sev, category=cat, title=f"{rid}: {desc}",
+                        res.add(source=source, rid=rid, line_rule=True, severity=sev, category=cat, title=f"{rid}: {desc}",
                                 description=desc, where=where, line_no=no,
                                 evidence=_excerpt(line, rid, m), cwe=cwe,
                                 recommendation=JS_RECOMMENDATIONS.get(rid, ""))
@@ -685,10 +899,12 @@ def scan_routes(res: Results, text: str, *, where: str, ext: str) -> None:
     if ext not in CODE_EXT:
         return
     lines = text.splitlines()
+    # A route written inside a Python string or comment (an example, a fixture) is text, not a route.
+    literal = python_literal_spans(text) if ext in PY_EXT else None
     starts = []
     for i, line in enumerate(lines):
         for rx in _ROUTE_PATTERNS:
-            m = rx.search(line[:2000])
+            m = rx.search(line[:2000]) if literal is None else _code_match(rx, line[:2000], literal[i])
             if m:
                 starts.append((i, m.group("p"), m.group("m")))
                 break
@@ -731,12 +947,27 @@ def scan_routes(res: Results, text: str, *, where: str, ext: str) -> None:
 _MESSAGE_LISTENER = re.compile(r"""(?:addEventListener\s*\(\s*['"]message['"]|\bonmessage\s*=)""")
 
 
+# Objects whose 'message' events are not cross-origin postMessage: a BroadcastChannel (same origin
+# only), a WebSocket (messages from its own server), a Worker / SharedWorker (own script), an
+# EventSource (server-sent events). Only window/self 'message' events need an origin check.
+_BROADCAST_CHANNEL = re.compile(
+    r"([\w$.]+)\s*=\s*new\s+(?:BroadcastChannel|WebSocket|Worker|SharedWorker|EventSource)\s*\(")
+
+
+def _broadcast_listener(line: str, channels: set[str]) -> bool:
+    """A listener on one of those objects: there is no sender origin to check (unlike window
+    'message' events from postMessage)."""
+    return any(re.search(rf"(?<![\w$]){re.escape(ch)}\s*\.\s*(?:onmessage\b|addEventListener\s*\()", line)
+               for ch in channels)
+
+
 def scan_file_level(res: Results, text: str, *, where: str, name: str) -> None:
     low = name.lower()
     if os.path.splitext(low)[1] in JS_EXT | {".html", ".htm"}:
         lines = text.splitlines()
+        channels = {m.group(1) for m in _BROADCAST_CHANNEL.finditer(text[:2_000_000])}
         for i, line in enumerate(lines):
-            if _MESSAGE_LISTENER.search(line[:2000]):
+            if _MESSAGE_LISTENER.search(line[:2000]) and not _broadcast_listener(line[:2000], channels):
                 window = "\n".join(x[:2000] for x in lines[i:i + 15])
                 if not re.search(r"\.origin\b", window):
                     res.add(source="sandbox_source", rid="POSTMESSAGE_NO_ORIGIN_CHECK", severity="medium",
@@ -769,6 +1000,13 @@ def scan_style(res: Results, text: str, *, where: str) -> None:
         res.style_findings += 1
 
 
+def is_pytest_file(name: str) -> bool:
+    """A pytest test module or fixture file (pytest's discovery names: test_*.py, *_test.py,
+    conftest.py). Not part of the SAST: tests hold deliberately vulnerable snippets."""
+    low = name.lower()
+    return low.endswith(".py") and (low.startswith("test_") or low.endswith("_test.py") or low == "conftest.py")
+
+
 def scan_source(res: Results, root: str, progress: Progress | None = None) -> None:
     progress = progress or Progress()
     root_real = _norm(root)
@@ -779,7 +1017,7 @@ def scan_source(res: Results, root: str, progress: Progress | None = None) -> No
             path = os.path.join(dirpath, name)
             rel = os.path.relpath(path, root).replace(os.sep, "/")
             key = f"source:{rel}"
-            if progress.skip(key):
+            if progress.skip(key) or is_pytest_file(name):
                 continue
             if os.path.islink(path) and not _under(path, [root_real]):
                 res.stats["symlinks_outside"] += 1
@@ -806,12 +1044,14 @@ def scan_source(res: Results, root: str, progress: Progress | None = None) -> No
             res.stats["source_bytes"] = total
             ext = os.path.splitext(name.lower())[1]
             where = f"source/{rel}"
+            start = len(res.findings)
             _scan_lines(res, text, source="sandbox_source", where=where, ext=ext,
                         js=ext in JS_EXT, backend=True, name=name)
             scan_routes(res, text, where=where, ext=ext)
             scan_file_level(res, text, where=where, name=name)
             if ext in PY_EXT:
                 scan_style(res, text, where=where)
+            verify_findings(res, start, text, ext)  # post-guardrail: drop findings that do not hold up
             del text
             progress.file_done(res, key)
     progress.flush(res, "source")
@@ -974,9 +1214,24 @@ def probe_egress(out_dir_hint: str) -> None:
 
 
 # --------------------------------------------------------------------------- recommendations
+# Per-rule file + line list in the recommendations (report "Where" lists); the rest is counted.
+MAX_LOCATIONS_PER_RULE = 200
+_LINE_SUFFIX = re.compile(r"#L(\d+)$")
+
+
+def split_location(loc: object) -> tuple[str, int | None]:
+    """'source/app/x.py#L12' -> ('source/app/x.py', 12); no '#L<n>' -> (path, None)."""
+    text = str(loc or "")
+    m = _LINE_SUFFIX.search(text)
+    return (text[:m.start()], int(m.group(1))) if m else (text, None)
+
+
 def build_recommendations(findings: list[dict]) -> list[dict]:
-    """One entry per rule, most severe first: what to fix, how often, and one example location."""
+    """One entry per rule, most severe first: what to fix, how often, one example location and
+    every location (``locations``: [{file, line}], sorted, at most MAX_LOCATIONS_PER_RULE;
+    ``locations_total`` counts them all)."""
     groups: dict[str, dict] = {}
+    places: dict[str, set[tuple[str, int]]] = {}
     for f in findings:
         rid = str(f.get("title", "")).split(":", 1)[0]
         g = groups.get(rid)
@@ -984,9 +1239,17 @@ def build_recommendations(findings: list[dict]) -> list[dict]:
             groups[rid] = g = {"rule": rid, "severity": f.get("severity"), "category": f.get("category"),
                                "cwe": f.get("cwe"), "count": 0, "example": f.get("affected_url"),
                                "recommendation": f.get("recommendation") or RECOMMENDATIONS.get(rid, "")}
+            places[rid] = set()
         g["count"] += 1
+        if f.get("affected_url"):
+            path, line = split_location(f["affected_url"])
+            places[rid].add((path, line or 0))
         if _SEV_ORDER.get(f.get("severity"), 9) < _SEV_ORDER.get(g["severity"], 9):
             g["severity"], g["example"] = f.get("severity"), f.get("affected_url")
+    for rid, g in groups.items():
+        ordered = sorted(places[rid])
+        g["locations"] = [{"file": p, "line": n or None} for p, n in ordered[:MAX_LOCATIONS_PER_RULE]]
+        g["locations_total"] = len(ordered)
     return sorted(groups.values(), key=lambda g: (_SEV_ORDER.get(g["severity"], 9), -g["count"], g["rule"]))
 
 

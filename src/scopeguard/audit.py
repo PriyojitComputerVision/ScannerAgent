@@ -206,13 +206,33 @@ def read(path: str | Path = DEFAULT_PATH) -> list[dict]:
     return out
 
 
+# A record written when report retention deletes an old report folder (pentest_agent/report_retention.py):
+# {"event": "report.deleted", "report.deleted": {"folder": name, "files": {file: sha256}}}.
+REPORT_DELETED_EVENT = "report.deleted"
+
+
+def _retention_deletions(records: list[dict]) -> dict[str, dict[str, str]]:
+    """{folder: {file: sha256}} of report files removed by retention, from the chain itself."""
+    out: dict[str, dict[str, str]] = {}
+    for rec in records:
+        info = rec.get(REPORT_DELETED_EVENT) if rec.get("event") == REPORT_DELETED_EVENT else None
+        if isinstance(info, dict) and isinstance(info.get("files"), dict):
+            out.setdefault(str(info.get("folder", "")), {}).update(
+                {str(k): str(v) for k, v in info["files"].items()})
+    return out
+
+
 def verify(path: str | Path = DEFAULT_PATH, key: str | bytes | None = None,
            reports_dir: str | Path | None = None) -> dict:
-    """Check the whole chain (and, with ``reports_dir``, the report file hashes)."""
+    """Check the whole chain (and, with ``reports_dir``, the report file hashes). A report file that
+    is gone counts as intact only when a later ``report.deleted`` record (retention) lists it with
+    the same hash; that record is part of the HMAC chain, so it cannot be added without the key."""
     key_bytes = key.encode("utf-8") if isinstance(key, str) else key
     problems: list[str] = []
-    prev_hash, expected_seq, count, unverifiable = "", 1, 0, 0
-    for rec in read(path):
+    prev_hash, expected_seq, count, unverifiable, retired = "", 1, 0, 0, 0
+    records = read(path)
+    deleted = _retention_deletions(records) if reports_dir else {}
+    for rec in records:
         count += 1
         if "_unparseable" in rec:
             problems.append(f"line {count}: not valid JSON")
@@ -232,7 +252,9 @@ def verify(path: str | Path = DEFAULT_PATH, key: str | bytes | None = None,
             folder = Path(reports_dir) / str(rec["report"].get("folder", ""))
             for name, digest in (rec["report"].get("files") or {}).items():
                 actual = file_sha256(folder / name)
-                if actual is None:
+                if actual is None and deleted.get(folder.name, {}).get(name) == digest:
+                    retired += 1  # removed by report retention, and audited
+                elif actual is None:
                     problems.append(f"record {seq}: report file {folder.name}/{name} is missing")
                 elif actual != digest:
                     problems.append(f"record {seq}: report file {folder.name}/{name} was modified")
@@ -240,6 +262,7 @@ def verify(path: str | Path = DEFAULT_PATH, key: str | bytes | None = None,
         expected_seq = (seq if isinstance(seq, int) else expected_seq) + 1
     return {"ok": not problems and not unverifiable, "records": count, "problems": problems,
             "unverifiable_hmac_records": unverifiable,
+            "report_files_removed_by_retention": retired,
             "last_hash": prev_hash or None}
 
 

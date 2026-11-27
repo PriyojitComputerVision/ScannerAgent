@@ -151,3 +151,13 @@ def test_log_file_receives_warnings_and_errors(tmp_path, monkeypatch):
             for h in [h for h in lg.handlers if getattr(h, "baseFilename", "") == str(log.resolve())]:
                 lg.removeHandler(h)
                 h.close()
+
+
+def test_no_api_documentation_endpoints():
+    """No Swagger UI, ReDoc, OpenAPI schema or OAuth2 redirect page (the API is documented in docs/)."""
+    assert app.docs_url is None and app.redoc_url is None and app.openapi_url is None
+    client = TestClient(app)
+    for path in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect", "/swagger", "/graphql"):
+        assert client.get(path).status_code in (401, 404), path
+    routes = {getattr(r, "path", "") for r in app.routes}
+    assert not routes & {"/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"}
