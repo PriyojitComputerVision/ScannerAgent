@@ -272,6 +272,7 @@ Run everything with `uv run pytest` (no real network or LLM calls; the golden li
 | `tests/test_dast_native.py` | Native DAST end to end against the built-in vulnerable target, unknown profiles, unreachable targets. |
 | `tests/test_dedupe.py` | Findings from recon, DAST and probes that describe the same issue are merged. |
 | `tests/test_engine_read_timeout.py` | A page whose body stalls after the headers must not abort the whole scan. |
+| `tests/test_flag_levels.py` | Red-flag levels (scopeguard/flag_levels.py): errors, warnings and scope notes, the same in the reports, get_scan and the browser console (its FLAG_RULES mirror). |
 | `tests/test_gitignore.py` | The project's .gitignore decides what the code SAST leaves out (scopeguard/gitignore.py). |
 | `tests/test_golden_dataset.py` | Golden dataset: schema, deterministic data checks, model checks, judge gate, drift verdict. |
 | `tests/test_graph_structure.py` | Graph wiring: the SAST sub-agent as a subgraph node, edges declared for drawing, and message compaction with LangChain's SummarizationMiddleware. |
@@ -283,6 +284,7 @@ Run everything with `uv run pytest` (no real network or LLM calls; the golden li
 | `tests/test_network_policy.py` | Network policy (scopeguard/netpolicy.py): metadata/link-local blocking, DNS rebinding protection at connect time, and enforcement in every layer. |
 | `tests/test_new_checks.py` | The extra SAST and DAST checks: code rules (archives, temp files, assert, ciphers, IVs, password hashing, timing-safe compare, SQLAlchemy text(), Django hosts, debug server), website JavaScript rules (DOM XSS, string timers, API tokens), and DAST checks (Subresource Integrity, weak HSTS, forms posting to HTTP, GraphQL introspection, more exposed files). Positive and safe variants; no network. |
 | `tests/test_probe_checks.py` | Hand-written probe checks and the probe result cache. No real network: responses are built in memory or served by httpx.MockTransport. |
+| `tests/test_probe_context.py` | Probe planner context: chunked and summarized when too large, then the plan runs (no network). |
 | `tests/test_prompts.py` | Prompts live in a gitignored folder; a missing prompt must degrade to the deterministic fallbacks instead of crashing. |
 | `tests/test_rate_limit.py` | HTTP 429 handling: target links (engine + httpx transport), LLM retries, backend limits. |
 | `tests/test_recon_helpers.py` | Recon / crawl helpers: link extraction, scope filtering, discovery. |

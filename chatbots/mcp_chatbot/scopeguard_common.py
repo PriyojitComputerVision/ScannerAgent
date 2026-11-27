@@ -551,7 +551,15 @@ def scan_result_markdown(r: dict) -> str:
             out.append(f"- **{title}**" + (f" (x{g['n']})" if g["n"] > 1 else "") + f" - {urls or '-'}"
                        + (f" - {f['cwe']}" if f.get("cwe") else "") + (f" - fix: {fix}" if fix else ""))
     out += _code_sast_markdown(r.get("code_sast"))
-    if r.get("red_flags"):
+    levels = r.get("red_flags_by_level") or {}
+    if levels:  # errors / warnings are red flags; notes are scope information, not failures
+        flagged = [f"- **Error:** {f}" for f in levels.get("error") or []] + [
+            f"- **Warning:** {f}" for f in levels.get("warn") or []]
+        if flagged:
+            out += ["", "#### Red flags"] + flagged
+        if levels.get("note"):
+            out += ["", "#### Notes (scope, not failures)"] + [f"- {f}" for f in levels["note"]]
+    elif r.get("red_flags"):
         out += ["", "#### Red flags"] + [f"- {flag}" for flag in r["red_flags"]]
     files = r.get("report_files") or {}
     if files:
@@ -672,8 +680,14 @@ def compact_scan_result(r: dict) -> str:
             lines.append("executable / script files (level warning: tell the user to review them; "
                          "level note: shell scripts, mention briefly): "
                          + "; ".join(str(n) for n in langs["warnings"][:20]))
-    for flag in r.get("red_flags") or []:
-        lines.append(f"red flag: {flag}")
+    levels = r.get("red_flags_by_level") or {}
+    if levels:
+        for lv, name in (("error", "red flag (error)"), ("warn", "red flag (warning)"), ("note", "note (scope, not a failure)")):
+            for flag in levels.get(lv) or []:
+                lines.append(f"{name}: {flag}")
+    else:
+        for flag in r.get("red_flags") or []:
+            lines.append(f"red flag: {flag}")
     if r.get("executive_summary"):
         lines.append("executive summary: " + " ".join(str(r["executive_summary"]).split())[:1500])
     if r.get("report_files"):
