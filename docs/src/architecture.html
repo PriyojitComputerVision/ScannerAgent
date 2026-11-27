@@ -58,7 +58,7 @@
 </head>
 <body>
   <h1>ScopeGuard architecture</h1>
-  <p class="sub">A browser console, any WebSocket client, or another agent over MCP / A2A starts a scan; the FastAPI server queues it and runs the 13-step LangGraph pipeline. Every route ends in a tamper-evident audit record.</p>
+  <p class="sub">A browser console, any WebSocket client, or another agent over MCP / A2A starts a scan; the FastAPI server queues it and runs the 16-step LangGraph pipeline. Every route ends in a tamper-evident audit record.</p>
   <div class="legend">
     <span><i class="tag web">target</i> sends in-scope requests to the website</span>
     <span><i class="tag llm">LLM</i> calls Groq (optional, offline fallback)</span>
@@ -68,7 +68,7 @@
   </div>
 
   <div class="row clients">
-    <div class="box"><b>Browser console · uv run pentest-agent</b><span>one-time sign-in link → RS256 JWT in sessionStorage; strict CSP, no inline code</span></div>
+    <div class="box"><b>Browser console · uv run pentest-agent</b><span>one-time sign-in link → RS256 JWT in sessionStorage; strict CSP, no inline code; live counts merged per issue + URL like the report; risk grade = critical×10 + high×6 + medium×3 + low×1 (tooltip)</span></div>
     <div class="box"><b>WebSocket client</b><span>scripts/ws_client.py · Postman · any WS client</span></div>
     <div class="box"><b>Operator (human in the loop)</b><span>picks what to test (website, code, both), signs in to SSO / enters the MFA code, gives the code when a scan pauses</span></div>
     <div class="box"><b>Coding assistants · other agents</b><span>MCP (stdio via .mcp.json, or HTTP) · A2A 1.0; credentials by profile name only</span></div>
@@ -141,7 +141,7 @@
         <div class="tags"><i class="tag web">target</i></div>
 
         <div class="node"><span class="t">aggregate</span><span>deterministic</span></div>
-        <div class="mod"><b>scopeguard/citations.py</b><span>dedupe findings, red flags, built-in summary citing [Sn]</span></div>
+        <div class="mod"><b>pentest_agent/dedupe.py · scopeguard/citations.py</b><span>one finding per issue + URL (merged duplicates, highest severity), red flags, built-in summary citing [Sn]</span></div>
         <div class="tags"></div>
 
         <div class="node"><span class="t">summarize</span><span>LLM summary</span></div>
@@ -182,7 +182,7 @@
       <div class="box disk"><div class="h">local disk · data/</div><b>Files the server writes</b>
         <ul>
           <li>reports/&lt;session_id&gt;/report.*</li>
-          <li>checkpoints/main.sqlite (AES at rest; async aiosqlite, WAL + busy timeout: server and MCP/A2A scans write it concurrently)</li>
+          <li>checkpoints/main.sqlite (AES at rest; async aiosqlite, WAL + busy timeout: server and MCP/A2A scans write it concurrently; older than CHECKPOINT_RETENTION_HOURS (24) deleted + VACUUM)</li>
           <li>audit/audit.jsonl (pentest-audit verify)</li>
           <li>audit/code_audit.jsonl (pentest-audit --trail code verify)</li>
           <li>uploads/&lt;id&gt;/ (archive until scanned, checkpoint)</li>

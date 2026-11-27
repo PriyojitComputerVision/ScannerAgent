@@ -33,6 +33,11 @@ SQLite checkpoints (AES-encrypted with `CHECKPOINT_ENCRYPTION_KEY`) and the audi
 Checkpoints are written asynchronously (aiosqlite + LangGraph's `AsyncSqliteSaver`, no synchronous SQLite anywhere);
 the server and every MCP / A2A scan share the file through WAL mode with a busy timeout
 (`CHECKPOINT_BUSY_TIMEOUT_SECONDS`, 30), so concurrent scans wait for each other instead of failing with "database is locked".
+Old checkpoints are deleted to keep the database small: scan threads whose newest checkpoint is older than
+`CHECKPOINT_RETENTION_HOURS` (24; `0` keeps everything) go, with old code-check checkpoint files, and the file
+is compacted (VACUUM). The server checks at start and every `CHECKPOINT_CLEANUP_INTERVAL_MINUTES` (60); every
+MCP / A2A scan also offers a round (at most once per interval per process), never touching a running scan.
+A deleted scan can no longer be resumed; its report and audit record are kept.
 The diagrams are rendered from `docs/src/*.html` with `uv run python scripts/render_docs.py`. The same scan engine (`src/scopeguard/`) also runs
 standalone through `python -m scopeguard.cli`.
 

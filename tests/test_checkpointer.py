@@ -109,3 +109,68 @@ async def test_checkpoints_are_encrypted_at_rest(tmp_path, monkeypatch):
 def test_without_a_key_checkpoints_stay_plaintext(monkeypatch):
     monkeypatch.setattr(settings, "checkpoint_encryption_key", "")
     assert cp.make_serde() is None
+
+
+# ---------------------------------------------------------------- retention (CHECKPOINT_RETENTION_HOURS)
+def test_checkpoint_time_reads_the_uuid6_id():
+    import time as _time
+
+    from langgraph.checkpoint.base.id import uuid6
+
+    assert abs(cp.checkpoint_time(str(uuid6())) - _time.time()) < 5
+    assert cp.checkpoint_time("not-a-uuid") is None
+    assert cp.checkpoint_time("12345678-1234-4234-8234-123456789abc") is None  # v4: no time in it
+
+
+async def test_old_threads_are_deleted_and_the_file_compacted(tmp_path, monkeypatch):
+    db = str(tmp_path / "main.sqlite")
+    monkeypatch.setattr(settings, "checkpoint_db_path", db)
+    monkeypatch.setattr(settings, "subagent_checkpoint_db_path", str(tmp_path / "absent.sqlite"))
+    monkeypatch.setattr(settings, "checkpoint_retention_hours", 24)
+    async with cp.async_main_checkpointer(db) as saver:
+        for thread in ("old-1", "old-2", "running", "fresh"):
+            await _counter_graph(saver, 40).ainvoke({"n": 0, "secret": "x" * 2000},
+                                                    {"configurable": {"thread_id": thread}})
+        # Two days later: every thread is older than 24 h, except "fresh", which ran just now.
+        later = cp.time.time() + 2 * 86400
+        monkeypatch.setattr(cp.time, "time", lambda: later)
+        monkeypatch.setattr(cp, "checkpoint_time",
+                            lambda cid, real=cp.checkpoint_time: real(cid) + (2 * 86400 if fresh_ids.get(cid) else 0))
+        async with saver.conn.execute("SELECT checkpoint_id FROM checkpoints WHERE thread_id='fresh'") as cur:
+            fresh_ids = {r[0]: True for r in await cur.fetchall()}
+        result = await cp.cleanup_checkpoints(saver, protect=frozenset({"running"}), force=True)
+        async with saver.conn.execute("SELECT DISTINCT thread_id FROM checkpoints") as cur:
+            left = {r[0] for r in await cur.fetchall()}
+        async with saver.conn.execute("SELECT COUNT(*) FROM writes WHERE thread_id LIKE 'old-%'") as cur:
+            writes_left = (await cur.fetchone())[0]
+    assert left == {"running", "fresh"} and writes_left == 0  # protected + recent stay
+    assert result["threads"] == 2 and result["bytes_after"] < result["bytes_before"]  # compacted
+
+
+async def test_retention_zero_keeps_everything_and_cleanup_is_throttled(tmp_path, monkeypatch):
+    db = str(tmp_path / "main.sqlite")
+    monkeypatch.setattr(settings, "checkpoint_db_path", db)
+    async with cp.async_main_checkpointer(db) as saver:
+        await _counter_graph(saver, 3).ainvoke({"n": 0}, {"configurable": {"thread_id": "t"}})
+        assert await cp.prune_old_checkpoints(saver, 0) == 0
+        monkeypatch.setattr(settings, "checkpoint_retention_hours", 0)
+        assert await cp.cleanup_checkpoints(saver, force=True) is None
+        monkeypatch.setattr(settings, "checkpoint_retention_hours", 24)
+        monkeypatch.setattr(cp, "_last_cleanup", {})
+        assert await cp.cleanup_checkpoints(saver) is not None   # first round runs
+        assert await cp.cleanup_checkpoints(saver) is None       # within the interval: skipped
+
+
+def test_old_codecheck_files_are_removed(tmp_path, monkeypatch):
+    import os
+    import time as _time
+
+    monkeypatch.setattr(settings, "checkpoint_db_path", str(tmp_path / "main.sqlite"))
+    folder = tmp_path / "codecheck"
+    folder.mkdir()
+    old, new = folder / "old.json", folder / "new.json"
+    old.write_text("{}"), new.write_text("{}")
+    os.utime(old, (_time.time() - 3 * 86400,) * 2)
+    assert cp.prune_codecheck_files(24) == 1
+    assert not old.exists() and new.exists()
+    assert cp.prune_codecheck_files(0) == 0
