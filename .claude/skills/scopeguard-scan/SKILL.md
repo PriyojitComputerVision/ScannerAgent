@@ -188,7 +188,8 @@ the admin role (`scan:source`) and covers **Python projects only for now** (tell
    `start_scan(target_url, authorization_confirmed=true, upload_id=...)` (or `git_url=...`; never both).
    Add `scan_scope="code"` when they want only the code checked: `target_url` may then be left out (no
    website is needed or contacted). `scan_scope="website"` never goes with code.
-3. Follow with `get_scan` as usual. The code runs in a Kubernetes Job with no network (5x the code's size
+3. Follow with `get_scan` as usual. The code runs in a Kubernetes Job with no network, or in the Python
+   process sandbox (also no network) when no Kubernetes cluster is ready (5x the code's size
    in memory, 10x on an out-of-memory retry that resumes from the checkpoint). Its findings
    (`source: code_upload`) are in the same `findings` list and report; `code_sast` summarises the code
    (file name, sha256, `source`: zip / files / git URL + commit, findings, sandbox, `languages`). A red
