@@ -189,7 +189,7 @@ every scan.</p>
           <span class="d">a .zip (name, MIME type, zip signature checked) or code files; admin; nothing unpacked here; Python only for now</span>
           <div class="tags"><span class="tag guard">rules</span><span class="tag disk">disk</span></div></div>
         <div class="tool"><span class="n">start_scan(upload_id | git_url, scan_scope)</span>
-          <span class="d">the code is analysed only as the scan's code_sast step (git: .git link, reachability checked, optional branch/tag): Kubernetes Job, no network; non-Python files marked partial, executables/batch files as warnings, shell scripts as notes; get_scan.code_sast</span>
+          <span class="d">the code is analysed only as the scan's code_sast step, with the website or code only (git: .git link, reachability checked, optional branch/tag): Kubernetes Job or the Python process sandbox, no network; non-Python files marked partial, executables/batch files as warnings, shell scripts as notes; get_scan.code_sast</span>
           <div class="tags"><span class="tag you">you approve</span><span class="tag guard">rules</span></div></div>
       </div>
     </div>
