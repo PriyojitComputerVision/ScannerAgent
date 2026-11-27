@@ -78,7 +78,7 @@ def test_healthz():
         http_idle = {"active": 0, "max_active": 1, "waiting": 0, "max_queue": 50}
         assert resp.json() == {"status": "ok", "graph_initialized": True, "langsmith_tracing": False,
                                "queues": {"websocket": ws_idle, "http": http_idle},
-                               "integrations": {"mcp_http": True, "a2a": True}}
+                               "integrations": {"mcp_http": True, "a2a": True}, "cors": False}
 
 
 def _reports_dir(tmp_path, monkeypatch):

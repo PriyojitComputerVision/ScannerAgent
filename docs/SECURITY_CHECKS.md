@@ -264,6 +264,7 @@ Run everything with `uv run pytest` (no real network or LLM calls; the golden li
 | `tests/test_codestyle.py` | PEP 8 coding-standard check for uploaded Python code (scopeguard.codestyle): rules, one finding per rule and file, caps, the sandbox analyzer path, remediation and the report section. |
 | `tests/test_config.py` | Settings: defaults, validation and environment overrides. |
 | `tests/test_content_policy.py` | Scans never download files (scopeguard/contentpolicy.py): attachments and binaries are discarded unread, file links are not crawled, text is capped. |
+| `tests/test_cors_and_ws_client.py` | CORS (pentest_agent/cors.py), its WebSocket Origin rule, and the ws_client pretty printer. |
 | `tests/test_dast_native.py` | Native DAST end to end against the built-in vulnerable target, unknown profiles, unreachable targets. |
 | `tests/test_dedupe.py` | Findings from recon, DAST and probes that describe the same issue are merged. |
 | `tests/test_engine_read_timeout.py` | A page whose body stalls after the headers must not abort the whole scan. |

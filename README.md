@@ -117,7 +117,8 @@ There is no login screen, and API authentication stays on:
 - Report links work through an HttpOnly, SameSite=Strict cookie set by `POST /api/report-cookie`.
 - Every UI file is served from a fixed whitelist with a strict CSP: no inline code, no third-party
   loads, no framing. Scanned-site text is rendered as text only, never parsed as HTML.
-- `/ws` rejects browser connections from another origin (close `4403`).
+- `/ws` rejects browser connections from another origin (close `4403`), unless that origin is on
+  `CORS_ALLOWED_ORIGINS` (see [CORS](#cors-browser-apps-on-another-origin)).
 
 Reloading the page keeps the session. After a restart, open the new link the server prints.
 Replace `src/pentest_agent/webui/favicon/favicon.png` to change the tab icon and the top-left logo
@@ -271,11 +272,16 @@ rate limited (`"event": "llm_rate_limit_wait"`, `"wait_seconds"`). One LLM call 
 ### WebSocket client (instead of Postman)
 
 `scripts/ws_client.py` runs the same WebSocket flow from the terminal against a running server.
+The full protocol (every message type, how to handle it, pauses, close codes, resume, CORS, Python and
+browser examples) is in **[docs/WEBSOCKET.md](docs/WEBSOCKET.md)**.
 Start the server first (`uv run pentest-agent`), then run the client in a second terminal from the repo root:
 
 ```bash
 # Self-test against the built-in vulnerable target (prints SIMULATION PASSED/FAILED)
 uv run python scripts/ws_client.py --simulate
+
+# Same, printing every frame sent AND received as pretty, coloured JSON (secrets masked)
+uv run python scripts/ws_client.py --simulate --frames
 
 # Scan your own site (only targets you own or are authorized to test)
 uv run python scripts/ws_client.py https://your-app.example --profile standard --i-have-authorization
@@ -303,9 +309,14 @@ Example `--payload` body (keep it out of git: it holds a live token; `keys/` is 
 ```
 
 The client checks `GET /healthz`, gets a token, connects to `/ws?session_id=<id>`, prints every
-`status` / `phase_update` / `error` message as it arrives, adopts `token_refreshed` tokens,
-and prints the report URLs at the end. With `--interactive-auth` it answers a sign-in pause in the
-terminal (hidden input for codes, cookies and tokens; empty = skip).
+frame it **sends** as indented JSON (tokens, passwords, cookies and MFA codes masked), then every
+server message as it arrives (a summary line, or the whole frame with `--frames`), adopts
+`token_refreshed` tokens, and prints the report URLs at the end. It answers all three pauses on the
+same socket with the matching answer type: `scan_scope` -> `scope_response` (`--ask-scope`),
+`code_source` -> `code_response` (`--ask-for-code`), `sign_in` -> `auth_response`
+(`--interactive-auth`; hidden input for codes, cookies and tokens). Empty input or no terminal =
+the default scope / skip. Source code never travels over the socket: upload it over HTTP first (raw
+`.zip` body or JSON text files, not base64) and pass the `upload_id`.
 
 | Option | Meaning |
 | --- | --- |
@@ -321,13 +332,36 @@ terminal (hidden input for codes, cookies and tokens; empty = skip).
 | `--token-in message\|header\|query` | send the token in the first message (default), `Authorization` header or `?access_token=` |
 | `--no-auth` | send no token (server with `AUTH_ENABLED=false`) |
 | `--host` / `--port` | server address (default `127.0.0.1` / `WS_PORT`) |
-| `--raw` | print every message as full JSON |
+| `--scope` / `--upload-id` / `--git-url` / `--git-ref` | what to test and source code named up front (`--scope code --upload-id ID` needs no URL) |
+| `--ask-scope` / `--ask-for-code` / `--interactive-auth` | turn the scan's pauses on; answered in the terminal |
+| `--scope-answer` / `--code-answer-upload` / `--code-answer-git` | answer those pauses without a prompt |
+| `--origin URL` | send a browser-like `Origin` header (tests `CORS_ALLOWED_ORIGINS`) |
+| `--frames` / `--full` | print every received frame as pretty JSON / without shortening long strings |
+| `--raw` | print received frames as plain full JSON (for pipes / `jq`) |
+| `--no-color` | no ANSI colours (also `NO_COLOR=1` or when not a terminal) |
 | `--save-md FILE` | write the markdown report to a file |
 
 Without `--token` or a token in the payload, the client signs in at `POST /auth/token` with
 `AUTH_CLIENT_ID` / `AUTH_CLIENT_SECRET` from `.env`, or signs a token locally with `keys/`.
 Exit codes: `0` complete, `1` server error or rejected (e.g. `401` expired token),
 `2` socket closed early (it prints the resume command), `3` server not reachable or no token.
+
+### CORS: browser apps on another origin
+
+The console is same-origin and needs nothing. A browser app on another origin (e.g. a dev server on
+`http://localhost:5173`) needs its exact origin in `.env`:
+
+```dotenv
+CORS_ALLOWED_ORIGINS=http://localhost:5173,https://dashboard.example.com
+```
+
+Empty (the default) = same-origin only. Only exact `scheme://host[:port]` entries count: `*`, `null`,
+wildcards, paths and `user:pw@` are refused and logged. No credentials mode: pages send the bearer
+token, never cookies. The same list lets those origins open `/ws` (CORS itself does not cover
+WebSockets); they still need a token. CORS is the outermost middleware, so preflights are answered
+before auth and rate limits, and `401`/`429` replies stay readable. `/healthz` shows `"cors": true/false`;
+`/api/integrations` and the console's Agent integrations card list the origins. Details:
+[docs/WEBSOCKET.md#9-cors-and-browser-clients](docs/WEBSOCKET.md#9-cors-and-browser-clients).
 
 ### Report viewer
 
