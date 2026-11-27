@@ -23,7 +23,11 @@ def test_every_route_is_visible_in_the_drawn_graph():
     edges, nodes = _edges()
     assert "sast:run_sast" in nodes  # the SAST sub-agent is drawn inside the main graph
     expected = {
-        ("__start__", "validate"), ("validate", "recon"), ("validate", "audit"),
+        ("__start__", "validate"), ("validate", "choose_scope"), ("validate", "audit"),
+        # human in the loop before any request: website + code / website only -> recon,
+        # code only -> straight to the code steps, which then end in aggregate
+        ("choose_scope", "recon"), ("choose_scope", "code_source"),
+        ("code_source", "aggregate"), ("code_sast", "aggregate"),
         ("recon", "auth"), ("auth", "code_source"),
         # human in the loop: auth pauses in auth_challenge for SSO / MFA, then continues
         ("auth", "auth_challenge"), ("auth_challenge", "code_source"),

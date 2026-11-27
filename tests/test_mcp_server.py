@@ -382,3 +382,21 @@ async def test_client_sees_tools_and_instructions():
         policy = json.loads(res.content[0].text)
         assert policy["allowed_targets"] == ["app.example.com", "localhost:3000"]
         assert [p["profile"] for p in policy["profiles"] if p["allowed"]] == ["quick", "standard"]
+
+
+# ----------------------------------------------------------------- what to test (scan_scope)
+async def test_start_scan_passes_the_scope_and_checks_it(monkeypatch, fake_graph):
+    tool = next(t for t in await mcp_mod.mcp.list_tools() if t.name == "start_scan")
+    assert "scan_scope" in tool.input_schema["properties"]
+    args = {"target_url": "https://app.example.com/", "authorization_confirmed": True,
+            "git_url": "https://github.com/acme/shop.git", "scan_scope": "code"}
+    with pytest.raises(ToolError, match="scan:source"):  # scanner role: no source code
+        await _call("start_scan", args)
+    monkeypatch.setattr(settings, "mcp_role", "admin")
+    mcp_mod.reset_service()
+    with pytest.raises(ToolError, match="needs the source code"):
+        await _call("start_scan", {**args, "git_url": None})
+    started = await _call("start_scan", args)
+    assert started["scan_scope"] == "code"
+    await mcp_mod.service().wait(started["scan_id"], 5)
+    assert fake_graph.inputs["target"]["scan_scope"] == "code"

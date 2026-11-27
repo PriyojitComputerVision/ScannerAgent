@@ -345,3 +345,14 @@ def test_result_block_shows_the_code_sast_step_and_marks_non_python_files():
     assert "UNTRUSTED" not in md
     compact = compact_scan_result(r)
     assert "source code (code_sast step, same report)" in compact and "UNTRUSTED" in compact  # markers kept for the model
+
+
+def test_scope_is_shown_in_the_approval_and_the_result():
+    call = {"name": "start_scan", "args": {"target_url": "https://app.example/", "upload_id": "a" * 32,
+                                           "scan_scope": "code"}}
+    assert "no request is sent" in sc.approval_description(call)
+    assert "website + code, website only, or code only" in sc.approval_description(
+        {"name": "start_scan", "args": {"target_url": "https://app.example/"}})
+    r = {"target_url": "https://app.example/", "scan_scope": "code", "severity_counts": {}, "findings": []}
+    assert "source code only" in sc.scan_result_markdown(r)
+    assert "**tested:** website only" in sc.scan_result_markdown({**r, "scan_scope": None})

@@ -70,7 +70,7 @@
   <div class="row clients">
     <div class="box"><b>Browser console · uv run pentest-agent</b><span>one-time sign-in link → RS256 JWT in sessionStorage; strict CSP, no inline code</span></div>
     <div class="box"><b>WebSocket client</b><span>scripts/ws_client.py · Postman · any WS client</span></div>
-    <div class="box"><b>Operator (human in the loop)</b><span>signs in to SSO / enters the MFA code when a scan pauses</span></div>
+    <div class="box"><b>Operator (human in the loop)</b><span>picks what to test (website, code, both), signs in to SSO / enters the MFA code, gives the code when a scan pauses</span></div>
     <div class="box"><b>Coding assistants · other agents</b><span>MCP (stdio via .mcp.json, or HTTP) · A2A 1.0; credentials by profile name only</span></div>
   </div>
   <div class="arrow">JWT + scan request ↓ &nbsp; · &nbsp; ↑ queued · phase_update · input_required · complete + report URLs &nbsp; · &nbsp; auth_response ↓</div>
@@ -95,6 +95,10 @@
         <div class="node"><span class="t">validate</span><span>refuses → audit</span></div>
         <div class="mod"><b>guardrails.py · rbac.py · netpolicy.py</b><span>authorization; scope = host + www + allowed; metadata / link-local / reserved IPs refused</span></div>
         <div class="tags"><i class="tag disk">no network</i></div>
+
+        <div class="node hitl"><span class="t">choose_scope</span><span>interrupt() · human in the loop</span></div>
+        <div class="mod"><b>what to test: website + code · website only · code only</b><span>before any request; paused + checkpointed (or named: scan_scope); code scopes need scan:source; code only → code_source → code_sast → aggregate, no request to the target</span></div>
+        <div class="tags"><i class="tag you">human</i><i class="tag disk">no network</i></div>
 
         <div class="node"><span class="t">recon</span><span>crawl + discovery</span></div>
         <div class="mod"><b>tools/recon.py · discovery.py</b><span>in-scope pages, robots, sitemap, .well-known; file links never fetched</span></div>

@@ -12,12 +12,15 @@ to package test -> drift check -> server).
 New to ScopeGuard? Start with **[How a scan works, told as a story](docs/scan-story.png)**: every
 agent as a character with one job, from your request to your report, in plain language.
 
-![Architecture: the browser console or a WebSocket client signs in and sends a scan request to the FastAPI server; the request waits in a server-wide queue, then runs the 15-step LangGraph pipeline; the auth_challenge and code_source steps can pause for the operator (SSO / MFA sign-in; source code at the SAST step), several steps send in-scope requests to the target, two call the Groq LLM, the report step writes files and the audit step appends a tamper-evident record.](docs/architecture.png)
+![Architecture: the browser console or a WebSocket client signs in and sends a scan request to the FastAPI server; the request waits in a server-wide queue, then runs the 16-step LangGraph pipeline; the choose_scope, auth_challenge and code_source steps can pause for the operator (what to test: website + code, website only or code only; SSO / MFA sign-in; source code at the SAST step), several steps send in-scope requests to the target, two call the Groq LLM, the report step writes files and the audit step appends a tamper-evident record.](docs/architecture.png)
 
 A client signs in at `/auth/token` and sends the scan request over `/ws`. The request waits in the
 server-wide queue (1 scan runs at a time, up to 50 wait; see [API management](#api-management-queues)),
-then the server runs the LangGraph pipeline `validate → recon → auth → [auth_challenge] → code_source → [code_sast] → sast → sandbox_check → dast → plan_probes → run_probes → aggregate → summarize → report → audit`
-and streams progress back. `auth_challenge` runs only when the target needs a human for SSO or MFA
+then the server runs the LangGraph pipeline `validate → choose_scope → recon → auth → [auth_challenge] → code_source → [code_sast] → sast → sandbox_check → dast → plan_probes → run_probes → aggregate → summarize → report → audit`
+and streams progress back. `choose_scope` asks you first, before any request, what the scan tests:
+the **website + its source code**, the **website only**, or the **code only** (then the run goes
+`choose_scope → code_source → code_sast → aggregate` and nothing is sent to the site; see
+[What to test](#what-to-test-website--code-website-only-code-only-human-in-the-loop)). `auth_challenge` runs only when the target needs a human for SSO or MFA
 (see [Sign-in with SSO / MFA](#sign-in-with-sso--mfa-human-in-the-loop)); `code_source` is the SAST step's
 human in the loop: it pauses and asks you for code files, a .zip or a public repository's `.git` link (or skip), and
 `code_sast` analyses that code in the sandbox (see [Source code at the SAST step](#source-code-at-the-sast-step-human-in-the-loop));
@@ -32,11 +35,11 @@ standalone through `python -m scopeguard.cli`.
 
 ### Agent graph
 
-<img src="docs/agent-tree.png" alt="LangGraph agent graph: validate, recon, auth, auth_challenge, code_source (asks you for source code at the SAST step), code_sast, the sast subgraph (run_sast), sandbox_check, dast, plan_probes, run_probes, aggregate, summarize, report, audit; dashed edges are Command routes, including each step's safety stop to aggregate." width="360">
+<img src="docs/agent-tree.png" alt="LangGraph agent graph: validate, choose_scope (asks what to test: website, code or both), recon, auth, auth_challenge, code_source (asks you for source code at the SAST step), code_sast, the sast subgraph (run_sast), sandbox_check, dast, plan_probes, run_probes, aggregate, summarize, report, audit; dashed edges are Command routes, including each step's safety stop to aggregate." width="360">
 
 Drawn by LangGraph itself (`get_graph(xray=True).draw_mermaid()`). Solid edges are fixed, dashed
 edges are `Command(goto=...)` routes declared in each node's return annotation, and the `sast` box
-is the SAST sub-agent running as a subgraph. `code_source` and `auth_challenge` are the human-in-the-loop
+is the SAST sub-agent running as a subgraph. `choose_scope`, `code_source` and `auth_challenge` are the human-in-the-loop
 steps (LangGraph `interrupt`); `code_sast` analyses your source code in the sandbox. The LLM steps (`plan_probes`, `summarize`) are their own
 nodes, so their results are checkpointed and a resumed run doesn't call the LLM again. Regenerate
 after changing the graph with `uv run python scripts/draw_graph.py` (writes
@@ -75,11 +78,14 @@ uv run scopeguard-demo        # same, but always loopback-only and on a free por
 ```
 
 The console is served by the agent server itself at `http://127.0.0.1:8765/`: a live view of the
-15-step pipeline, an event stream, a findings radar, severity mix and risk grade, the cited executive
+16-step pipeline, an event stream, a findings radar, severity mix and risk grade, the cited executive
 summary (each `[Sn]` jumps to its finding), attack coverage, a findings explorer and all saved
 reports with html/docx/md/json downloads, and the **agent integrations** (MCP and A2A endpoints,
 see below). Admins also see the **audit trail** (live chain check) and
-can tick **Pause for SSO / MFA sign-in** to complete a target's sign-in themselves when asked. The built-in target (`127.0.0.1` only) is offered as a
+can tick **Pause for SSO / MFA sign-in** to complete a target's sign-in themselves when asked, and choose
+**What to test** (ask me after launch, website + code, website only, code only). The page fits one
+screen: the top bar and footer stay put while the left rail and the main stage scroll on their own
+(on narrow screens it becomes one scrolling page). The built-in target (`127.0.0.1` only) is offered as a
 one-click demo target. Flags: `--no-browser`, `--no-target`, `--host`, `--port`.
 
 There is no login screen, and API authentication stays on:
@@ -453,17 +459,48 @@ The payloads contain no shells and no real executables — only a unique marker 
 executing server would echo back — so the control is tested without planting a webshell.
 Confirmed execution is reported CRITICAL (CWE-434).
 
+## What to test: website + code, website only, code only (human in the loop)
+
+Right after `validate`, before a single request goes to the target, the `choose_scope` node decides
+what the scan tests:
+
+| Scope | Runs | Requests to the site |
+| --- | --- | --- |
+| `website_and_code` | every website step, then the code at the SAST step (`code_source` → `code_sast`) | yes |
+| `website` | every website step; no code step | yes |
+| `code` | `choose_scope → code_source → code_sast → aggregate → summarize → report → audit` | **none**: the URL only labels the report |
+
+* **Ask me (human in the loop).** With `"ask_scan_scope": true` the run pauses (LangGraph `interrupt`,
+  checkpointed) and the server sends `input_required` with `request.type == "scan_scope"`, the offered
+  `options` and the `default`. Answer `{"type": "scope_response", "scope": "website_and_code" | "website" | "code"}`.
+  Only offered scopes are accepted; no answer within `SCOPE_INPUT_TIMEOUT_SECONDS` (300) keeps the default.
+  The console does this by default for admins (**What to test → Ask me after launch**), then shows a
+  **What should this scan test?** dialog.
+* **Named up front.** `"scan_scope": "..."` in the scan request (console: pick the scope in **Scan
+  settings**; MCP `start_scan(scan_scope=...)`; A2A `"scan_scope"`; the MCP chatbot's approval card has a
+  **What to test** choice). Code scopes need the code (`upload_id` / `git_url`, or `ask_for_code` for a
+  client that answers the code pause); `website` together with code is refused.
+* **Default.** Without either, the scope follows the request as before: code named or `ask_for_code` →
+  website + code, otherwise website only.
+
+Code scopes need `scan:source` (admin): other roles are offered the website only and never pause; a
+code scope named by them is refused by RBAC. The choice is in the report (**Scope** row), in MCP
+`get_scan.scan_scope` and in the audit record (`scope: {scope, decided_by}`, `decided_by` = operator,
+request, default, timeout). A code-only run without code (skipped or refused) finishes with an empty
+report and a red flag saying nothing was analysed.
+
 ## Source code at the SAST step (human in the loop)
 
-Source code is analysed **only as a step of the agent graph**, never on its own. You give a link to
-scan; when the scan reaches the SAST step, its `code_source` node pauses (a LangGraph `interrupt`,
+Source code is analysed as a step of the agent graph (the code SAST step), with or without the
+website steps (see [What to test](#what-to-test-website--code-website-only-code-only-human-in-the-loop)).
+When the scan reaches the SAST step, its `code_source` node pauses (a LangGraph `interrupt`,
 checkpointed) and asks you for the app's source code:
 
 * **code files** (select several; packed into a zip on the server) or **one `.zip`**, or
 * a **public git repository**: its `.git` clone link (`https://github.com/owner/repo.git`), optional
   branch or tag (empty = the default branch), on `GIT_ALLOWED_HOSTS` (default GitHub, GitLab,
   Bitbucket), or
-* **skip** (website only). No answer within `CODE_INPUT_TIMEOUT_SECONDS` (600) also means skip.
+* **skip** (website only; for a code-only scan nothing is analysed). No answer within `CODE_INPUT_TIMEOUT_SECONDS` (600) also means skip.
 
 `code_sast` then unpacks and reads the code **only inside a Kubernetes Job** (or the process sandbox);
 the code is never run. Its findings (`source: code_upload`) go into the scan's own report, which gets a
@@ -493,8 +530,8 @@ report section that says which check failed.
 
 | How you answer | Console | WebSocket / API | MCP / A2A |
 | --- | --- | --- | --- |
-| Pause and ask (human in the loop) | **Ask me for source code at the SAST step** (on by default for admins), then the **source code** dialog | `"ask_for_code": true`; on `input_required` with `request.type == "code_source"` reply `{"type": "code_response", "action": "upload", "upload_id": ...}`, `{"action": "git", "git_url": "https://.../repo.git", "git_ref": <optional>}` or `{"action": "skip"}` | agents cannot answer a pause: name the code up front |
-| Name the code up front | — | `upload_id` or `git_url` (+ `git_ref`) in the scan request | MCP `upload_code` → `start_scan(upload_id=...)`, or `start_scan(git_url=...)`; A2A `"upload_id"` / `"git_url"` |
+| Pause and ask (human in the loop) | **What to test** → website + code or code only (or **Ask me after launch**), then the **source code** dialog | `"ask_for_code": true` (or `"ask_scan_scope": true`); on `input_required` with `request.type == "code_source"` reply `{"type": "code_response", "action": "upload", "upload_id": ...}`, `{"action": "git", "git_url": "https://.../repo.git", "git_ref": <optional>}` or `{"action": "skip"}` | agents cannot answer a pause: name the code up front |
+| Name the code up front | — | `upload_id` or `git_url` (+ `git_ref`) in the scan request, optional `scan_scope` | MCP `upload_code` → `start_scan(upload_id=..., scan_scope=...)`, or `start_scan(git_url=...)`; A2A `"upload_id"` / `"git_url"` / `"scan_scope"` |
 
 Store code first with `POST /api/uploads?filename=src.zip` (raw `.zip`) or `POST /api/uploads/files`
 with `{"files": [{"name": "app/main.py", "content": "..."}]}` (relative paths of source/text files the

@@ -20,7 +20,7 @@ def test_validate_input_node_proceeds_when_authorized(valid_target_dict):
 
     cmd = validate_input_node(state)
 
-    assert cmd.goto == "recon"
+    assert cmd.goto == "choose_scope"  # what to test: website + code, website only, code only
     assert cmd.update["phase"] == "validated"
     assert "example.com" in cmd.update["allowed_domains"]
     assert "www.example.com" in cmd.update["allowed_domains"]

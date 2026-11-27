@@ -293,9 +293,14 @@ def approval_description(tool_call: dict, state: Any = None, runtime: Any = None
                 "web findings." if args.get("upload_id") else
                 f" The git repository {args.get('git_url')} is cloned (public, shallow) and analysed in its code "
                 "SAST step; approve only if you own that code too." if args.get("git_url") else "")
+        if args.get("scan_scope") == "code":
+            return (f"Analyse only the source code (no request is sent to {args.get('target_url')}; its URL labels "
+                    f"the report).{code} Approve only if you own the code or may analyse it: your approval is the "
+                    "authorization confirmation. You can still pick what to test in the card.")
         return (f"Scan {args.get('target_url')} with the {args.get('profile', 'standard')} profile. "
                 "It sends real HTTP requests to that site. Approve only if you own the site or are "
-                f"authorized to test it: your approval is the authorization confirmation.{code}")
+                f"authorized to test it: your approval is the authorization confirmation.{code} "
+                "Pick what to test in the card: website + code, website only, or code only.")
     if name == "start_demo_scan":
         return (f"Scan the built-in, deliberately vulnerable demo app ({args.get('profile', 'quick')} "
                 "profile, loopback only).")
@@ -394,13 +399,24 @@ def _grouped(r: dict) -> list[tuple[str, list[tuple[str, dict]]]]:
     return [(sev, sorted(by_sev[sev].items())) for sev in order]
 
 
+SCOPE_LABELS = {"website_and_code": "website + source code", "website": "website only",
+                "code": "source code only (no request to the site)"}
+
+
+def scope_label(r: dict) -> str:
+    """What the scan tested; a scanner without scan_scope: derived from the result."""
+    return SCOPE_LABELS.get(r.get("scan_scope") or ("website_and_code" if r.get("code_sast") else "website"),
+                            "website only")
+
+
 def scan_result_markdown(r: dict) -> str:
     """The verified result block shown to the user exactly as the scanner returned it
     (not written by the model): counts, every finding under its own severity, red flags,
     report files and the audit record."""
     counts = r.get("severity_counts") or {}
     out = ["### Scan result (verified, from the scanner)",
-           (f"**Target:** `{r.get('target_url')}` | **profile:** {r.get('profile')} | **status:** {r.get('status')} | "
+           (f"**Target:** `{r.get('target_url')}` | **tested:** {scope_label(r)} | "
+            f"**profile:** {r.get('profile')} | **status:** {r.get('status')} | "
            f"**pages crawled:** {r.get('pages_crawled')} | **duration:** {r.get('elapsed_seconds')}s | "
            f"**signed in:** {'yes' if r.get('signed_in') else 'no'}"),
            "",
@@ -493,6 +509,7 @@ def compact_scan_result(r: dict) -> str:
     target = str(r.get("target_url") or "")
     root = urlsplit(target)
     lines = [(f"scan_id: {r.get('scan_id')} | status: {r.get('status')} | target: {target} | "
+              f"tested: {scope_label(r)} | "
               f"profile: {r.get('profile')} | pages crawled: {r.get('pages_crawled')} | "
               f"duration: {r.get('elapsed_seconds')}s | signed in: {r.get('signed_in')}"),
              f"severity counts: {r.get('severity_counts')} | findings total: {r.get('findings_total')}"
@@ -711,7 +728,8 @@ class Engine:
         if attachment:  # added after the input guardrail: these values come from the server, not the user
             content += (f"\n\n[Attached source code: {attachment['filename']} (upload_id {attachment['upload_id']}). "
                         "Call start_scan for the user's site with this upload_id: the code is analysed in the "
-                        "scan's code SAST step and reported with the web findings (code is never scanned alone). "
+                        "scan's code SAST step and reported with the web findings; the reviewer picks website + "
+                        "code, website only or code only in the approval card. "
                         f"{LANGUAGE_NOTICE}]")
         await self._stream({"messages": [{"role": "user", "content": content}]}, thread_id, emit)
 

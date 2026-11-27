@@ -131,13 +131,15 @@ signature are checked in the page, the launcher, the backend and again by the sc
 straight to the scanner's MCP `upload_code` tool, never through the model, and is attached to your next
 message. Then ask for:
 
-- **a web scan with the code**: the agent calls `start_scan` with the `upload_id`; the code is analysed in
-  the scan's code SAST step (sandbox) and its findings are in the same report.
+- **a scan with the code**: the agent calls `start_scan` with the `upload_id`. You decide **what to test**
+  in the approval card (human in the loop): **website + source code**, **website only** (the code is left
+  out) or **source code only** (no request is sent to the site; its URL only labels the report). The code
+  is analysed in the scan's code SAST step (sandbox) and its findings are in the same report.
 
 Or paste a **public git link** with the request ("scan http://localhost:3000 with the code at
 https://github.com/me/app.git"; the `.git` clone link): the agent passes it as `git_url` (branch/tag: `git_ref`) and the scanner
-checks it is reachable and the branch/tag exists, then clones it (shallow, no credentials, hosts on `GIT_ALLOWED_HOSTS`). Code is never scanned on its own: it is
-always a step of a web scan.
+checks it is reachable and the branch/tag exists, then clones it (shallow, no credentials, hosts on `GIT_ALLOWED_HOSTS`). Code-only scans still name an allowlisted
+site: it labels the report, and nothing is sent to it.
 
 Scans need your approval (that is the authorization confirmation) and the `admin` role
 (`CHATBOT_ROLES=admin`, upload needs `scan:source`). **Python only for now**: other languages are only
