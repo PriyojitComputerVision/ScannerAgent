@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 
+import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 import context_fit
@@ -33,7 +34,7 @@ def test_chunk_size_is_the_scanners_setting():
         def __init__(self):
             self.env = {"PROBE_CONTEXT_CHUNK_CHARS": "6000"}
 
-    assert context_fit.chunk_chars(S()) == 6000 and context_fit.chunk_chars(None) == 8000
+    assert context_fit.chunk_chars(S()) == 6000 and context_fit.chunk_chars(None) == 4000
 
 
 def test_summarized_recursively_until_it_fits_without_a_model():
@@ -93,3 +94,26 @@ def test_413_gives_up_after_three_tries():
     except TooLarge:
         pass
     assert len(calls) == context_fit.MAX_FIT_TRIES
+
+
+def test_summary_calls_keep_the_gap(monkeypatch):
+    """At least LLM_SUMMARY_DELAY_SECONDS between two chunk-summary calls; the first never waits."""
+    slept = []
+
+    async def fake_sleep(seconds):
+        slept.append(seconds)
+
+    class Model:
+        async def ainvoke(self, _messages):
+            return AIMessage(content="short summary [S1]")
+
+    class S:
+        def __init__(self):
+            self.env = {"LLM_SUMMARY_DELAY_SECONDS": "60"}
+
+    assert context_fit.summary_delay(S()) == 60 and context_fit.summary_delay(None) == 60
+    context_fit.reset_summary_spacing()
+    monkeypatch.setattr(context_fit.asyncio, "sleep", fake_sleep)
+    asyncio.run(context_fit.fit_text(_report(400), 3000, Model(), delay=60))
+    # the fake sleep takes no time, so each call is reserved one more gap after the previous one
+    assert slept and slept == pytest.approx([60.0 * (i + 1) for i in range(len(slept))], abs=1)

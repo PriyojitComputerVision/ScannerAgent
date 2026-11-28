@@ -18,6 +18,7 @@ from pathlib import Path
 _TMP_ROOT = Path(tempfile.mkdtemp(prefix="pentest-agent-test-"))
 
 os.environ.setdefault("GROQ_API_KEY", "test-key-not-a-real-credential")
+os.environ.setdefault("LLM_SUMMARY_DELAY_SECONDS", "0")  # tests that need the gap set it themselves
 os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
 os.environ["LANGSMITH_TRACING"] = "false"
 os.environ["LANGSMITH_API_KEY"] = ""
@@ -125,6 +126,9 @@ def _clear_ttl_caches():
 
     llm_budget.reset()
     llm_pacer.reset()
+    from pentest_agent import llm as _llm
+
+    _llm.reset_summary_spacing()
     ttl_cache.clear_all()
     report_access.clear_cache()
     abac.clear_cache()

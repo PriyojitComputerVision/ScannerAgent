@@ -37,8 +37,8 @@ otherwise `sandbox_check` applies the same JavaScript rules inside its Kubernete
 (`scopeguard-job-<session_id>`, deleted after the run). Orange lines mark the only traffic to the target website (in scope only).
 Only `plan_probes` and `summarize` call the LLM, and both have offline fallbacks. Every LLM request
 that carries scan data (probe plan, executive summary, run summary, golden judge) fits one chunk,
-`PROBE_CONTEXT_CHUNK_CHARS` (8000 characters: Groq's on-demand tier allows 8000 tokens per request,
-`GROQ_MAX_TOKENS=4096` included). Larger data is never cut off; it is **chunked** with LangChain's
+`PROBE_CONTEXT_CHUNK_CHARS` (4000 characters, about 1300 tokens: Groq's on-demand tier allows 8000 tokens per
+request, `GROQ_MAX_TOKENS=4096` included, and a smaller chunk uses less of its per-minute budget). Larger data is never cut off; it is **chunked** with LangChain's
 `RecursiveCharacterTextSplitter` (neighbouring chunks overlap by 10%), each chunk is **summarized** (wrapped as untrusted data; deterministic
 without an LLM or when a call fails), the summaries are summarized again until they fit, and the result
 is **extracted** and checked: the planner returns a validated `ProbePlan`; crawled paths are compressed
@@ -309,13 +309,21 @@ rate limited (`"event": "llm_rate_limit_wait"`, `"wait_seconds"`). One LLM call 
 LLM calls are paced to Groq's per-minute token budget (its `x-ratelimit-*` headers): a request that
 would not fit waits for the reset instead of getting a 429, a 429 waits exactly what Groq asks
 (`retry-after` / "try again in Xs") with one retry layer (`GROQ_MAX_RETRIES`, 5), and chunk summaries
-reserve only the output they need. MCP and A2A callers see the same waits as `get_scan` `notices`
+reserve only the output they need. Two summary calls (chunk summaries, the run summary, the executive summary)
+are at least `LLM_SUMMARY_DELAY_SECONDS` (default 60) apart, so they spread over Groq's per-minute budget; a
+large context therefore takes minutes longer (0 = no gap). MCP and A2A callers see the same waits as `get_scan` `notices`
 (A2A task updates; the chatbot shows them as "note: ..." lines).
 
 Recon fetches a few pages at once (at most 3) and every page once (`/a#top` and `/a#faq` are one
-page), in the same crawl order as before. It never strains the site: after a 429, a 5xx, an
-unanswered request or a response slower than 5 s it goes back to one request at a time for the rest
-of the crawl, and the report notes that.
+page), in the same crawl order as before. It never strains the site: every 429, 5xx, unanswered
+request or response slower than 5 s takes one request off (3 → 2 → 1, never back up), and the report
+notes that. A page that fails is retried up to 3 times (growing pauses) before it is given up; DAST and
+the sandbox check retry failed pages the same way.
+
+All scan steps cover the same pages: up to `MAX_CRAWL_PAGES` (60). DAST starts from the pages recon
+found (so a site whose links are built by JavaScript is still covered, not just its home page) and
+tests up to 60 of them (the `aggressive` / `auth_deep` profiles keep their higher cap of 80); the
+sandbox check stages up to 60 pages for its code check.
 
 ### WebSocket client (instead of Postman)
 

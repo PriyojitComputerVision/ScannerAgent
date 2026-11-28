@@ -3,7 +3,7 @@
 The chat side of the scanner's ``pentest_agent/context_fit.py`` + ``llm_budget.py`` (this project
 has its own venv and never imports ``pentest_agent``). Same rules, same setting:
 
-- ``PROBE_CONTEXT_CHUNK_CHARS`` (repo's main .env, default 8000) is the chunk size. Groq's on-demand
+- ``PROBE_CONTEXT_CHUNK_CHARS`` (repo's main .env, default 4000) is the chunk size. Groq's on-demand
   tier allows 8000 tokens per request, the reply budget (CHATBOT_MAX_TOKENS) included.
 - **Chunk**: LangChain ``RecursiveCharacterTextSplitter``, neighbouring chunks overlap by 10%, so a
   finding cut at a chunk border is whole in one of them.
@@ -12,20 +12,25 @@ has its own venv and never imports ``pentest_agent``). Same rules, same setting:
   Nothing is dropped; a round that does not shrink the text is redone deterministically.
 - **Extract**: scan ids, finding ids ([Sn]) and URLs that the summary names must appear in the
   original; ids the model dropped are listed again at the end.
+- **Gap between summary calls**: at least ``LLM_SUMMARY_DELAY_SECONDS`` (main .env, default 60, the
+  scanner's setting) between two chunk-summary calls of this process; the first never waits.
 - **413**: ``fit_model_call_middleware`` reads "Limit L, Requested R", shrinks the largest tool
   results of the request and retries with tenacity (3 tries); 429s keep their own handling.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from tenacity import AsyncRetrying, retry_if_exception, stop_after_attempt, wait_none
 
 log = logging.getLogger("mcp-chatbot")
 
-DEFAULT_CHUNK_CHARS = 8000
+DEFAULT_CHUNK_CHARS = 4000
+DEFAULT_SUMMARY_DELAY = 60.0
 CHUNK_OVERLAP_RATIO = 0.10
 MAX_FIT_TRIES = 3
 MIN_CHARS = 1500
@@ -49,6 +54,37 @@ def chunk_chars(settings=None) -> int:
         return max(MIN_CHARS, int(env.get("PROBE_CONTEXT_CHUNK_CHARS") or DEFAULT_CHUNK_CHARS))
     except ValueError:
         return DEFAULT_CHUNK_CHARS
+
+
+def summary_delay(settings=None) -> float:
+    """Seconds between two summary calls: LLM_SUMMARY_DELAY_SECONDS from the repo's .env."""
+    env = getattr(settings, "env", None) or {}
+    try:
+        return max(0.0, float(env.get("LLM_SUMMARY_DELAY_SECONDS") or DEFAULT_SUMMARY_DELAY))
+    except ValueError:
+        return DEFAULT_SUMMARY_DELAY
+
+
+_last_summary_call = 0.0
+_summary_lock = asyncio.Lock()
+
+
+async def space_summary_call(delay: float) -> float:
+    """Wait until ``delay`` seconds passed since the last summary call (the first never waits)."""
+    global _last_summary_call
+    async with _summary_lock:
+        now = time.monotonic()
+        wait = max(0.0, _last_summary_call + delay - now) if _last_summary_call and delay > 0 else 0.0
+        _last_summary_call = now + wait
+    if wait > 0:
+        log.info("Waiting %.0fs before the next summary call (LLM_SUMMARY_DELAY_SECONDS=%.0f)", wait, delay)
+        await asyncio.sleep(wait)
+    return wait
+
+
+def reset_summary_spacing() -> None:
+    global _last_summary_call
+    _last_summary_call = 0.0
 
 
 def split_chunks(text: str, size: int) -> list[str]:
@@ -106,11 +142,12 @@ def extract(chunk: str, summary: str) -> str:
     return (clean.strip() + ("\nAlso in this part: " + " ".join(dropped) if dropped else "")).strip()
 
 
-async def summarize_chunk(model, chunk: str, index: int, total: int, limit: int) -> str:
+async def summarize_chunk(model, chunk: str, index: int, total: int, limit: int, delay: float = 0.0) -> str:
     if model is None:
         return deterministic_summary(chunk, limit)
     from langchain_core.messages import HumanMessage, SystemMessage
 
+    await space_summary_call(delay)
     try:
         reply = await model.ainvoke([
             SystemMessage(content=SUMMARY_SYSTEM),
@@ -125,7 +162,7 @@ async def summarize_chunk(model, chunk: str, index: int, total: int, limit: int)
     return deterministic_summary(chunk, limit)
 
 
-async def fit_text(text: str, budget: int, model=None) -> str:
+async def fit_text(text: str, budget: int, model=None, delay: float = 0.0) -> str:
     """``text`` within ``budget`` characters: as it is, else summarized recursively until it fits."""
     budget = max(500, int(budget))
 
@@ -134,7 +171,7 @@ async def fit_text(text: str, budget: int, model=None) -> str:
         per_part = max(PART_FLOOR, budget // max(1, len(chunks)) - 20)
         parts = []
         for i, chunk in enumerate(chunks, 1):
-            summary = (await summarize_chunk(use_model, chunk, i, len(chunks), per_part))[:per_part]
+            summary = (await summarize_chunk(use_model, chunk, i, len(chunks), per_part, delay))[:per_part]
             parts.append(f"[part {i}/{len(chunks)}] {extract(chunk, summary)}")
         return "\n".join(parts)
 
@@ -164,7 +201,7 @@ def _chars(messages) -> int:
     return sum(len(_text(getattr(m, "content", ""))) for m in messages)
 
 
-async def shrink_tool_messages(messages: list, budget: int, model=None) -> list:
+async def shrink_tool_messages(messages: list, budget: int, model=None, delay: float = 0.0) -> list:
     """The request's tool results, largest first, summarized until the whole request fits ``budget``."""
     from langchain_core.messages import ToolMessage
 
@@ -177,11 +214,11 @@ async def shrink_tool_messages(messages: list, budget: int, model=None) -> list:
             break
         text = _text(out[i].content)
         target = max(PART_FLOOR, len(text) - over)
-        out[i] = out[i].model_copy(update={"content": await fit_text(text, target, model)})
+        out[i] = out[i].model_copy(update={"content": await fit_text(text, target, model, delay)})
     return out
 
 
-def fit_model_call_middleware(summary_model=None, max_tokens: int = 3000):
+def fit_model_call_middleware(summary_model=None, max_tokens: int = 3000, delay: float = 0.0):
     """On a 413 the request's tool results are chunked and summarized to the limit read from the
     error, then the model call is retried (tenacity, MAX_FIT_TRIES tries in all)."""
     from langchain.agents.middleware import wrap_model_call
@@ -204,7 +241,7 @@ def fit_model_call_middleware(summary_model=None, max_tokens: int = 3000):
                     budget = min(budget, sent * 3 // 4)
                     fixed = sent - _chars(req.messages)
                     messages = await shrink_tool_messages(req.messages, max(MIN_CHARS, budget - fixed),
-                                                          summary_model)
+                                                          summary_model, delay)
                     state["request"] = req.override(messages=messages)
                     log.info("Chat request too large (%d chars); retry %d/%d at %d chars", sent,
                              tried.retry_state.attempt_number, MAX_FIT_TRIES, budget)

@@ -549,12 +549,23 @@ class Findings:
 # --------------------------------------------------------------------------
 # Engine
 # --------------------------------------------------------------------------
+PAGE_RETRIES = 3            # a crawled page that fails is retried this often
+PAGE_RETRY_DELAY = 0.5      # seconds before the first retry; doubles each time (0.5, 1, 2)
+
+
 class Scanner:
+    _sleep = staticmethod(time.sleep)
+
     def __init__(self, target_url, allowed_domains, profile="standard", bearer=None,
-                 delay=0.05, max_pages=None, max_requests=None, upload_active=False, cookie=None):
+                 delay=0.05, max_pages=None, max_requests=None, upload_active=False, cookie=None,
+                 seed_urls=None):
         self.cfg = dict(PROFILES.get(profile, PROFILES["standard"]))
         if max_pages:
             self.cfg["max_pages"] = max_pages
+        # Pages the agent's recon already found (sitemaps, robots.txt, links): the crawl starts with
+        # them, so a site whose links are built by JavaScript is still covered. Each one goes through
+        # the same scope and file-link checks as a link found here; nothing else changes.
+        self.seed_urls = [str(u) for u in (seed_urls or []) if isinstance(u, str)][:1000]
         if max_requests:
             self.cfg["max_requests"] = max_requests
         self.target = target_url
@@ -589,6 +600,7 @@ class Scanner:
 
     def crawl(self):
         queue, seen = [_norm(self.target)], set()
+        queue.extend(_norm(u) for u in self.seed_urls if _norm(u) not in queue)
         while queue and len(self.pages) < self.cfg["max_pages"]:
             url = queue.pop(0)
             if url in seen:
@@ -601,6 +613,13 @@ class Scanner:
                 continue  # never request links to files (downloads, media, archives, ...)
             try:
                 resp = self.client.get(url)
+                # A page that did not answer (or answered 502/503/504) is retried up to PAGE_RETRIES
+                # times with a growing pause, still within the request budget.
+                for attempt in range(PAGE_RETRIES):
+                    if not (resp.error or resp.status in (502, 503, 504)):
+                        break
+                    self._sleep(PAGE_RETRY_DELAY * (2 ** attempt))
+                    resp = self.client.get(url)
             except BudgetExceeded as e:
                 self.red_flags.append(str(e))
                 break
@@ -1377,9 +1396,9 @@ class Scanner:
 
 
 def run_scan(target_url, allowed_domains, profile="standard", bearer=None, delay=0.05,
-             max_pages=None, max_requests=None, upload_active=False, cookie=None) -> dict:
+             max_pages=None, max_requests=None, upload_active=False, cookie=None, seed_urls=None) -> dict:
     return Scanner(target_url, allowed_domains, profile, bearer, delay, max_pages, max_requests,
-                   upload_active=upload_active, cookie=cookie).run()
+                   upload_active=upload_active, cookie=cookie, seed_urls=seed_urls).run()
 
 
 if __name__ == "__main__":  # pragma: no cover

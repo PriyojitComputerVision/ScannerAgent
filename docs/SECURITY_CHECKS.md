@@ -270,6 +270,7 @@ Run everything with `uv run pytest` (no real network or LLM calls; the golden li
 | `tests/test_content_policy.py` | Scans never download files (scopeguard/contentpolicy.py): attachments and binaries are discarded unread, file links are not crawled, text is capped. |
 | `tests/test_cors_and_ws_client.py` | CORS (pentest_agent/cors.py), its WebSocket Origin rule, and the ws_client pretty printer. |
 | `tests/test_dast_native.py` | Native DAST end to end against the built-in vulnerable target, unknown profiles, unreachable targets. |
+| `tests/test_dast_seeds.py` | DAST covers the pages recon found (up to MAX_CRAWL_PAGES), also when the site's links are built by JavaScript and the engine alone would find only the home page. Local server only. |
 | `tests/test_dedupe.py` | Findings from recon, DAST and probes that describe the same issue are merged. |
 | `tests/test_engine_read_timeout.py` | A page whose body stalls after the headers must not abort the whole scan. |
 | `tests/test_flag_levels.py` | Red-flag levels (scopeguard/flag_levels.py): errors, warnings and scope notes, the same in the reports, get_scan and the browser console (its FLAG_RULES mirror). |
