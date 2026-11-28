@@ -1078,7 +1078,7 @@ instead of repeated (`pentest_agent/ttl_cache.py`):
 
 | What | Reused when |
 | --- | --- |
-| Whole scan (WebSocket) | same request: URL, profile, credentials, extra domains and notes (`session_id` aside). The reply arrives instantly with `"cached": true`, `cached_from_session` and `cache_age_seconds`, and points at the earlier report. Send `"force_refresh": true` to scan again. |
+| Whole scan (WebSocket) | same request: URL, profile, credentials, extra domains and notes (`session_id` aside). The reply arrives instantly with `"cached": true`, `cached_from_session` and `cache_age_seconds`, the earlier scan's totals (`pages_crawled`, `findings_total`) and points at the earlier report; the console shows those totals and says it was served from the cache. Send `"force_refresh": true` (console: "Force a fresh scan") to scan again. |
 | Probe check | same probe type, URL, parameter and bearer token |
 | Probe plan (LLM) | same model, prompt, target, scope, findings and crawled pages |
 | Executive summary (LLM) | same model, prompt and findings; only grounded answers are cached |
