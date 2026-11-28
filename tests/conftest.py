@@ -121,9 +121,10 @@ def _reset_backend_rate_limits():
 @pytest.fixture(autouse=True)
 def _clear_ttl_caches():
     """No cached LLM answer, probe result or scan leaks between tests."""
-    from pentest_agent import abac, llm_budget, report_access, ttl_cache
+    from pentest_agent import abac, llm_budget, llm_pacer, report_access, ttl_cache
 
     llm_budget.reset()
+    llm_pacer.reset()
     ttl_cache.clear_all()
     report_access.clear_cache()
     abac.clear_cache()

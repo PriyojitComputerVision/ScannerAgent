@@ -79,6 +79,7 @@ def make_watch_scan(get_scan):
         announced = None  # the sign-in pause already shown to the user
         methods_shown = False
         parallel_shown = None  # the parallel steps already announced
+        notices_seen = 0  # status events (LLM pacing / rate-limit waits) already shown
         while True:
             data = mcp_json(await get_scan.ainvoke({"scan_id": scan_id, "wait_seconds": POLL_SECONDS,
                                                     "max_findings": 0}))
@@ -88,6 +89,10 @@ def make_watch_scan(get_scan):
                 seen += 1
                 write({"text": f"{step.get('node')} done (phase {step.get('phase')}, "
                                f"{step.get('at_seconds')}s)"})
+            notices = data.get("notices") or []
+            for notice in notices[notices_seen:] if notices_seen <= len(notices) else notices:
+                write({"text": f"note: {notice.get('message')}"})
+            notices_seen = len(notices)
             running = [str(r) for r in data.get("running_steps") or []]
             if running and parallel_shown is None:  # code check, website check and DAST run together
                 parallel_shown = running

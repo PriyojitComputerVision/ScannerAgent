@@ -188,6 +188,26 @@ async def test_parallel_steps_show_as_running_and_keep_their_own_phase(fake_grap
     assert phases["dast"] == "dast_complete" and phases["sandbox_check"] == "sandbox_check_complete"
 
 
+async def test_status_events_reach_get_scan_as_notices(fake_graph, monkeypatch):
+    """LLM pacing / rate-limit waits happen inside a step; get_scan shows them so the scan does not
+    look stuck to an agent (A2A and the chatbot relay the same list)."""
+    async def stream(inputs, config=None, stream_mode=None):
+        assert "custom" in stream_mode  # the service asks for the status events too
+        fake_graph.inputs = inputs
+        yield ("updates", {"recon": {"phase": "recon_complete"}})
+        yield ("custom", {"event": "llm_rate_limit_wait", "message": "Pacing the LLM: waiting 7s for Groq's "
+                                                                    "per-minute token budget.", "wait_seconds": 7})
+        yield ("custom", {"event": "noise"})                      # no message: ignored
+        yield ("updates", {"plan_probes": {"phase": "probe_plan_ready"}})
+
+    monkeypatch.setattr(fake_graph, "astream", stream)
+    started = await _call("start_scan", {"target_url": "https://app.example.com/", "authorization_confirmed": True})
+    done = await _call("get_scan", {"scan_id": started["scan_id"], "wait_seconds": 5})
+    assert [n["event"] for n in done["notices"]] == ["llm_rate_limit_wait"]
+    assert "waiting 7s" in done["notices"][0]["message"]
+    assert [s["node"] for s in done["steps_completed"]] == ["recon", "plan_probes"]
+
+
 async def test_one_scan_at_a_time(fake_graph):
     fake_graph.delay = 0.2
     first = await _call("start_scan", {"target_url": "https://app.example.com/", "authorization_confirmed": True})

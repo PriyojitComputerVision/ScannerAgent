@@ -281,9 +281,11 @@ Run everything with `uv run pytest` (no real network or LLM calls; the golden li
 | `tests/test_hitl_auth.py` | SSO / MFA sign-in with a human in the loop (LangGraph interrupt). |
 | `tests/test_input_validation.py` | Strict input handling: unknown keys and wrong values are rejected with a clear error, and the session id can never leave the reports folder. |
 | `tests/test_llm_budget.py` | Every LLM call fits the model: chunk, summarize, extract; a 413 shrinks the request (tenacity). |
+| `tests/test_llm_pacer.py` | LLM calls are paced to the provider's rate limits; a 429 waits exactly what it asks (no network). |
 | `tests/test_mcp_server.py` | MCP server + shared scan service: guardrails, run lifecycle, untrusted output. |
 | `tests/test_network_policy.py` | Network policy (scopeguard/netpolicy.py): metadata/link-local blocking, DNS rebinding protection at connect time, and enforcement in every layer. |
 | `tests/test_new_checks.py` | The extra SAST and DAST checks: code rules (archives, temp files, assert, ciphers, IVs, password hashing, timing-safe compare, SQLAlchemy text(), Django hosts, debug server), website JavaScript rules (DOM XSS, string timers, API tokens), and DAST checks (Subresource Integrity, weak HSTS, forms posting to HTTP, GraphQL introspection, more exposed files). Positive and safe variants; no network. |
+| `tests/test_polite_recon.py` | Recon is faster without straining the target: a few requests at once, one at a time on strain, pages in crawl order, every page (and #fragment of it) fetched once. Local server only. |
 | `tests/test_probe_checks.py` | Hand-written probe checks and the probe result cache. No real network: responses are built in memory or served by httpx.MockTransport. |
 | `tests/test_probe_context.py` | Probe planner context: chunked and summarized when too large, then the plan runs (no network). |
 | `tests/test_prompts.py` | Prompts live in a gitignored folder; a missing prompt must degrade to the deterministic fallbacks instead of crashing. |

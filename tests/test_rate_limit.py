@@ -223,7 +223,7 @@ def test_llm_waits_within_budget_and_caps_attempts(monkeypatch):
     throttled, calls = _rate_limited_llm("1")
     with pytest.raises(llm.LLMRateLimited):
         llm.invoke_with_backoff.retry_with(sleep=slept.append)(throttled, [])
-    assert len(calls) == llm.MAX_ATTEMPTS and len(slept) == llm.MAX_ATTEMPTS - 1
+    assert len(calls) == llm.max_attempts() and len(slept) == llm.max_attempts() - 1
 
 
 def test_llm_non_rate_limit_errors_are_reraised_unchanged(monkeypatch):
@@ -295,7 +295,7 @@ def test_rate_limit_waits_reach_the_graph_stream(monkeypatch):
     events = asyncio.run(collect())
     custom = [c for m, c in events if m == "custom"]
     # The fake sleep takes no time, so the budget never runs out: every attempt is used.
-    assert [c["event"] for c in custom] == (["llm_rate_limit_wait"] * (llm.MAX_ATTEMPTS - 1)
+    assert [c["event"] for c in custom] == (["llm_rate_limit_wait"] * (llm.max_attempts() - 1)
                                             + ["llm_rate_limit_gave_up"])
     assert custom[0]["wait_seconds"] == pytest.approx(60.2, abs=0.1)
     assert ("updates", {"n": {"answer": "fallback"}}) in events
