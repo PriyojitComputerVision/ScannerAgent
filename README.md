@@ -28,14 +28,18 @@ every route, including
 refused and safety-stopped runs, ends in `audit` (see [Audit log](#audit-log)). `sast` runs only when the sandbox check is off (`SANDBOX_CHECK_ENABLED=false`):
 otherwise `sandbox_check` applies the same JavaScript rules inside its Kubernetes Job
 (`scopeguard-job-<session_id>`, deleted after the run). Orange lines mark the only traffic to the target website (in scope only).
-Only `plan_probes` and `summarize` call the LLM, and both have offline fallbacks. When the probe
-planner's context is larger than one chunk, `PROBE_CONTEXT_CHUNK_CHARS` (60000 characters, about 15k tokens;
-lower it for a model with a smaller request limit), it is not cut off: the crawled paths are compressed
-to real paths only (parameterized, API, auth, admin and upload paths first, one per folder), the findings
-are split into chunks of that size with LangChain's `RecursiveCharacterTextSplitter`, each chunk is
-summarized (`prompts/probe_context_summary.md`, wrapped as untrusted data; deterministic without an
-LLM or when a call fails), the summaries are summarized again until they fit, and then the plan runs
-(`subagents/probe_context.py`). Red flags come in three levels (`scopeguard/flag_levels.py`): **errors**
+Only `plan_probes` and `summarize` call the LLM, and both have offline fallbacks. Every LLM request
+that carries scan data (probe plan, executive summary, run summary, golden judge) fits one chunk,
+`PROBE_CONTEXT_CHUNK_CHARS` (8000 characters: Groq's on-demand tier allows 8000 tokens per request,
+`GROQ_MAX_TOKENS=4096` included). Larger data is never cut off; it is **chunked** with LangChain's
+`RecursiveCharacterTextSplitter` (neighbouring chunks overlap by 10%), each chunk is **summarized** (wrapped as untrusted data; deterministic
+without an LLM or when a call fails), the summaries are summarized again until they fit, and the result
+is **extracted** and checked: the planner returns a validated `ProbePlan`; crawled paths are compressed
+to real paths only; a SOURCES digest keeps every `[Sn]` id and drops invented ones
+(`pentest_agent/context_fit.py`, prompts `probe_context_summary.md` / `sources_digest.md`). When the
+provider still answers 413 ("Limit 8000, Requested 9683"), tenacity retries the request with the limit
+learned from that message and a smaller chunk (`pentest_agent/llm_budget.py`, 3 tries); 429s keep
+their Retry-After waits. Red flags come in three levels (`scopeguard/flag_levels.py`): **errors**
 (something failed, e.g. "SSO login failed"), **warnings** (less coverage) and **notes** (scope information
 such as hosts outside the scan scope, which are recorded and never contacted). Reports, `get_scan`
 (`red_flags_by_level`), the console log and the chatbot label them so. Reports,

@@ -47,7 +47,8 @@ os.environ.setdefault("SQUID_ACL_TARGET_FILE", str(_TMP_ROOT / "squid" / "allowe
 if not os.environ.get("GOLDEN_LIVE"):
     _PROMPTS = _TMP_ROOT / "prompts"
     _PROMPTS.mkdir()
-    for _name in ("run_summary", "executive_summary", "probe_plan_system", "golden_judge", "probe_context_summary"):
+    for _name in ("run_summary", "executive_summary", "probe_plan_system", "golden_judge", "probe_context_summary",
+                  "sources_digest"):
         (_PROMPTS / f"{_name}.md").write_text(f"stub {_name} prompt", encoding="utf-8")
     (_PROMPTS / "content_injection_reminder.md").write_text(
         "stub reminder {{start}} {{end}}", encoding="utf-8")
@@ -120,8 +121,9 @@ def _reset_backend_rate_limits():
 @pytest.fixture(autouse=True)
 def _clear_ttl_caches():
     """No cached LLM answer, probe result or scan leaks between tests."""
-    from pentest_agent import abac, report_access, ttl_cache
+    from pentest_agent import abac, llm_budget, report_access, ttl_cache
 
+    llm_budget.reset()
     ttl_cache.clear_all()
     report_access.clear_cache()
     abac.clear_cache()

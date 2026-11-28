@@ -57,7 +57,8 @@ with metadata `session_id`, `target_host`, `profile` and `app`. Below it:
 | `js_sast_scan` | JavaScript SAST over crawled assets |
 | `native_dast_sandbox_scan` | the sandboxed DAST scan (inputs/outputs, duration) |
 | `codegen_probe_plan`, `probe_runner` | LLM probe planning and the trusted probe runner |
-| `executive_summary` → `ChatGroq` | the summary prompt and Groq call (tokens, latency) |
+| `executive_summary` → `ChatGroq` | the summary prompt and Groq call (tokens, latency); a large SOURCES list shows extra `ChatGroq` calls first (one per chunk, `prompts/sources_digest.md`) |
+| `codegen_probe_plan` → `ChatGroq` (several) | a large planner context: one call per chunk (`prompts/probe_context_summary.md`, repeated until the text fits one `PROBE_CONTEXT_CHUNK_CHARS` chunk), then the plan; a 413 shows as a failed call followed by a smaller retry |
 | `ground_summary_citations` | citation grounding: shows which `[Sn]` ids or URLs were removed as hallucinated |
 
 Golden runs use `session_id = golden:<case-id>`. Filter on that metadata to compare runs over time.

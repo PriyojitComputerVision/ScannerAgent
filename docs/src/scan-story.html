@@ -122,7 +122,7 @@
     <div class="card"><span class="n">12</span><h3>The Scanner</h3><code>dast</code><span class="chip c-web">visits your website</span><span class="chip c-box">isolated</span>
       <p>Runs the main security tests from an isolated helper that may only make reading requests, only inside the fence, only to the addresses it checked at the start, and never downloads files. It looks for things like missing security headers, leaked files (.env, .git, keys), open GraphQL schemas, scripts loaded from other sites without a fingerprint, and inputs that echo back unsafely. The full list is in docs/SECURITY_CHECKS.md.</p></div>
     <div class="card"><span class="n">13</span><h3>The AI planner</h3><code>plan_probes</code><span class="chip c-ai">uses the AI</span>
-      <p>Looks at what's been found and picks extra checks from a fixed menu of safe ones. It chooses; it can't write code. Without an AI, a built-in plan is used.</p></div>
+      <p>Looks at what's been found and picks extra checks from a fixed menu of safe ones. It chooses; it can't write code. A big scan is read in overlapping parts and boiled down until it fits what the AI can take at once; nothing is cut off. Without an AI, a built-in plan is used.</p></div>
   </div>
 
   <div class="h2row"><h2>Act 3 · Testing and writing it up</h2><span>Careful, read-only checks, then the paperwork.</span></div>
@@ -132,7 +132,7 @@
     <div class="card"><span class="n">15</span><h3>The Collector</h3><code>aggregate</code>
       <p>Gathers every finding, removes duplicates (one issue on one page counts once, even when several helpers found it; the console's live counts and risk grade count the same way), notes what couldn't be tested, and writes a factual summary where each statement points to its source, like [S1].</p></div>
     <div class="card"><span class="n">16</span><h3>The AI writer</h3><code>summarize</code><span class="chip c-ai">uses the AI</span>
-      <p>Drafts a friendlier executive summary, kept only if every claim cites a real finding; otherwise the Collector's summary stays.</p></div>
+      <p>Drafts a friendlier executive summary, kept only if every claim cites a real finding; otherwise the Collector's summary stays. A long finding list is shortened first, keeping every [S1]-style reference.</p></div>
     <div class="card"><span class="n">17</span><h3>The Publisher</h3><code>report</code>
       <p>Produces the report as a web page, a Word document, Markdown and JSON. Everything taken from your site is shown as plain text, so nothing in it can run in your browser.</p></div>
     <div class="card new"><span class="n">18</span><h3>The Notary</h3><code>audit</code>
