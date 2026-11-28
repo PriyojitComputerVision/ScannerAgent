@@ -26,7 +26,12 @@ from scopeguard.simulated_target import SimulatedTarget
 WS_PORT = int(os.getenv("SIM_WS_PORT", "8765"))
 
 
-def _wait_healthy(timeout=40):
+def _wait_healthy(timeout: float | None = None):
+    # The server may bring the Kubernetes sandbox up before it serves (K8S_STARTUP_WAIT_SECONDS).
+    if timeout is None:
+        from pentest_agent.config import settings
+
+        timeout = settings.k8s_startup_wait_seconds + 60
     end = time.time() + timeout
     while time.time() < end:
         try:
