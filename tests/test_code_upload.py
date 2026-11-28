@@ -600,11 +600,11 @@ def test_graph_code_nodes_analyse_the_upload_and_the_report_shows_it(monkeypatch
              "target": {"url": "https://a.example/", "upload_id": meta["upload_id"], "authorization_confirmed": True},
              "findings": []}
     cmd = graph.code_source_node(state)  # named in the request: no pause
-    assert cmd.goto == "code_sast" and cmd.update["code_source"]["upload_id"] == meta["upload_id"]
+    assert cmd.goto[0].node == "code_sast" and cmd.update["code_source"]["upload_id"] == meta["upload_id"]
     state.update(cmd.update)
     cmd = graph.code_sast_node(state)
     up = cmd.update["code_report"]
-    assert cmd.goto == "sast" and cmd.update["findings"] and up["findings"] == len(cmd.update["findings"])
+    assert cmd.goto == "plan_probes" and cmd.update["findings"] and up["findings"] == len(cmd.update["findings"])
     assert up["source"] == {"kind": "zip"}
     # the site/source-folder check no longer touches the upload
     state.update(cmd.update)

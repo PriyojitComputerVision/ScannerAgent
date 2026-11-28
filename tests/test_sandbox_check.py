@@ -155,7 +155,7 @@ def _state(**extra):
             "target": {"url": "https://x.test", "authorization_confirmed": True, "session_id": "s"}, **extra}
 
 
-def test_sandbox_node_routes_to_dast(monkeypatch):
+def test_sandbox_node_routes_to_the_join(monkeypatch):
     seen = {}
 
     class Tool:
@@ -165,7 +165,7 @@ def test_sandbox_node_routes_to_dast(monkeypatch):
 
     monkeypatch.setattr(graph, "run_sandbox_check", Tool())
     cmd = graph.sandbox_check_node(_state())
-    assert cmd.goto == "dast" and seen["source_allowed"] is True
+    assert cmd.goto == "plan_probes" and seen["source_allowed"] is True
     monkeypatch.setattr(settings, "sandbox_check_enabled", False)
     assert graph.sandbox_check_node(_state()).update["phase"] == "sandbox_check_skipped"
 
@@ -181,7 +181,8 @@ def test_iteration_cap_stops_a_node_and_flags_it(monkeypatch):
     ok = limited(_state(node_runs={"dast": 4}))
     assert ok.update["node_runs"] == {"dast": 1} and calls == [1]
     stopped = limited(_state(node_runs={"dast": 5}))
-    assert calls == [1] and stopped.goto == "aggregate"
+    assert calls == [1] and stopped.goto == "plan_probes"  # a capped scan branch still meets the others
+    assert graph.with_iteration_limit("recon", node)(_state(node_runs={"recon": 5})).goto == "aggregate"
     assert "max 5 per scan" in stopped.update["red_flags"][0]
     # a capped report still gets its audit record; only a capped audit ends the run
     assert graph.with_iteration_limit("report", node)(_state(node_runs={"report": 5})).goto == "audit"

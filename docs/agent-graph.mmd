@@ -14,7 +14,7 @@ graph TD;
 	code_sast(code_sast)
 	sandbox_check(sandbox_check)
 	dast(dast)
-	plan_probes(plan_probes)
+	plan_probes(plan_probes<hr/><small><em>defer = True</em></small>)
 	run_probes(run_probes)
 	aggregate(aggregate)
 	summarize(summarize)
@@ -33,14 +33,12 @@ graph TD;
 	choose_scope -.-> aggregate;
 	choose_scope -.-> auth;
 	choose_scope -.-> recon;
-	code_sast -.-> aggregate;
-	code_sast -.-> sandbox_check;
-	code_sast -.-> sast\3arun_sast;
+	code_sast -.-> plan_probes;
 	code_source -.-> aggregate;
 	code_source -.-> code_sast;
+	code_source -.-> dast;
 	code_source -.-> sandbox_check;
 	code_source -.-> sast\3arun_sast;
-	dast -.-> aggregate;
 	dast -.-> plan_probes;
 	plan_probes -.-> aggregate;
 	plan_probes -.-> run_probes;
@@ -48,9 +46,8 @@ graph TD;
 	recon -.-> auth;
 	report -.-> audit;
 	run_probes -.-> aggregate;
-	sandbox_check -.-> aggregate;
-	sandbox_check -.-> dast;
-	sast\3arun_sast --> sandbox_check;
+	sandbox_check -.-> plan_probes;
+	sast\3arun_sast --> plan_probes;
 	summarize -.-> report;
 	validate -.-> aggregate;
 	validate -.-> audit;
