@@ -133,7 +133,7 @@
         <div class="tags"><i class="tag web">target</i><i class="tag box">sandbox</i></div>
 
         <div class="node"><span class="t">plan_probes</span><span>LLM plan · scan:probes</span></div>
-        <div class="mod"><b>code_exec.plan_probes → codegen_subagent.py</b><span>ProbePlan of whitelisted probes, stored in state</span></div>
+        <div class="mod"><b>code_exec.plan_probes → codegen_subagent.py</b><span>large context chunked (10% overlap) + summarized until it fits one chunk, then extracted as a validated ProbePlan of whitelisted probes, stored in state</span></div>
         <div class="tags"><i class="tag llm">LLM</i></div>
 
         <div class="node"><span class="t">run_probes</span><span>runs the stored plan</span></div>
@@ -145,7 +145,7 @@
         <div class="tags"></div>
 
         <div class="node"><span class="t">summarize</span><span>LLM summary</span></div>
-        <div class="mod"><b>generate_executive_summary</b><span>must cite [Sn]; otherwise aggregate's summary stays</span></div>
+        <div class="mod"><b>generate_executive_summary</b><span>must cite [Sn]; long SOURCES digested per severity, every [Sn] kept (context_fit.fit_sources); otherwise aggregate's summary stays</span></div>
         <div class="tags"><i class="tag llm">LLM</i></div>
 
         <div class="node"><span class="t">report</span><span>html · md · json · docx</span></div>
@@ -176,7 +176,7 @@
           <li>IdP password and MFA factor never reach the agent</li>
         </ul></div>
       <div class="box"><div class="h">optional</div><b>Groq LLM · llm.py</b>
-        <ul><li>plan_probes and summarize only</li><li>429: waits ≤ 120 s, then fallback</li><li>no key or prompt file → deterministic output</li></ul></div>
+        <ul><li>plan_probes and summarize only</li><li>≤ PROBE_CONTEXT_CHUNK_CHARS (8000) of data per request; more is chunked, summarized, extracted</li><li>413: limit learned, rebuilt smaller (tenacity, 3 tries)</li><li>429: waits ≤ 120 s, then fallback</li><li>no key or prompt file → deterministic output</li></ul></div>
       <div class="box"><div class="h">optional</div><b>LangSmith</b>
         <ul><li>one trace per scan; tokens, keys, passwords, cookies redacted</li></ul></div>
       <div class="box disk"><div class="h">local disk · data/</div><b>Files the server writes</b>
