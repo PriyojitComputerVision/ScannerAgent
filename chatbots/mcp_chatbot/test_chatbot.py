@@ -146,8 +146,10 @@ async def test_watch_scan_streams_each_step_then_returns_a_compact_result():
         if max_findings == 0:
             n = next(polls)
             data = {"scan_id": scan_id, "status": "running" if n < 3 else "completed", "steps_completed": steps[:n]}
-            if n == 2:  # the parallel scan steps are still running
+            if n == 2:  # the parallel scan steps are still running; the LLM is pacing itself
                 data["running_steps"] = ["code_sast", "dast"]
+                data["notices"] = [{"event": "llm_rate_limit_wait", "at_seconds": 9.0,
+                                    "message": "Pacing the LLM: waiting 7s for Groq's per-minute token budget."}]
         else:
             data = {"scan_id": scan_id, "status": "completed", "target_url": "https://app.example.test/",
                     "profile": "standard", "steps_completed": steps, "severity_counts": {"medium": 2},
@@ -162,7 +164,8 @@ async def test_watch_scan_streams_each_step_then_returns_a_compact_result():
     events: list[dict] = []
     await eng.send("t5", "watch it", events.append)
     progress = [e["text"] for e in events if e["type"] == "progress"]
-    assert progress[:4] == ["validate done (phase validated, 0.3s)", "recon done (phase recon_complete, 4.7s)",
+    assert progress[:5] == ["validate done (phase validated, 0.3s)", "recon done (phase recon_complete, 4.7s)",
+                            "note: Pacing the LLM: waiting 7s for Groq's per-minute token budget.",
                             "running in parallel: code_sast, dast", "audit done (phase audited, 16.4s)"]
     assert progress[-1].startswith("scan completed: 2 finding(s)")
     # The user gets the scanner's own result block (exact severities, real file paths) ...

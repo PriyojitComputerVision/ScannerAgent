@@ -93,7 +93,9 @@ else's site is an attack on it, whatever the intent.
    - Each call returns `steps_completed`, so you can tell the user which step it is on (recon,
      dast, report, ...) instead of going silent. The code check, the website check and DAST run
      in parallel, so they finish in any order; while they run, `running_steps` lists the ones
-     not finished yet. A standard scan of a real site can take several minutes.
+     not finished yet. `notices` explains a step that seems to stand still (e.g. the scanner's LLM
+     waiting for its provider's per-minute token budget); pass it on instead of retrying. A
+     standard scan of a real site can take several minutes.
 
 7. **Report the result** (format below), and offer the HTML or DOCX report from `report_files`.
 

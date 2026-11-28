@@ -101,7 +101,7 @@
         <div class="tags"><i class="tag you">human</i><i class="tag disk">no network</i></div>
 
         <div class="node"><span class="t">recon</span><span>crawl + discovery</span></div>
-        <div class="mod"><b>tools/recon.py · discovery.py</b><span>in-scope pages, robots, sitemap, .well-known; file links never fetched</span></div>
+        <div class="mod"><b>tools/recon.py · discovery.py</b><span>in-scope pages, robots, sitemap, .well-known; file links never fetched; ≤3 requests at once, each page once (no #fragment copies), one at a time after a 429 / 5xx / slow answer</span></div>
         <div class="tags"><i class="tag web">target</i></div>
 
         <div class="node"><span class="t">auth</span><span>JWT · form login · SSO/MFA detection</span></div>
@@ -176,7 +176,7 @@
           <li>IdP password and MFA factor never reach the agent</li>
         </ul></div>
       <div class="box"><div class="h">optional</div><b>Groq LLM · llm.py</b>
-        <ul><li>plan_probes and summarize only</li><li>≤ PROBE_CONTEXT_CHUNK_CHARS (8000) of data per request; more is chunked, summarized, extracted</li><li>413: limit learned, rebuilt smaller (tenacity, 3 tries)</li><li>429: waits ≤ 120 s, then fallback</li><li>no key or prompt file → deterministic output</li></ul></div>
+        <ul><li>plan_probes and summarize only</li><li>≤ PROBE_CONTEXT_CHUNK_CHARS (8000) of data per request; more is chunked, summarized, extracted</li><li>413: limit learned, rebuilt smaller (tenacity, 3 tries)</li><li>paced to Groq's per-minute budget (x-ratelimit headers): waits for the reset instead of a 429</li><li>429: waits exactly what Groq asks, 5 retries, ≤ 120 s, then fallback</li><li>no key or prompt file → deterministic output</li></ul></div>
       <div class="box"><div class="h">optional</div><b>LangSmith</b>
         <ul><li>one trace per scan; tokens, keys, passwords, cookies redacted</li></ul></div>
       <div class="box disk"><div class="h">local disk · data/</div><b>Files the server writes</b>

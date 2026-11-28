@@ -88,6 +88,7 @@ class Settings:
     groq_model: str
     groq_max_tokens: int
     groq_reasoning_effort: str
+    groq_max_retries: int
     jwt_private_key: Path
     jwt_public_key: Path
     jwt_issuer: str
@@ -124,6 +125,9 @@ def load_settings() -> Settings:
         # reply budget for the chat model; Groq counts it against the per-request limit
         groq_max_tokens=int(env.get("CHATBOT_MAX_TOKENS") or 3000),
         groq_reasoning_effort=(env.get("GROQ_REASONING_EFFORT") or "low").strip().lower(),
+        # Groq 429s (the minute's tokens used up) are retried after the wait Groq asks for
+        # (retry-after); the same GROQ_MAX_RETRIES as the scanner, from the repo's main .env.
+        groq_max_retries=max(0, int(env.get("GROQ_MAX_RETRIES") or 5)),
         jwt_private_key=path("JWT_PRIVATE_KEY_PATH", "./keys/jwt_private.pem"),
         jwt_public_key=path("JWT_PUBLIC_KEY_PATH", "./keys/jwt_public.pem"),
         jwt_issuer=env.get("JWT_ISSUER") or "pentest-agent",
@@ -200,7 +204,7 @@ def make_llm(s: Settings, max_tokens: int | None = None):
         kwargs["reasoning_effort"] = s.groq_reasoning_effort
     # Few retries: a per-minute limit clears quickly, and a daily limit will not clear by retrying;
     # the UI shows the wait instead (describe_error).
-    return ChatGroq(model=s.groq_model, api_key=key, temperature=0.0, max_retries=2, **kwargs)
+    return ChatGroq(model=s.groq_model, api_key=key, temperature=0.0, max_retries=s.groq_max_retries, **kwargs)
 
 
 def load_prompt(name: str = "system_prompt") -> str:

@@ -27,7 +27,8 @@ RULES: tuple[tuple[str, str], ...] = (
             r"|prompt injection|unreachable|refused")),
     (WARN, r"^login url .* outside the scan scope"),
     (NOTE, (r"outside the scan scope|not visited|not downloaded|not fetched|sandbox notice"
-           r"|in the process sandbox instead|operator skipped|redirects to another host")),
+           r"|in the process sandbox instead|operator skipped|redirects to another host"
+           r"|slowed down to one request at a time")),
 )
 _COMPILED = tuple((lvl, re.compile(src, re.IGNORECASE)) for lvl, src in RULES)
 

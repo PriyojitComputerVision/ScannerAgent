@@ -306,6 +306,16 @@ The final `complete` message includes absolute report URLs: `report_url` (HTML v
 While a scan runs, the server also sends `status` messages, for example when the LLM is
 rate limited (`"event": "llm_rate_limit_wait"`, `"wait_seconds"`). One LLM call waits at most
 `LLM_RATE_LIMIT_MAX_WAIT_SECONDS` (default 120) before that step uses its offline fallback.
+LLM calls are paced to Groq's per-minute token budget (its `x-ratelimit-*` headers): a request that
+would not fit waits for the reset instead of getting a 429, a 429 waits exactly what Groq asks
+(`retry-after` / "try again in Xs") with one retry layer (`GROQ_MAX_RETRIES`, 5), and chunk summaries
+reserve only the output they need. MCP and A2A callers see the same waits as `get_scan` `notices`
+(A2A task updates; the chatbot shows them as "note: ..." lines).
+
+Recon fetches a few pages at once (at most 3) and every page once (`/a#top` and `/a#faq` are one
+page), in the same crawl order as before. It never strains the site: after a 429, a 5xx, an
+unanswered request or a response slower than 5 s it goes back to one request at a time for the rest
+of the crawl, and the report notes that.
 
 ### WebSocket client (instead of Postman)
 

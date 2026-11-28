@@ -10,7 +10,10 @@ shows the scanner's verified result and explains it.
   `langchain-mcp-adapters`. A small `watch_scan` tool built on the MCP `get_scan` tool
   streams each finished scan step and returns the result when the scan ends. The code check,
   the website check and DAST run in parallel on the scanner, so their steps arrive in finishing
-  order, after one "running in parallel: ..." line (from `get_scan`'s `running_steps`).
+  order, after one "running in parallel: ..." line (from `get_scan`'s `running_steps`). Waits inside
+  a step (the scanner's LLM pacing to Groq's per-minute budget, rate-limit retries) appear as
+  "note: ..." lines (`get_scan` `notices`). The chat model itself retries a 429 `GROQ_MAX_RETRIES`
+  (5) times, after the wait Groq asks for.
 - **Human in the loop:** `HumanInTheLoopMiddleware` pauses before every `start_scan`,
   `start_demo_scan` and `cancel_scan`. You approve, edit the arguments, or reject.
   Approving `start_scan` *is* the authorization confirmation: the chatbot sets
