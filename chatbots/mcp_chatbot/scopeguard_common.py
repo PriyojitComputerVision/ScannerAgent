@@ -26,7 +26,7 @@ import os
 import re
 import secrets
 import socket
-import subprocess
+import subprocess  # nosec B404 - fixed argument lists only, never a shell
 import sys
 import threading
 import time
@@ -216,7 +216,10 @@ def load_prompt(name: str = "system_prompt") -> str:
 # =============================================================================
 def healthy(base: str) -> bool:
     try:
-        with urllib.request.urlopen(f"{base.rstrip('/')}/healthz", timeout=2) as r:
+        url = f"{base.rstrip('/')}/healthz"
+        if urlsplit(url).scheme not in ("http", "https"):
+            return False
+        with urllib.request.urlopen(url, timeout=2) as r:  # nosec B310 - http(s) scheme checked above
             return r.status == 200
     except OSError:
         return False
@@ -272,7 +275,7 @@ def scanner_server(url: str, allow: list[str], start: bool, scanner_llm: bool = 
     with log_path.open("w", encoding="utf-8") as log:
         group = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt"
                  else {"start_new_session": True})
-        proc = subprocess.Popen(cmd, cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT, **group)
+        proc = subprocess.Popen(cmd, cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT, **group)  # nosec B603 - our own interpreter and module, no shell
         try:
             deadline = time.monotonic() + 180
             while not healthy(base):
@@ -284,12 +287,18 @@ def scanner_server(url: str, allow: list[str], start: bool, scanner_llm: bool = 
             stop_tree(proc)
 
 
+def _taskkill() -> str:
+    """Full path of Windows' taskkill.exe (never looked up through PATH)."""
+    return os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32", "taskkill.exe")
+
+
 def stop_tree(proc: subprocess.Popen) -> None:
     """Stop a `uv run` child and everything under it (uv wraps the real Python process)."""
     if proc.poll() is not None:
         return
-    if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, check=False)
+    if sys.platform == "win32":
+        subprocess.run([_taskkill(), "/PID", str(proc.pid), "/T", "/F"], capture_output=True,  # nosec B603
+                       check=False)
     else:
         import signal
 
@@ -531,7 +540,9 @@ def fetch_report(base: str, minter: TokenMinter, session_id: str, filename: str,
     url = f"{base.rstrip('/')}/reports/{quote(session_id, safe='')}/{filename}"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {minter.token()}"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        if urlsplit(req.full_url).scheme not in ("http", "https"):
+            raise ValueError("only http(s) report URLs are fetched")
+        with urllib.request.urlopen(req, timeout=30) as resp:  # nosec B310 - http(s) scheme checked above
             body = resp.read(max_bytes + 1)
     except urllib.error.HTTPError as exc:
         return (404 if exc.code in (403, 404) else 502), b"", "text/plain"
@@ -540,6 +551,48 @@ def fetch_report(base: str, minter: TokenMinter, session_id: str, filename: str,
     if len(body) > max_bytes:
         return 502, b"", "text/plain"
     return 200, body, REPORT_FILES[filename][0]
+
+
+def _findings_md(r: dict) -> list[str]:
+    out: list[str] = []
+    for sev, items in _grouped(r):
+        n = sum(g["n"] for _, g in items)
+        out += ["", f"#### {sev.capitalize()} ({n})"]
+        for title, g in items:
+            f = g["f"]
+            urls = ", ".join(f"`{u}`" for u in g["urls"][:3]) + (f" +{len(g['urls']) - 3} more" if len(g["urls"]) > 3 else "")
+            fix = " ".join(str(f.get("recommendation") or "").split())[:200]
+            out.append(f"- **{title}**" + (f" (x{g['n']})" if g["n"] > 1 else "") + f" - {urls or '-'}"
+                       + (f" - {f['cwe']}" if f.get("cwe") else "") + (f" - fix: {fix}" if fix else ""))
+    return out
+
+
+def _flags_md(r: dict) -> list[str]:
+    out: list[str] = []
+    levels = r.get("red_flags_by_level") or {}
+    if levels:  # errors / warnings are red flags; notes are scope information, not failures
+        flagged = [f"- **Error:** {f}" for f in levels.get("error") or []] + [
+            f"- **Warning:** {f}" for f in levels.get("warn") or []]
+        if flagged:
+            out += ["", "#### Red flags"] + flagged
+        if levels.get("note"):
+            out += ["", "#### Notes (scope, not failures)"] + [f"- {f}" for f in levels["note"]]
+    elif r.get("red_flags"):
+        out += ["", "#### Red flags"] + [f"- {flag}" for flag in r["red_flags"]]
+    return out
+
+
+def _files_audit_md(r: dict) -> list[str]:
+    out: list[str] = []
+    files = r.get("report_files") or {}
+    if files:
+        out += ["", "#### Report files"] + [report_link_line(k, v) for k, v in files.items()]
+    a = r.get("audit")
+    if isinstance(a, dict):
+        out += ["", f"**Audit record:** seq {a.get('seq')}, outcome {a.get('outcome')}, hash `{str(a.get('hash'))[:16]}...`"]
+    if r.get("error"):
+        out += ["", f"**Error:** {r['error']}"]
+    return out
 
 
 def scan_result_markdown(r: dict) -> str:
@@ -558,34 +611,10 @@ def scan_result_markdown(r: dict) -> str:
            "| " + " | ".join(str(counts.get(s, 0)) for s in _SEV_ORDER) + f" | {r.get('findings_total', 0)} |"]
     if r.get("findings_omitted"):
         out.append(f"\n{r['findings_omitted']} more finding(s) were not returned; see the report files.")
-    for sev, items in _grouped(r):
-        n = sum(g["n"] for _, g in items)
-        out += ["", f"#### {sev.capitalize()} ({n})"]
-        for title, g in items:
-            f = g["f"]
-            urls = ", ".join(f"`{u}`" for u in g["urls"][:3]) + (f" +{len(g['urls']) - 3} more" if len(g["urls"]) > 3 else "")
-            fix = " ".join(str(f.get("recommendation") or "").split())[:200]
-            out.append(f"- **{title}**" + (f" (x{g['n']})" if g["n"] > 1 else "") + f" - {urls or '-'}"
-                       + (f" - {f['cwe']}" if f.get("cwe") else "") + (f" - fix: {fix}" if fix else ""))
+    out += _findings_md(r)
     out += _code_sast_markdown(r.get("code_sast"))
-    levels = r.get("red_flags_by_level") or {}
-    if levels:  # errors / warnings are red flags; notes are scope information, not failures
-        flagged = [f"- **Error:** {f}" for f in levels.get("error") or []] + [
-            f"- **Warning:** {f}" for f in levels.get("warn") or []]
-        if flagged:
-            out += ["", "#### Red flags"] + flagged
-        if levels.get("note"):
-            out += ["", "#### Notes (scope, not failures)"] + [f"- {f}" for f in levels["note"]]
-    elif r.get("red_flags"):
-        out += ["", "#### Red flags"] + [f"- {flag}" for flag in r["red_flags"]]
-    files = r.get("report_files") or {}
-    if files:
-        out += ["", "#### Report files"] + [report_link_line(k, v) for k, v in files.items()]
-    a = r.get("audit")
-    if isinstance(a, dict):
-        out += ["", f"**Audit record:** seq {a.get('seq')}, outcome {a.get('outcome')}, hash `{str(a.get('hash'))[:16]}...`"]
-    if r.get("error"):
-        out += ["", f"**Error:** {r['error']}"]
+    out += _flags_md(r)
+    out += _files_audit_md(r)
     return "\n".join(out)
 
 
@@ -602,15 +631,13 @@ def _code_origin(code: dict) -> str:
     return ".zip archive uploaded"
 
 
-def _code_sast_markdown(code: dict | None) -> list[str]:
-    """The scan's code SAST step (same report): origin, counts and language coverage. The analysis
-    covers Python only for now, so every non-Python file is shown as partial coverage."""
-    if not isinstance(code, dict) or not code:
-        return []
-    out = ["", "#### Source code (code SAST step, same report)",
-           f"- **Code:** {_code_origin(code)}",
-           (f"- **Analysed:** {code.get('source_files') or 0} source file(s), {code.get('findings') or 0} finding(s), "
-           f"{code.get('sandbox') or '?'} sandbox")]
+def _shown_name(name: object) -> str:
+    """A file name from the upload, shown as code: untrusted markers and backticks removed."""
+    return " ".join(_MARKER_RE.sub("", str(name)).split()).replace("`", "")[:200]
+
+
+def _languages_md(code: dict) -> list[str]:
+    out: list[str] = []
     langs = code.get("languages") or {}
     by = langs.get("by_language") or {}
     if by:
@@ -620,16 +647,21 @@ def _code_sast_markdown(code: dict | None) -> list[str]:
     if langs.get("verdict"):
         out.append(f"- **Coverage:** {langs['verdict']}")
     for name in langs.get("not_python") or []:  # file names from the upload, shown as code
-        clean = " ".join(_MARKER_RE.sub("", str(name)).split()).replace("`", "")[:200]
+        clean = _shown_name(name)
         out.append(f"  - not Python, partial coverage: `{clean}`")
     for name in langs.get("warnings") or []:  # executables / scripts; "...; note)" = a shell script
-        clean = " ".join(_MARKER_RE.sub("", str(name)).split()).replace("`", "")[:200]
+        clean = _shown_name(name)
         if clean.endswith("; note)"):
             out.append(f"  - Note: shell script, review it if unexpected: `{clean}`")
         else:
             out.append(f"  - **WARNING** executable / script file, review it: `{clean}`")
     if not by and code.get("language_notice"):
         out.append(f"- {code['language_notice']}")
+    return out
+
+
+def _standard_tools_md(code: dict) -> list[str]:
+    out: list[str] = []
     std = code.get("coding_standard") or {}
     if std.get("standard"):
         rules = ", ".join(f"{rid} ({(std.get('codes') or {}).get(rid, '?')}) in {n} file(s)"
@@ -640,8 +672,22 @@ def _code_sast_markdown(code: dict | None) -> list[str]:
     if tools:
         out.append("- **Code tools:** " + "; ".join(_tool_label(n, t) for n, t in tools.items() if isinstance(t, dict)))
     for name in (code.get("dependencies") or {}).get("files") or []:  # file names from the upload, shown as code
-        clean = " ".join(_MARKER_RE.sub("", str(name)).split()).replace("`", "")[:200]
+        clean = _shown_name(name)
         out.append(f"  - requirements file read by pip-audit: `{clean}`")
+    return out
+
+
+def _code_sast_markdown(code: dict | None) -> list[str]:
+    """The scan's code SAST step (same report): origin, counts and language coverage. The analysis
+    covers Python only for now, so every non-Python file is shown as partial coverage."""
+    if not isinstance(code, dict) or not code:
+        return []
+    out = ["", "#### Source code (code SAST step, same report)",
+           f"- **Code:** {_code_origin(code)}",
+           (f"- **Analysed:** {code.get('source_files') or 0} source file(s), {code.get('findings') or 0} finding(s), "
+           f"{code.get('sandbox') or '?'} sandbox")]
+    out += _languages_md(code)
+    out += _standard_tools_md(code)
     return out
 
 
@@ -652,24 +698,11 @@ def _tool_label(name: str, info: dict) -> str:
     return f"{name}{version}: {info.get('status')}{count}"
 
 
-def compact_scan_result(r: dict) -> str:
-    """A finished get_scan result in a compact text form for the model.
-
-    Findings with the same severity and title are one line (count, CWE, up to three
-    URLs, the fix); evidence stays in the report files. Executive summary and evidence
-    come from the scanned site, so the untrusted-content markers are kept."""
+def _compact_findings(r: dict, root) -> list[str]:
+    """Findings with the same severity and title as one line, a heading per severity."""
     from urllib.parse import urlsplit
 
-    target = str(r.get("target_url") or "")
-    root = urlsplit(target)
-    lines = [(f"scan_id: {r.get('scan_id')} | status: {r.get('status')} | target: {target} | "
-              f"tested: {scope_label(r)} | "
-              f"profile: {r.get('profile')} | pages crawled: {r.get('pages_crawled')} | "
-              f"duration: {r.get('elapsed_seconds')}s | signed in: {r.get('signed_in')}"),
-             f"severity counts: {r.get('severity_counts')} | findings total: {r.get('findings_total')}"
-             + (f" | not returned: {r['findings_omitted']}" if r.get("findings_omitted") else "")]
-    if r.get("error"):
-        lines.append(f"error: {r['error']}")
+    lines: list[str] = []
     groups: dict[tuple, dict] = {}
     for f in r.get("findings") or []:
         g = groups.setdefault((f.get("severity"), f.get("title")), {"n": 0, "urls": [], "f": f})
@@ -693,30 +726,39 @@ def compact_scan_result(r: dict) -> str:
         lines.append(f"- [{str(sev).upper()}] {title}" + (f" x{g['n']}" if g["n"] > 1 else "")
                      + f" | {f.get('cwe') or 'no CWE'} | confidence {f.get('confidence')} | at {urls or '-'}"
                      + (f" | fix: {fix}" if fix else ""))
-    code = r.get("code_sast") or {}
-    if code:  # the code SAST step; file names keep their untrusted markers
-        langs = code.get("languages") or {}
-        lines.append(f"source code (code_sast step, same report): {_code_origin(code)} | "
-                     f"{code.get('source_files') or 0} file(s), {code.get('findings') or 0} finding(s) | "
-                     f"languages: {langs.get('by_language')} | {langs.get('verdict') or code.get('language_notice')}")
-        if langs.get("not_python"):
-            lines.append("not Python (partial coverage; findings there are low confidence): "
-                         + "; ".join(str(n) for n in langs["not_python"][:20]))
-        std = code.get("coding_standard") or {}
-        if std.get("standard"):
-            lines.append(f"coding standard (PEP 8; STYLE_* findings are info/low): "
-                         f"{std.get('files_with_issues') or 0} file(s) with issues, by rule: {std.get('files_by_rule')}")
-        tools = code.get("tools") or {}
-        if tools:  # only status ok means the tool ran; pip-audit audits exact pins only
-            lines.append("code tools (only status ok ran; never call a tool that did not run clean): "
-                         + "; ".join(_tool_label(n, t) for n, t in tools.items() if isinstance(t, dict)))
-            pip = tools.get("pip-audit") or {}
-            if pip.get("unpinned"):
-                lines.append(f"pip-audit: {pip['unpinned']} dependenc(ies) not pinned to one version, not audited")
-        if langs.get("warnings"):
-            lines.append("executable / script files (level warning: tell the user to review them; "
-                         "level note: shell scripts, mention briefly): "
-                         + "; ".join(str(n) for n in langs["warnings"][:20]))
+    return lines
+
+
+def _compact_code(code: dict) -> list[str]:
+    """The code SAST step; file names keep their untrusted markers."""
+    lines: list[str] = []
+    langs = code.get("languages") or {}
+    lines.append(f"source code (code_sast step, same report): {_code_origin(code)} | "
+                 f"{code.get('source_files') or 0} file(s), {code.get('findings') or 0} finding(s) | "
+                 f"languages: {langs.get('by_language')} | {langs.get('verdict') or code.get('language_notice')}")
+    if langs.get("not_python"):
+        lines.append("not Python (partial coverage; findings there are low confidence): "
+                     + "; ".join(str(n) for n in langs["not_python"][:20]))
+    std = code.get("coding_standard") or {}
+    if std.get("standard"):
+        lines.append(f"coding standard (PEP 8; STYLE_* findings are info/low): "
+                     f"{std.get('files_with_issues') or 0} file(s) with issues, by rule: {std.get('files_by_rule')}")
+    tools = code.get("tools") or {}
+    if tools:  # only status ok means the tool ran; pip-audit audits exact pins only
+        lines.append("code tools (only status ok ran; never call a tool that did not run clean): "
+                     + "; ".join(_tool_label(n, t) for n, t in tools.items() if isinstance(t, dict)))
+        pip = tools.get("pip-audit") or {}
+        if pip.get("unpinned"):
+            lines.append(f"pip-audit: {pip['unpinned']} dependenc(ies) not pinned to one version, not audited")
+    if langs.get("warnings"):
+        lines.append("executable / script files (level warning: tell the user to review them; "
+                     "level note: shell scripts, mention briefly): "
+                     + "; ".join(str(n) for n in langs["warnings"][:20]))
+    return lines
+
+
+def _compact_flags(r: dict) -> list[str]:
+    lines: list[str] = []
     levels = r.get("red_flags_by_level") or {}
     if levels:
         for lv, name in (("error", "red flag (error)"), ("warn", "red flag (warning)"), ("note", "note (scope, not a failure)")):
@@ -725,6 +767,32 @@ def compact_scan_result(r: dict) -> str:
     else:
         for flag in r.get("red_flags") or []:
             lines.append(f"red flag: {flag}")
+    return lines
+
+
+def compact_scan_result(r: dict) -> str:
+    """A finished get_scan result in a compact text form for the model.
+
+    Findings with the same severity and title are one line (count, CWE, up to three
+    URLs, the fix); evidence stays in the report files. Executive summary and evidence
+    come from the scanned site, so the untrusted-content markers are kept."""
+    from urllib.parse import urlsplit
+
+    target = str(r.get("target_url") or "")
+    root = urlsplit(target)
+    lines = [(f"scan_id: {r.get('scan_id')} | status: {r.get('status')} | target: {target} | "
+              f"tested: {scope_label(r)} | "
+              f"profile: {r.get('profile')} | pages crawled: {r.get('pages_crawled')} | "
+              f"duration: {r.get('elapsed_seconds')}s | signed in: {r.get('signed_in')}"),
+             f"severity counts: {r.get('severity_counts')} | findings total: {r.get('findings_total')}"
+             + (f" | not returned: {r['findings_omitted']}" if r.get("findings_omitted") else "")]
+    if r.get("error"):
+        lines.append(f"error: {r['error']}")
+    lines += _compact_findings(r, root)
+    code = r.get("code_sast") or {}
+    if code:
+        lines += _compact_code(code)
+    lines += _compact_flags(r)
     if r.get("executive_summary"):
         lines.append("executive summary: " + " ".join(str(r["executive_summary"]).split())[:1500])
     if r.get("report_files"):
@@ -839,13 +907,14 @@ def describe_error(exc: BaseException) -> dict:
         retry = None
         headers = getattr(getattr(exc, "response", None), "headers", None) or {}
         with contextlib.suppress(TypeError, ValueError):
-            retry = float(headers.get("retry-after")) if headers.get("retry-after") else None
+            after = headers.get("retry-after")
+            retry = float(after) if after else None
         m = _WAIT_RE.search(raw)
         if m and any(m.groups()):
             retry = int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + float(m.group(3) or 0)
         lim = _LIMIT_RE.search(raw)
         code = lim.group(3).upper() if lim else None
-        name = _LIMIT_NAMES.get(code, "rate limit")
+        name = _LIMIT_NAMES.get(code or "", "rate limit")
         usage = f" ({int(lim.group(5)):,} of {int(lim.group(4)):,} used)" if lim else ""
         if code in ("TPD", "RPD"):
             text = f"Groq's {name} for this API key is used up{usage}. The chat model cannot answer until it resets."
@@ -875,16 +944,17 @@ class Engine:
         self.agent = agent
         self.recursion_limit = recursion_limit
         self.pending: dict[str, list[dict]] = {}  # thread -> action requests awaiting review
-        self.policy = None  # optional async () -> dict: the scanner's scan_policy (no LLM)
+        self.policy: Callable[..., Any] | None = None  # optional async () -> dict: scan_policy (no LLM)
+        self.tools_report: dict = {}  # which MCP tools are on / off (chatbot.select_tools)
         # optional async (filename, base64) -> dict: MCP upload_code, called by the UI directly (the
         # archive never passes through the model)
-        self.upload = None
+        self.upload: Callable[..., Any] | None = None
         # optional (session_id, filename) -> (status, bytes, content type): a report file from the
         # scanner with this chatbot's token, for the UI's report links (never through the model)
-        self.report = None
+        self.report: Callable[..., Any] | None = None
         # optional async (scan_id, action, code, credentials) -> dict: answer a scan's sign-in pause
         # (MCP submit_sign_in / skip_sign_in), called by the UI directly: codes never reach the model
-        self.sign_in = None
+        self.sign_in: Callable[..., Any] | None = None
         # What the output guardrail checks answers against (no prompt leakage).
         self.prompts = [load_prompt(), load_prompt("summary_prompt")]
 
@@ -1021,7 +1091,7 @@ def _print_event(ev: dict) -> None:
 
 
 def _ask_review(requests: list[dict]) -> list[dict]:
-    answers = []
+    answers: list[dict[str, Any]] = []
     for req in requests:
         print("\n" + "=" * 70)
         print(f"APPROVAL NEEDED: {req['name']}")

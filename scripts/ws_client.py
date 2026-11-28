@@ -60,16 +60,17 @@ import urllib.request
 import zipfile
 from contextlib import nullcontext
 from pathlib import Path
-from urllib.parse import urlencode
+from typing import Any
+from urllib.parse import urlencode, urlsplit
 
 import websockets
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
 
 from pentest_agent import api_auth, rbac
 from pentest_agent.auth_client import AuthenticationFailed, TokenManager
 from pentest_agent.config import settings
+
+ROOT = Path(__file__).resolve().parent.parent
+
 
 SCOPES = ("website_and_code", "website", "code")
 # Keys whose values are never printed (tokens, target credentials, session handover).
@@ -458,7 +459,9 @@ def upload_code(base: str, token: str | None, path: Path) -> str:
     req = urllib.request.Request(f"{base}/api/uploads?{urlencode({'filename': name})}", data=data,
                                  headers=headers, method="POST")
     try:
-        with urllib.request.urlopen(req, timeout=120) as r:
+        if urlsplit(req.full_url).scheme not in ("http", "https"):
+            raise SystemExit("the server URL must be http(s)")
+        with urllib.request.urlopen(req, timeout=120) as r:  # nosec B310 - http(s) scheme checked above
             body = json.load(r)
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", "replace")[:500]
@@ -474,11 +477,13 @@ def upload_code(base: str, token: str | None, path: Path) -> str:
 
 def _check_health(base: str) -> None:
     try:
-        with urllib.request.urlopen(f"{base}/healthz", timeout=5) as r:
+        if urlsplit(base).scheme not in ("http", "https"):
+            raise SystemExit("the server URL must be http(s)")
+        with urllib.request.urlopen(f"{base}/healthz", timeout=5) as r:  # nosec B310 - http(s) scheme checked above
             health = json.load(r)
     except (urllib.error.URLError, OSError, ValueError) as exc:
         raise SystemExit(_fail(3, f"server not reachable at {base} ({exc}). Start it with: "
-                                  "uv run pentest-agent"))
+                                  "uv run pentest-agent")) from exc
     if not health.get("graph_initialized", True):
         print(f"[warn] server is up but the graph is not initialized: {health}")
 
@@ -499,7 +504,7 @@ def _token_source(args: argparse.Namespace, base: str):
         try:
             token = tm.get_token()
         except (AuthenticationFailed, OSError) as exc:
-            raise SystemExit(_fail(3, f"sign-in at {base}/auth/token failed: {exc}"))
+            raise SystemExit(_fail(3, f"sign-in at {base}/auth/token failed: {exc}")) from exc
         print(f"[auth] signed in as '{settings.auth_client_id}' via /auth/token, roles: {', '.join(tm.roles)}")
         return token, tm
     if not api_auth.keys_present():
@@ -516,10 +521,10 @@ def _token_source(args: argparse.Namespace, base: str):
 
 def build_payload(args: argparse.Namespace, target_url: str | None) -> dict:
     if args.payload:
-        body = json.loads(args.payload.read_text(encoding="utf-8"))
-        if not isinstance(body, dict):
+        loaded = json.loads(args.payload.read_text(encoding="utf-8"))
+        if not isinstance(loaded, dict):
             raise SystemExit(_fail(1, f"{args.payload} must hold a JSON object"))
-        return body
+        return loaded
     if args.resume:
         return {"resume": True}
     body: dict = {"profile": args.profile, "authorization_confirmed": True,
@@ -664,10 +669,8 @@ class Printer:
                 print(line)
 
 
-async def _run(args: argparse.Namespace, target_url: str | None) -> int:
-    base = f"http://{args.host}:{args.port}"
-    _check_health(base)
-    session_id = args.session_id or f"ws-{int(time.time())}"
+def _request(args: argparse.Namespace, base: str, target_url: str | None) -> tuple[str | None, object, dict]:
+    """(token, token manager, scan request): sign in, store named code, build the payload."""
     if args.payload:
         # A token inside the --payload body (Postman style) is used as-is; no sign-in.
         body_token = build_payload(args, target_url).get("access_token")
@@ -680,18 +683,63 @@ async def _run(args: argparse.Namespace, target_url: str | None) -> int:
         args.upload_id = args.uploader(args.code_path)
     payload = build_payload(args, target_url)
     payload.pop("access_token", None)
+    return token, tm, payload
 
+
+def _connection(args: argparse.Namespace, token: str | None, session_id: str,
+                payload: dict) -> tuple[str, dict, dict]:
+    """(URI, headers, first frame): the token goes in the query, a header or the first message."""
     query = {"session_id": session_id}
     headers = {}
-    if token and args.token_in == "query":
+    if token and args.token_in == "query":  # nosec B105 - an option value, not a secret
         query["access_token"] = token
-    elif token and args.token_in == "header":
+    elif token and args.token_in == "header":  # nosec B105 - an option value, not a secret
         headers["Authorization"] = f"Bearer {token}"
     elif token:
         payload = {"access_token": token, **payload}
     if args.origin:
         headers["Origin"] = args.origin
-    uri = f"ws://{args.host}:{args.port}/ws?{urlencode(query)}"
+    return f"ws://{args.host}:{args.port}/ws?{urlencode(query)}", headers, payload
+
+
+async def _converse(ws, send, out, args: argparse.Namespace, tm) -> int | None:
+    """Print the server's frames and answer every pause; an exit code once the run ends (None
+    when the connection closed first)."""
+    last_pause: dict | None = None
+    full_frames = args.frames or args.raw
+    async for raw in ws:
+        msg = json.loads(raw)
+        if full_frames:  # every frame in full; else only the summary line further down
+            out.received(msg)
+        kind = msg.get("type")
+        if kind == "token_refreshed":
+            if tm:
+                tm.observe_ws_message(msg)
+            print(f"[auth]   server renewed the token (expires {msg.get('expires_at')})")
+        elif kind == "input_required":
+            last_pause = msg
+            await send(await asyncio.to_thread(answer_pause, msg, args))
+        elif kind == "input_invalid":
+            detail = "; ".join(d.get("msg", "") for d in msg.get("detail") or [])
+            print(f"[pause]  answer rejected: {msg.get('message')} {detail}".rstrip())
+            retry = {**(last_pause or {"request": {"type": "sign_in"}}), "message": "Try again."}
+            await send(await asyncio.to_thread(answer_pause, retry, args))
+        else:
+            if not full_frames:
+                out.received(msg)
+            if kind == "error":
+                return 1
+            if kind == "complete":
+                return _report(msg, args)
+    return None
+
+
+async def _run(args: argparse.Namespace, target_url: str | None) -> int:
+    base = f"http://{args.host}:{args.port}"
+    _check_health(base)
+    session_id = args.session_id or f"ws-{int(time.time())}"
+    token, tm, payload = _request(args, base, target_url)
+    uri, headers, payload = _connection(args, token, session_id, payload)
     out = Printer(args)
     print(f"[ws]     connect ws://{args.host}:{args.port}/ws?session_id={session_id} (token in {args.token_in}"
           + (f", Origin {args.origin}" if args.origin else "") + ")")
@@ -705,37 +753,12 @@ async def _run(args: argparse.Namespace, target_url: str | None) -> int:
         out.sent(frame)
         await ws.send(json.dumps(frame))
 
-    last_pause: dict | None = None
     async with ws:
         await send(payload)
         try:
-            async for raw in ws:
-                msg = json.loads(raw)
-                full_frames = args.frames or args.raw
-                if full_frames:  # every frame in full; else only the summary line further down
-                    out.received(msg)
-                kind = msg.get("type")
-                if kind == "token_refreshed":
-                    if tm:
-                        tm.observe_ws_message(msg)
-                    print(f"[auth]   server renewed the token (expires {msg.get('expires_at')})")
-                    continue
-                if kind == "input_required":
-                    last_pause = msg
-                    await send(await asyncio.to_thread(answer_pause, msg, args))
-                    continue
-                if kind == "input_invalid":
-                    detail = "; ".join(d.get("msg", "") for d in msg.get("detail") or [])
-                    print(f"[pause]  answer rejected: {msg.get('message')} {detail}".rstrip())
-                    retry = {**(last_pause or {"request": {"type": "sign_in"}}), "message": "Try again."}
-                    await send(await asyncio.to_thread(answer_pause, retry, args))
-                    continue
-                if not full_frames:
-                    out.received(msg)
-                if kind == "error":
-                    return 1
-                if kind == "complete":
-                    return _report(msg, args)
+            code = await _converse(ws, send, out, args, tm)
+            if code is not None:
+                return code
         except websockets.exceptions.ConnectionClosedError:
             pass
     reason = f"code {ws.close_code} {ws.close_reason or ''}".strip()
@@ -769,7 +792,7 @@ def _report(msg: dict, args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    ctx = nullcontext(None)
+    ctx: contextlib.AbstractContextManager[Any] = nullcontext(None)
     if args.simulate:
         from scopeguard.simulated_target import SimulatedTarget
         ctx = SimulatedTarget()

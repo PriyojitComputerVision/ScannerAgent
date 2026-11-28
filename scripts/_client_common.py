@@ -5,12 +5,13 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import subprocess
+import subprocess  # nosec B404 - fixed argument lists only, never a shell
 import sys
 import textwrap
 import time
 import urllib.request
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import anyio
 
@@ -107,7 +108,9 @@ def free_port() -> int:
 
 def _healthy(base: str) -> bool:
     try:
-        with urllib.request.urlopen(f"{base}/healthz", timeout=2) as r:
+        if urlsplit(base).scheme not in ("http", "https"):
+            return False
+        with urllib.request.urlopen(f"{base}/healthz", timeout=2) as r:  # nosec B310 - http(s) scheme checked above
             return r.status == 200
     except OSError:
         return False
@@ -124,7 +127,7 @@ def agent_server(base: str, port: int, env_extra: dict[str, str], autostart: boo
     log_path.parent.mkdir(parents=True, exist_ok=True)
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", **env_extra}
     with log_path.open("w", encoding="utf-8") as log:
-        proc = subprocess.Popen(
+        proc = subprocess.Popen(  # nosec B603 - sys.executable -m pentest_agent.main, no shell
             [sys.executable, "-m", "pentest_agent.main", "--no-browser", "--no-target", "--host", "127.0.0.1",
              "--port", str(port)], cwd=REPO, env=env, stdout=log, stderr=subprocess.STDOUT)
         try:

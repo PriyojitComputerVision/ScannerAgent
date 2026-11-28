@@ -8,7 +8,8 @@ This classifier gives every flag a level, so reports, the console and the chatbo
 * ``warn``: coverage is reduced: no credentials for a login form, an unproven session, a
   role without a permission, rate limiting, a partial code scan.
 * ``note``: information about the scope: hosts outside it (not visited / not downloaded), an
-  expected sandbox fallback, a sign-in the operator chose to skip.
+  expected sandbox fallback, a sign-in the operator chose to skip, a code SAST tool that could not
+  run (not installed, vulnerability database unreachable, timed out: the rest of the scan is complete).
 
 The rules are tried in order; the first match wins; no match = ``warn``. The browser console
 mirrors ``RULES`` (``FLAG_RULES`` in webui/app.js; ``tests/test_flag_levels.py`` keeps them equal),
@@ -23,6 +24,8 @@ LEVELS = (ERROR, WARN, NOTE)
 LABELS = {ERROR: "Error", WARN: "Warning", NOTE: "Note"}
 
 RULES: tuple[tuple[str, str], ...] = (
+    # before ERROR: the reason after it may say "failed" / "unreachable", it is still only a note
+    (NOTE, r"code sast tools? (?:[a-z-]+ )?(?:could not run|did not run)"),
     (ERROR, (r"\b(failed|crashed|violation)\b|not accepted|raised an error|safety stop|could not be written"
             r"|prompt injection|unreachable|refused")),
     (WARN, r"^login url .* outside the scan scope"),

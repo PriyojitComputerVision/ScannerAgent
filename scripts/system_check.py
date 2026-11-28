@@ -278,9 +278,9 @@ def check_effective(skip_k8s: bool):
 # ----------------------------------------------------------------------------- service
 @guarded("service", "agent port")
 def check_port():
-    from pentest_agent.config import settings
+    from pentest_agent.config import settings, unspecified_host
 
-    host = "127.0.0.1" if settings.ws_host in ("0.0.0.0", "", "::") else settings.ws_host
+    host = "127.0.0.1" if unspecified_host(settings.ws_host) else settings.ws_host
     port = settings.ws_port
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.settimeout(1)
@@ -289,7 +289,7 @@ def check_port():
         record("service", "agent port", PASS, f"{host}:{port} free (start: uv run pentest-agent)")
         return
     try:
-        with urllib.request.urlopen(f"http://{host}:{port}/healthz", timeout=3) as r:
+        with urllib.request.urlopen(f"http://{host}:{port}/healthz", timeout=3) as r:  # nosec B310 - fixed http:// URL to this machine's agent
             health = json.loads(r.read().decode())
         record("service", "agent port", PASS, f"pentest-agent already running on {host}:{port} "
                                               f"(graph ready: {health.get('graph_initialized')})")
@@ -323,7 +323,8 @@ def main(argv: list[str] | None = None) -> int:
     a = ap.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
         try:
-            stream.reconfigure(encoding="utf-8", errors="replace")
+            if isinstance(stream, io.TextIOWrapper):
+                stream.reconfigure(encoding="utf-8", errors="replace")
         except (AttributeError, ValueError):
             pass
 

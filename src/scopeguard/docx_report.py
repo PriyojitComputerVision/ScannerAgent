@@ -18,6 +18,7 @@ characters; only ``citations.safe_url`` URLs become hyperlinks.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
 
 from scopeguard import citations
@@ -260,7 +261,7 @@ class _Builder:
         r._r.get_or_add_rPr().append(shd)
         paragraph.add_run("  ")
 
-    def kv_table(self, rows: list[tuple[str, object]], key_width_cm=4.2):
+    def kv_table(self, rows: Sequence[tuple[str, object]], key_width_cm=4.2):
         t = self.doc.add_table(rows=0, cols=2)
         t.style = "Table Grid"
         _cell_margins(t)
@@ -320,7 +321,7 @@ class _Builder:
             self._key_cell(cells[0], wide[0])
             self._value_cell(merged, wide[1])
         for row in t.rows:
-            for cell, w in zip(row.cells, widths):
+            for cell, w in zip(row.cells, widths, strict=False):  # merged rows have fewer cells
                 cell.width = self.Cm(w)
         self.spacer()
         return t
@@ -375,18 +376,8 @@ class _Builder:
         _field(fp, "NUMPAGES")
 
 
-def build_docx(path: str | Path, *, title: str, target: str, meta: list[tuple[str, str]],
-               summary: str | None, findings: list, sources: dict[str, dict], red_flags: list[str],
-               blocked: list[str], summary_heading: str = "Executive Summary",
-               recommendations: list[dict] | None = None, guardrails: dict | None = None) -> Path:
-    """Write a formatted report to ``path``. Raises ImportError without python-docx.
-
-    ``recommendations`` / ``guardrails``: the source-code SAST step's per-rule fixes and pre/post
-    guardrail verdicts, so the scan's one report also holds everything about the code."""
-    b = _Builder(title)
+def _docx_cover(b: _Builder, title: str, target: str, meta: list[tuple[str, str]], counts: dict[str, int]) -> None:
     doc = b.doc
-    counts = {s: sum(1 for f in findings if _sev(f) == s) for s in ORDER}
-
     # ---- cover block
     b.para("CONFIDENTIAL · AUTHORIZED SECURITY ASSESSMENT", bold=True, color=MUTED, size=8.5, space_after=2)
     doc.add_paragraph(_clean(title), style="Title")
@@ -414,19 +405,15 @@ def build_docx(path: str | Path, *, title: str, target: str, meta: list[tuple[st
             r.font.color.rgb = b.RGB.from_string(fg)
     b.para(space_after=2)
 
-    # ---- summary
-    doc.add_heading(summary_heading, level=1)
-    if summary:
-        b.cited_text(b.para(), summary, sources)
-    else:
-        b.para("No summary available.", italic=True, color=MUTED)
 
+def _docx_overview(b: _Builder, findings: list, counts: dict[str, int]) -> None:
+    doc = b.doc
     # ---- severity overview
     doc.add_heading("Findings Overview", level=1)
     ov = doc.add_table(rows=1, cols=3)
     ov.style = "Table Grid"
     _cell_margins(ov)
-    for cell, text in zip(ov.rows[0].cells, ("Severity", "Count", "Findings")):
+    for cell, text in zip(ov.rows[0].cells, ("Severity", "Count", "Findings"), strict=True):
         _shade(cell, ACCENT)
         r = cell.paragraphs[0].add_run(text)
         r.bold = True
@@ -448,6 +435,9 @@ def build_docx(path: str | Path, *, title: str, target: str, meta: list[tuple[st
         row.cells[0].width, row.cells[1].width, row.cells[2].width = b.Cm(2.6), b.Cm(1.8), b.Cm(12.6)
     b.para(space_after=2)
 
+
+def _docx_red_flags(b: _Builder, red_flags: list[str]) -> None:
+    doc = b.doc
     if red_flags:  # errors red, warnings amber, notes grey (scope notices are not failures)
         from scopeguard import flag_levels
 
@@ -462,6 +452,9 @@ def build_docx(path: str | Path, *, title: str, target: str, meta: list[tuple[st
             if flag_levels.level(rf) != "note":
                 r.font.color.rgb = b.RGB.from_string(colours[flag_levels.level(rf)])
 
+
+def _docx_recommendations(b: _Builder, recommendations: list[dict] | None) -> None:
+    doc = b.doc
     if recommendations:
         doc.add_heading("Source Code: How to Fix (per rule)", level=2)
         for rec in recommendations[:40]:
@@ -492,12 +485,10 @@ def build_docx(path: str | Path, *, title: str, target: str, meta: list[tuple[st
                 b.para(_clean(example["after"])[:2000], size=8.5, space_after=4)
             for ref in (rem.get("references") or [])[:4]:
                 b.link_or_text(b.para(space_after=0), ref, size=8.5)
-    if guardrails:
-        doc.add_heading("Source Code: Guardrails", level=2)
-        b.kv_table([(f"{stage} · {_clean(c.get('name'))}",
-                     f"{'passed' if c.get('passed') else 'FAILED'}: {_clean(c.get('detail'))}")
-                    for stage in ("pre", "post") for c in (guardrails.get(stage) or [])][:40])
 
+
+def _docx_findings(b: _Builder, findings: list, sources: dict[str, dict]) -> None:
+    doc = b.doc
     # ---- detailed findings
     doc.add_page_break()
     doc.add_heading("Detailed Findings", level=1)
@@ -548,26 +539,32 @@ def build_docx(path: str | Path, *, title: str, target: str, meta: list[tuple[st
             rr.font.color.rgb = b.RGB.from_string("1E7B4F")
             rp.add_run(_clean(rec))
 
+
+def _docx_sources(b: _Builder, sources: dict[str, dict]) -> None:
+    doc = b.doc
     # ---- sources
     if sources:
         doc.add_heading("Sources", level=1)
         b.para("Citations [Sn] in this report link to the entries below. Links are taken from scan data "
                "and validated; nothing here was written by a language model.", italic=True, color=MUTED,
                size=9)
-        for sid, s in sources.items():
+        for sid, src in sources.items():
             p = b.para(space_after=3)
             _bookmark(p, f"src_{sid}", b.bid())
             r = p.add_run(f"[{sid}] ")
             r.bold = True
-            b.badge(p, s["severity"] if s["severity"] in ORDER else "info")
-            p.add_run(_clean(s["title"]))
-            if s.get("url"):
+            b.badge(p, src["severity"] if src["severity"] in ORDER else "info")
+            p.add_run(_clean(src["title"]))
+            if src.get("url"):
                 p.add_run("  ·  ")
-                b.link_or_text(p, s["url"], size=9, mono=True)
-            if s.get("cwe_url"):
+                b.link_or_text(p, src["url"], size=9, mono=True)
+            if src.get("cwe_url"):
                 p.add_run("  ·  ")
-                b.link_or_text(p, s["cwe_url"], s.get("cwe") or "CWE", size=9)
+                b.link_or_text(p, src["cwe_url"], src.get("cwe") or "CWE", size=9)
 
+
+def _docx_blocked(b: _Builder, blocked: list[str]) -> None:
+    doc = b.doc
     if blocked:
         doc.add_heading("Out-of-Scope Links (never fetched)", level=2)
         for u in blocked[:200]:
@@ -577,6 +574,47 @@ def build_docx(path: str | Path, *, title: str, target: str, meta: list[tuple[st
             r.font.name = "Consolas"
         if len(blocked) > 200:
             b.para(f"... and {len(blocked) - 200} more.", italic=True, color=MUTED, size=9)
+
+
+
+def build_docx(path: str | Path, *, title: str, target: str, meta: list[tuple[str, str]],
+               summary: str | None, findings: list, sources: dict[str, dict], red_flags: list[str],
+               blocked: list[str], summary_heading: str = "Executive Summary",
+               recommendations: list[dict] | None = None, guardrails: dict | None = None) -> Path:
+    """Write a formatted report to ``path``. Raises ImportError without python-docx.
+
+    ``recommendations`` / ``guardrails``: the source-code SAST step's per-rule fixes and pre/post
+    guardrail verdicts, so the scan's one report also holds everything about the code."""
+    b = _Builder(title)
+    doc = b.doc
+    counts = {s: sum(1 for f in findings if _sev(f) == s) for s in ORDER}
+
+    _docx_cover(b, title, target, meta, counts)
+
+    # ---- summary
+    doc.add_heading(summary_heading, level=1)
+    if summary:
+        b.cited_text(b.para(), summary, sources)
+    else:
+        b.para("No summary available.", italic=True, color=MUTED)
+
+    _docx_overview(b, findings, counts)
+
+    _docx_red_flags(b, red_flags)
+
+    _docx_recommendations(b, recommendations)
+
+    if guardrails:
+        doc.add_heading("Source Code: Guardrails", level=2)
+        b.kv_table([(f"{stage} · {_clean(c.get('name'))}",
+                     f"{'passed' if c.get('passed') else 'FAILED'}: {_clean(c.get('detail'))}")
+                    for stage in ("pre", "post") for c in (guardrails.get(stage) or [])][:40])
+
+    _docx_findings(b, findings, sources)
+
+    _docx_sources(b, sources)
+
+    _docx_blocked(b, blocked)
 
     doc.add_heading("Disclaimer", level=2)
     b.para("This report was generated automatically by non-destructive checks against a target the operator "

@@ -26,6 +26,7 @@ import stat
 import unicodedata
 import zipfile
 from dataclasses import dataclass, field
+from typing import Any
 
 A01 = "A01:2021-Broken Access Control"
 A02 = "A02:2021-Cryptographic Failures"
@@ -141,24 +142,8 @@ def _is_text_name(rel: str) -> bool:
     return _is_text(rel, posixpath.basename(rel))
 
 
-def inspect_and_extract(data: bytes, dest: str, *, skip: set[str] | frozenset[str] = frozenset(),
-                        max_file_bytes: int | None = None, keep_requirements: bool = False) -> ArchiveReport:
-    """Inspect every entry of the zip in ``data``; write the text files the analyzer needs
-    into ``dest`` (created). ``skip`` holds relative paths already analysed by an earlier
-    attempt (checkpoint resume): they are inspected but not written again. ``keep_requirements``
-    also writes requirements-type files (``scopeguard.deps.is_requirements_file``: requirements*.txt,
-    lock files, Pipfile, ...) that the SAST itself skips; the SAST step's tools use it for pip-audit."""
-    from scopeguard.codecheck import (
-        ANALYSIS_SKIP_DIRS,
-        MAX_FILE_BYTES,
-        is_model_weight,
-        is_not_analysed,
-    )
-    from scopeguard.deps import is_requirements_file
-    from scopeguard.gitignore import GitIgnore
-
-    max_file = max_file_bytes or MAX_FILE_BYTES
-    rep = ArchiveReport()
+def _open_archive(data: bytes, rep: ArchiveReport) -> tuple[zipfile.ZipFile, list[zipfile.ZipInfo]]:
+    """The zip and its entries, after the whole-archive limits (size, entry count, declared bytes)."""
     if len(data) > MAX_ARCHIVE_BYTES:
         raise ArchiveError(f"archive is larger than {MAX_ARCHIVE_BYTES} bytes")
     try:
@@ -177,147 +162,218 @@ def inspect_and_extract(data: bytes, dest: str, *, skip: set[str] | frozenset[st
                  "(archive)", "CWE-409", "Upload only the source tree; split very large repositories.",
                  evidence=f"{declared} bytes declared, limit {MAX_UNCOMPRESSED_BYTES}")
         raise ArchiveError("archive declares too much uncompressed data")
+    return zf, infos
 
+
+@dataclass
+class _Extraction:
+    """One extraction run: the report, what was taken so far and the per-run settings."""
+    rep: ArchiveReport
+    zf: zipfile.ZipFile
+    root: str
+    max_file: int
+    skip: set[str] | frozenset[str]
+    keep_requirements: bool
+    ignore: Any
+    written_total: int = 0
+    taken: dict[str, str] = field(default_factory=dict)
+    by_size: dict[int, list[tuple[str, zipfile.ZipInfo]]] = field(default_factory=dict)  # to compare bundles
+    bundles: list[tuple[str, zipfile.ZipInfo]] = field(default_factory=list)
+
+
+def _entry_path(x: _Extraction, info: zipfile.ZipInfo) -> str | None:
+    """The entry's safe relative path, or None when it is refused or not a file (name length,
+    deceptive characters, Zip Slip, directories, links / special files, encrypted, duplicates)."""
+    rep, name = x.rep, info.filename
+    shown = _display(name)
+    if len(name) > MAX_NAME:
+        rep.stats["refused"] += 1
+        rep.notice("name", f"entry name longer than {MAX_NAME} characters skipped: {shown[:80]}...")
+        return None
+    if _BIDI.search(name) or _CTRL.search(name):
+        rep.flag("ARCHIVE_DECEPTIVE_NAME", "medium", OTHER,
+                 "Entry name contains control or bidirectional characters (can disguise the real name).",
+                 shown, "CWE-451", "Rename the file using plain characters; check where it came from.",
+                 evidence=shown)
+    rel = normalize_entry(name)
+    if rel is None:
+        rep.stats["refused"] += 1
+        rep.flag("ZIP_SLIP", "high", A01,
+                 "Archive entry path escapes the extraction folder (Zip Slip / path traversal).",
+                 shown, "CWE-22",
+                 "Never extract archives without normalising entry paths; rebuild this archive from the "
+                 "source tree and check how the entry got there.", evidence=shown)
+        return None
+    mode = (info.external_attr >> 16) & 0xFFFF
+    if info.is_dir():
+        return None
+    rep.stats["files"] += 1
+    if mode and stat.S_IFMT(mode) not in (0, stat.S_IFREG):
+        rep.stats["refused"] += 1
+        kind = "symlink" if stat.S_ISLNK(mode) else "special file"
+        rep.flag("ARCHIVE_SYMLINK", "medium", A01,
+                 f"Archive contains a {kind}; it was not extracted (symlinks can point outside the tree).",
+                 rel, "CWE-59", "Replace links with real files or remove them from the upload.", evidence=shown)
+        return None
+    if mode & (stat.S_ISUID | stat.S_ISGID):
+        rep.flag("ARCHIVE_SETUID", "medium", A05, "File carries a setuid/setgid bit.", rel, "CWE-250",
+                 "Remove setuid/setgid bits from files in the source tree.", evidence=oct(mode))
+    if info.flag_bits & 0x1:
+        rep.stats["refused"] += 1
+        rep.notice("encrypted", f"encrypted entry not analysed: {rel}")
+        return None
+    key = unicodedata.normalize("NFC", rel).casefold()
+    if key in x.taken:
+        rep.flag("ARCHIVE_DUPLICATE_ENTRY", "medium", A08,
+                 "Two archive entries map to the same file (different tools would extract different content).",
+                 rel, "CWE-436", "Rebuild the archive so each path appears once.",
+                 evidence=f"also {x.taken[key]}")
+        return None
+    x.taken[key] = rel
+    return rel
+
+
+def _entry_flags(x: _Extraction, info: zipfile.ZipInfo, rel: str) -> bool:
+    """Name-based flags (.git metadata, sensitive files) and the per-entry compression ratio.
+    False = refused as a zip bomb."""
+    from scopeguard.codecheck import is_model_weight
+
+    rep = x.rep
+    if not is_model_weight(rel):  # weights are never opened, not even to compare
+        x.by_size.setdefault(info.file_size, []).append((rel, info))
+    low = rel.lower()
+    if ".git" in low.split("/")[:-1]:
+        rep.flag("GIT_METADATA", "low", A05, "Archive includes .git metadata (history can hold removed secrets).",
+                 ".git/", "CWE-527", "Upload an export (git archive) instead of the working copy.")
+    for rx, rid, sev, cat, desc, cwe, rec in _SENSITIVE:
+        if rx.search(low):
+            rep.flag(rid, sev, cat, desc, rel, cwe, rec)
+            break
+    if info.compress_size > 0 and info.file_size / info.compress_size > MAX_RATIO and info.file_size > 1024 * 1024:
+        rep.flag("ZIP_BOMB", "high", A05, "Entry has an extreme compression ratio (zip bomb?); not extracted.",
+                 rel, "CWE-409", "Remove generated or padded files from the upload.",
+                 evidence=f"{info.file_size} / {info.compress_size} bytes")
+        rep.stats["refused"] += 1
+        return False
+    return True
+
+
+def _analysed_here(x: _Extraction, rel: str, wanted: bool) -> bool:
+    """Skipped folders, files the analyzer never reads (unless a wanted requirements file), and
+    whatever the project's .gitignore excludes are not written."""
+    from scopeguard.codecheck import ANALYSIS_SKIP_DIRS, is_not_analysed
+
+    if any(p in ANALYSIS_SKIP_DIRS for p in rel.split("/")[:-1]) or (
+            is_not_analysed(rel.rsplit("/", 1)[-1]) and not wanted):
+        return False  # the analyzer skips vendored / build / .claude folders, pytest, Markdown and images anyway
+    if x.ignore and x.ignore.ignored(rel):
+        x.rep.stats["gitignored"] = x.rep.stats.get("gitignored", 0) + 1
+        return False  # excluded by the project's .gitignore
+    return True
+
+
+def _text_content(x: _Extraction, info: zipfile.ZipInfo, rel: str, wanted: bool) -> bool:
+    """Read the entry's first bytes: zips (compared with the source later), nested archives and
+    binaries are not written; only text files the analyzer reads are."""
+    rep = x.rep
+    try:
+        head = _read_head(x.zf, info)
+    except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError) as exc:
+        rep.notice("read-error", f"{rel}: {exc}")
+        return False
+    if head.startswith(b"PK\x03\x04"):
+        x.bundles.append((rel, info))  # a zip: compared with the source after the loop
+        rep.stats["skipped_binary"] += 1
+        return False
+    if rel.lower().endswith(_ARCHIVE_EXT):
+        rep.flag("NESTED_ARCHIVE", "low", A08, "Nested archive inside the upload; it was not unpacked or analysed.",
+                 rel, "CWE-829", "Upload the source of bundled archives, or verify their checksums/signatures.")
+        return False
+    magic = next((desc for sig, desc in _BIN_MAGIC if head.startswith(sig)), None)
+    if magic or head.startswith(_ARCHIVE_MAGIC):
+        rep.stats["skipped_binary"] += 1
+        if magic:
+            rep.flag("ARCHIVE_BINARY_EXECUTABLE", "medium", A08,
+                     f"Compiled binary in the source upload ({magic}); it cannot be reviewed as source.",
+                     rel, "CWE-506", "Build binaries in CI from reviewed source instead of committing them; "
+                     "verify where this one came from.", evidence=magic)
+        else:
+            rep.flag("NESTED_ARCHIVE", "low", A08, "Nested archive inside the upload; not unpacked or analysed.",
+                     rel, "CWE-829", "Upload the source of bundled archives, or verify their checksums.")
+        return False
+    if not _is_text_name(rel) and not wanted:
+        return False
+    if b"\x00" in head:
+        rep.stats["skipped_binary"] += 1
+        return False
+    return True
+
+
+def _write_entry(x: _Extraction, info: zipfile.ZipInfo, rel: str) -> bool:
+    """Write one checked text file (size cap, resume skip, total cap, confinement). False = stop:
+    the total extraction limit was reached."""
+    rep = x.rep
+    if info.file_size > x.max_file:
+        rep.stats["skipped_large"] += 1
+        rep.notice("large", f"{rel} is larger than {x.max_file} bytes; not analysed")
+        return True
+    if rel in x.skip:
+        rep.stats["skipped_resumed"] += 1
+        return True
+    if x.written_total + info.file_size > MAX_EXTRACT_BYTES:
+        rep.aborted = f"extraction stopped at {MAX_EXTRACT_BYTES} bytes"
+        rep.notice("limit", rep.aborted)
+        return False
+    target = os.path.realpath(os.path.join(x.root, *rel.split("/")))
+    if not (target == x.root or target.startswith(x.root + os.sep)):
+        rep.flag("ZIP_SLIP", "high", A01, "Archive entry resolves outside the extraction folder.", rel,
+                 "CWE-22", "Rebuild the archive from the source tree.", evidence=_display(info.filename))
+        return True
+    try:
+        n = _extract_one(x.zf, info, target, x.max_file)
+    except _SizeMismatch:
+        rep.flag("ZIP_BOMB", "high", A05,
+                 "Entry decompresses to more data than its header declares (zip bomb / tampered archive).",
+                 rel, "CWE-409", "Rebuild the archive with a standard tool and check it was not tampered with.")
+        return True
+    except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError) as exc:
+        rep.notice("read-error", f"{rel}: {exc}")
+        return True
+    x.written_total += n
+    rep.stats["extracted_files"] += 1
+    rep.stats["extracted_bytes"] = x.written_total
+    rep.extracted.append(rel)
+    return True
+
+
+def inspect_and_extract(data: bytes, dest: str, *, skip: set[str] | frozenset[str] = frozenset(),
+                        max_file_bytes: int | None = None, keep_requirements: bool = False) -> ArchiveReport:
+    """Inspect every entry of the zip in ``data``; write the text files the analyzer needs
+    into ``dest`` (created). ``skip`` holds relative paths already analysed by an earlier
+    attempt (checkpoint resume): they are inspected but not written again. ``keep_requirements``
+    also writes requirements-type files (``scopeguard.deps.is_requirements_file``: requirements*.txt,
+    lock files, Pipfile, ...) that the SAST itself skips; the SAST step's tools use it for pip-audit."""
+    from scopeguard.codecheck import MAX_FILE_BYTES
+    from scopeguard.deps import is_requirements_file
+    from scopeguard.gitignore import GitIgnore
+
+    rep = ArchiveReport()
+    zf, infos = _open_archive(data, rep)
     os.makedirs(dest, exist_ok=True)
-    root = os.path.realpath(dest)
-    written_total = 0
-    taken: dict[str, str] = {}
-    by_size: dict[int, list[tuple[str, zipfile.ZipInfo]]] = {}  # regular files, to compare bundles with
-    bundles: list[tuple[str, zipfile.ZipInfo]] = []
-    ignore = _project_gitignore(zf, infos, GitIgnore())  # what the project's .gitignore excludes is not analysed
+    x = _Extraction(rep=rep, zf=zf, root=os.path.realpath(dest), max_file=max_file_bytes or MAX_FILE_BYTES,
+                    skip=skip, keep_requirements=keep_requirements,
+                    ignore=_project_gitignore(zf, infos, GitIgnore()))  # .gitignore'd files are not analysed
     for info in infos:
-        name = info.filename
-        shown = _display(name)
-        if len(name) > MAX_NAME:
-            rep.stats["refused"] += 1
-            rep.notice("name", f"entry name longer than {MAX_NAME} characters skipped: {shown[:80]}...")
-            continue
-        if _BIDI.search(name) or _CTRL.search(name):
-            rep.flag("ARCHIVE_DECEPTIVE_NAME", "medium", OTHER,
-                     "Entry name contains control or bidirectional characters (can disguise the real name).",
-                     shown, "CWE-451", "Rename the file using plain characters; check where it came from.",
-                     evidence=shown)
-        rel = normalize_entry(name)
-        if rel is None:
-            rep.stats["refused"] += 1
-            rep.flag("ZIP_SLIP", "high", A01,
-                     "Archive entry path escapes the extraction folder (Zip Slip / path traversal).",
-                     shown, "CWE-22",
-                     "Never extract archives without normalising entry paths; rebuild this archive from the "
-                     "source tree and check how the entry got there.", evidence=shown)
-            continue
-        mode = (info.external_attr >> 16) & 0xFFFF
-        if info.is_dir():
-            continue
-        rep.stats["files"] += 1
-        if mode and stat.S_IFMT(mode) not in (0, stat.S_IFREG):
-            rep.stats["refused"] += 1
-            kind = "symlink" if stat.S_ISLNK(mode) else "special file"
-            rep.flag("ARCHIVE_SYMLINK", "medium", A01,
-                     f"Archive contains a {kind}; it was not extracted (symlinks can point outside the tree).",
-                     rel, "CWE-59", "Replace links with real files or remove them from the upload.", evidence=shown)
-            continue
-        if mode & (stat.S_ISUID | stat.S_ISGID):
-            rep.flag("ARCHIVE_SETUID", "medium", A05, "File carries a setuid/setgid bit.", rel, "CWE-250",
-                     "Remove setuid/setgid bits from files in the source tree.", evidence=oct(mode))
-        if info.flag_bits & 0x1:
-            rep.stats["refused"] += 1
-            rep.notice("encrypted", f"encrypted entry not analysed: {rel}")
-            continue
-        key = unicodedata.normalize("NFC", rel).casefold()
-        if key in taken:
-            rep.flag("ARCHIVE_DUPLICATE_ENTRY", "medium", A08,
-                     "Two archive entries map to the same file (different tools would extract different content).",
-                     rel, "CWE-436", "Rebuild the archive so each path appears once.",
-                     evidence=f"also {taken[key]}")
-            continue
-        taken[key] = rel
-        if not is_model_weight(rel):  # weights are never opened, not even to compare
-            by_size.setdefault(info.file_size, []).append((rel, info))
-        low = rel.lower()
-        parts = low.split("/")
-        if ".git" in parts[:-1]:
-            rep.flag("GIT_METADATA", "low", A05, "Archive includes .git metadata (history can hold removed secrets).",
-                     ".git/", "CWE-527", "Upload an export (git archive) instead of the working copy.")
-        for rx, rid, sev, cat, desc, cwe, rec in _SENSITIVE:
-            if rx.search(low):
-                rep.flag(rid, sev, cat, desc, rel, cwe, rec)
-                break
-        if info.compress_size > 0 and info.file_size / info.compress_size > MAX_RATIO and info.file_size > 1024 * 1024:
-            rep.flag("ZIP_BOMB", "high", A05, "Entry has an extreme compression ratio (zip bomb?); not extracted.",
-                     rel, "CWE-409", "Remove generated or padded files from the upload.",
-                     evidence=f"{info.file_size} / {info.compress_size} bytes")
-            rep.stats["refused"] += 1
+        rel = _entry_path(x, info)
+        if rel is None or not _entry_flags(x, info, rel):
             continue
         wanted = keep_requirements and is_requirements_file(rel)  # dependency declarations only, never code
-        if any(p in ANALYSIS_SKIP_DIRS for p in rel.split("/")[:-1]) or (
-                is_not_analysed(rel.rsplit("/", 1)[-1]) and not wanted):
-            continue  # the analyzer skips vendored / build / .claude folders, pytest, Markdown and images anyway
-        if ignore and ignore.ignored(rel):
-            rep.stats["gitignored"] = rep.stats.get("gitignored", 0) + 1
-            continue  # excluded by the project's .gitignore
-        try:
-            head = _read_head(zf, info)
-        except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError) as exc:
-            rep.notice("read-error", f"{rel}: {exc}")
+        if not _analysed_here(x, rel, wanted) or not _text_content(x, info, rel, wanted):
             continue
-        if head.startswith(b"PK\x03\x04"):
-            bundles.append((rel, info))  # a zip: compared with the source after this loop
-            rep.stats["skipped_binary"] += 1
-            continue
-        if low.endswith(_ARCHIVE_EXT):
-            rep.flag("NESTED_ARCHIVE", "low", A08, "Nested archive inside the upload; it was not unpacked or analysed.",
-                     rel, "CWE-829", "Upload the source of bundled archives, or verify their checksums/signatures.")
-            continue
-        magic = next((desc for sig, desc in _BIN_MAGIC if head.startswith(sig)), None)
-        if magic or head.startswith(_ARCHIVE_MAGIC):
-            rep.stats["skipped_binary"] += 1
-            if magic:
-                rep.flag("ARCHIVE_BINARY_EXECUTABLE", "medium", A08,
-                         f"Compiled binary in the source upload ({magic}); it cannot be reviewed as source.",
-                         rel, "CWE-506", "Build binaries in CI from reviewed source instead of committing them; "
-                         "verify where this one came from.", evidence=magic)
-            else:
-                rep.flag("NESTED_ARCHIVE", "low", A08, "Nested archive inside the upload; not unpacked or analysed.",
-                         rel, "CWE-829", "Upload the source of bundled archives, or verify their checksums.")
-            continue
-        if not _is_text_name(rel) and not wanted:
-            continue
-        if b"\x00" in head:
-            rep.stats["skipped_binary"] += 1
-            continue
-        if info.file_size > max_file:
-            rep.stats["skipped_large"] += 1
-            rep.notice("large", f"{rel} is larger than {max_file} bytes; not analysed")
-            continue
-        if rel in skip:
-            rep.stats["skipped_resumed"] += 1
-            continue
-        if written_total + info.file_size > MAX_EXTRACT_BYTES:
-            rep.aborted = f"extraction stopped at {MAX_EXTRACT_BYTES} bytes"
-            rep.notice("limit", rep.aborted)
+        if not _write_entry(x, info, rel):
             break
-        target = os.path.realpath(os.path.join(root, *rel.split("/")))
-        if not (target == root or target.startswith(root + os.sep)):
-            rep.flag("ZIP_SLIP", "high", A01, "Archive entry resolves outside the extraction folder.", rel,
-                     "CWE-22", "Rebuild the archive from the source tree.", evidence=shown)
-            continue
-        try:
-            n = _extract_one(zf, info, target, max_file)
-        except _SizeMismatch:
-            rep.flag("ZIP_BOMB", "high", A05,
-                     "Entry decompresses to more data than its header declares (zip bomb / tampered archive).",
-                     rel, "CWE-409", "Rebuild the archive with a standard tool and check it was not tampered with.")
-            continue
-        except (zipfile.BadZipFile, OSError, ValueError, RuntimeError, EOFError) as exc:
-            rep.notice("read-error", f"{rel}: {exc}")
-            continue
-        written_total += n
-        rep.stats["extracted_files"] += 1
-        rep.stats["extracted_bytes"] = written_total
-        rep.extracted.append(rel)
-    for rel, info in bundles:
-        same, why = _bundle_is_source(zf, info, by_size)
+    for rel, info in x.bundles:
+        same, why = _bundle_is_source(zf, info, x.by_size)
         if same:
             rep.notice("bundle", f"{rel}: a bundled zip whose files are all in this upload as source "
                                  f"(same SHA-256); not reported as a nested archive")

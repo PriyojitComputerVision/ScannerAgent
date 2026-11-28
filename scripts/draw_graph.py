@@ -15,16 +15,15 @@ import math
 import os
 import re
 import shutil
-import subprocess
-import sys
+import subprocess  # nosec B404 - fixed argument lists only, never a shell
 import tempfile
 from pathlib import Path
 
+from pentest_agent.graph import build_graph
+
 ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
 os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
 
-from pentest_agent.graph import build_graph
 
 MERMAID_JS = "https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"
 BROWSERS = [
@@ -62,7 +61,7 @@ PADDING = 24
 
 def _svg_size(browser: str, page_uri: str) -> tuple[int, int] | None:
     """Rendered diagram size in CSS pixels (first headless pass: dump the DOM)."""
-    dom = subprocess.run([browser, "--headless=new", "--disable-gpu", "--virtual-time-budget=8000",
+    dom = subprocess.run([browser, "--headless=new", "--disable-gpu", "--virtual-time-budget=8000",  # nosec B603 - a local browser binary, fixed flags
                           "--dump-dom", page_uri], check=False, capture_output=True, text=True,
                          timeout=120).stdout
     match = re.search(r'<svg[^>]*viewBox="[\d.\-]+ [\d.\-]+ ([\d.]+) ([\d.]+)"', dom)
@@ -81,7 +80,7 @@ def render_png(mermaid: str, out: Path) -> bool:
         page_path.write_text(_page(mermaid), encoding="utf-8")
         size = _svg_size(browser, page_path.as_uri()) or (900, 1500)
         width, height = (dim + 2 * PADDING + 8 for dim in size)
-        subprocess.run([browser, "--headless=new", "--disable-gpu", "--hide-scrollbars",
+        subprocess.run([browser, "--headless=new", "--disable-gpu", "--hide-scrollbars",  # nosec B603 - a local browser binary, fixed flags
                         "--force-device-scale-factor=2", f"--window-size={width},{height}",
                         "--virtual-time-budget=8000", f"--screenshot={out}",
                         page_path.as_uri()], check=True, capture_output=True, timeout=120)

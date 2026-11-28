@@ -213,36 +213,35 @@ def _check_id(value, field: str) -> str | None:
     return None
 
 
-def check_tool_args(name: str, args: dict | None) -> str | None:
-    """Pre-guardrail for a tool call. Returns a reason to refuse it, or None."""
-    args = args or {}
-    if name == "start_scan":
-        # A source-code-only scan needs no website: target_url may be left out.
-        code_only_no_url = args.get("scan_scope") == "code" and not args.get("target_url")
-        problem = None if code_only_no_url else _check_url(args.get("target_url"))
-        if problem:
-            return problem
-        if args.get("jwt") or args.get("login"):
-            return "inline credentials are not accepted from the chat; use a credential profile name"
-        cred = args.get("credentials")
-        if cred is not None and (not isinstance(cred, str) or not _NAME_RE.match(cred)):
-            return "credentials must be a credential profile name (letters, digits, - and _)"
-        for host in args.get("additional_allowed_domains") or []:
-            if not isinstance(host, str) or not _HOST_RE.match(host.lower()):
-                return f"invalid additional domain: {str(host)[:60]!r}"
-    if name in ("start_scan", "start_demo_scan") and args.get("profile", "standard") not in SCAN_PROFILES:
-        return f"profile must be one of: {', '.join(SCAN_PROFILES)}"
-    if name == "start_demo_scan" and not isinstance(args.get("sign_in", False), bool):
-        return "sign_in must be true or false"
-    needs_upload = name == "start_scan" and args.get("upload_id") is not None
-    if needs_upload and not (isinstance(args.get("upload_id"), str) and _UPLOAD_RE.match(args["upload_id"])):
+def _check_scan_target(args: dict) -> str | None:
+    """start_scan: the target URL, credentials as a profile name only, extra domains."""
+    # A source-code-only scan needs no website: target_url may be left out.
+    code_only_no_url = args.get("scan_scope") == "code" and not args.get("target_url")
+    problem = None if code_only_no_url else _check_url(args.get("target_url"))
+    if problem:
+        return problem
+    if args.get("jwt") or args.get("login"):
+        return "inline credentials are not accepted from the chat; use a credential profile name"
+    cred = args.get("credentials")
+    if cred is not None and (not isinstance(cred, str) or not _NAME_RE.match(cred)):
+        return "credentials must be a credential profile name (letters, digits, - and _)"
+    for host in args.get("additional_allowed_domains") or []:
+        if not isinstance(host, str) or not _HOST_RE.match(host.lower()):
+            return f"invalid additional domain: {str(host)[:60]!r}"
+    return None
+
+
+def _check_scan_code(args: dict) -> str | None:
+    """start_scan: the source code (upload_id or git_url + git_ref) and the scan scope."""
+    if args.get("upload_id") is not None and not (
+            isinstance(args.get("upload_id"), str) and _UPLOAD_RE.match(args["upload_id"])):
         return "upload_id must be the 32-character id of an uploaded archive"
-    if name == "start_scan" and args.get("git_url") is not None:
+    if args.get("git_url") is not None:
         if args.get("upload_id") is not None:
             return "pass either upload_id or git_url, not both"
         if not (isinstance(args["git_url"], str) and _GIT_URL_RE.match(args["git_url"])):
             return "git_url must be a public repository's .git clone link, e.g. https://github.com/owner/repo.git"
-    if name == "start_scan" and args.get("scan_scope") is not None:
+    if args.get("scan_scope") is not None:
         if args["scan_scope"] not in SCAN_SCOPES:
             return f"scan_scope must be one of: {', '.join(SCAN_SCOPES)}"
         has_code = args.get("upload_id") is not None or args.get("git_url") is not None
@@ -250,9 +249,19 @@ def check_tool_args(name: str, args: dict | None) -> str | None:
             return "scan_scope website_and_code / code needs source code (an attached .zip or a git_url)"
         if args["scan_scope"] == "website" and has_code:
             return "scan_scope website tests no source code: drop upload_id / git_url"
-    if name == "start_scan" and args.get("git_ref") is not None and not (
-            isinstance(args["git_ref"], str) and _GIT_REF_RE.match(args["git_ref"])):
+    if args.get("git_ref") is not None and not (isinstance(args["git_ref"], str) and _GIT_REF_RE.match(args["git_ref"])):
         return "git_ref must be a branch or tag name"
+    return None
+
+
+def _check_profile(args: dict) -> str | None:
+    if args.get("profile", "standard") not in SCAN_PROFILES:
+        return f"profile must be one of: {', '.join(SCAN_PROFILES)}"
+    return None
+
+
+def _check_read_tools(name: str, args: dict) -> str | None:
+    """get_scan / cancel_scan / watch_scan / get_report / list_reports arguments."""
     if name in ("get_scan", "cancel_scan", "watch_scan"):
         return _check_id(args.get("scan_id"), "scan_id")
     if name == "get_report":
@@ -261,6 +270,18 @@ def check_tool_args(name: str, args: dict | None) -> str | None:
     if name == "list_reports" and not (isinstance(args.get("limit", 20), int) and 1 <= args.get("limit", 20) <= 100):
         return "limit must be a number from 1 to 100"
     return None
+
+
+def check_tool_args(name: str, args: dict | None) -> str | None:
+    """Pre-guardrail for a tool call. Returns a reason to refuse it, or None."""
+    args = args or {}
+    if name == "start_scan":
+        return _check_scan_target(args) or _check_profile(args) or _check_scan_code(args)
+    if name == "start_demo_scan":
+        if problem := _check_profile(args):
+            return problem
+        return None if isinstance(args.get("sign_in", False), bool) else "sign_in must be true or false"
+    return _check_read_tools(name, args)
 
 
 # --------------------------------------------------------------------------- output

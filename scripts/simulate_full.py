@@ -9,7 +9,7 @@ import asyncio
 import json
 import os
 import secrets
-import subprocess
+import subprocess  # nosec B404 - fixed argument lists only, never a shell
 import sys
 import tempfile
 import time
@@ -18,10 +18,10 @@ from pathlib import Path
 
 import websockets
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
 from pentest_agent.auth_client import TokenManager
 from scopeguard.simulated_target import SimulatedTarget
+
+ROOT = Path(__file__).resolve().parent.parent
 
 WS_PORT = int(os.getenv("SIM_WS_PORT", "8765"))
 
@@ -35,7 +35,7 @@ def _wait_healthy(timeout: float | None = None):
     end = time.time() + timeout
     while time.time() < end:
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{WS_PORT}/healthz", timeout=2) as r:
+            with urllib.request.urlopen(f"http://127.0.0.1:{WS_PORT}/healthz", timeout=2) as r:  # nosec B310 - fixed http://127.0.0.1 URL
                 if json.load(r).get("graph_initialized"):
                     return
         except (OSError, ValueError):  # not listening yet, or not JSON yet
@@ -72,9 +72,9 @@ def main() -> int:
            "AUTH_ENABLED": "true", "JWT_PRIVATE_KEY_PATH": f"{tmp}/keys/jwt_private.pem",
            "JWT_PUBLIC_KEY_PATH": f"{tmp}/keys/jwt_public.pem", "AUTH_CLIENTS_FILE": f"{tmp}/keys/clients.json",
            "AUTH_CLIENT_ID": "sim-client", "AUTH_CLIENT_SECRET": secret, "AUTH_CLIENT_ROLES": "scanner"}
-    subprocess.run([sys.executable, "-m", "pentest_agent.api_auth", "keys"], env=env, cwd=ROOT,
+    subprocess.run([sys.executable, "-m", "pentest_agent.api_auth", "keys"], env=env, cwd=ROOT,  # nosec B603 - our own module
                    check=True, stdout=subprocess.DEVNULL)
-    server = subprocess.Popen([sys.executable, "-m", "pentest_agent.main", "--no-browser", "--no-target"], env=env, cwd=ROOT)
+    server = subprocess.Popen([sys.executable, "-m", "pentest_agent.main", "--no-browser", "--no-target"], env=env, cwd=ROOT)  # nosec B603 - our own module
     tm = TokenManager(f"http://127.0.0.1:{WS_PORT}", "sim-client", secret)
     try:
         with SimulatedTarget() as t:

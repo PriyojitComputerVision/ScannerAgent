@@ -19,14 +19,13 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import sys
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
 
 from pentest_agent import api_auth, rbac
 from pentest_agent.config import settings
+
+ROOT = Path(__file__).resolve().parent.parent
+
 
 TOKEN_FILE = Path(settings.jwt_private_key_path).parent / "token.json"
 

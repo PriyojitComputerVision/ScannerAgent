@@ -112,6 +112,106 @@ async def run(a: argparse.Namespace) -> int:
         return await session(a, ev, token, base, started, log_path)
 
 
+async def _card_and_policy(client, ev: Events) -> dict:
+    """The agent card and the caller's scan policy."""
+    card = client._card
+    await ev.emit("card", f"Agent card: {card.name}", {
+        "url": [i.url for i in card.supported_interfaces],
+        "streaming": card.capabilities.streaming,
+        "security": list(card.security_schemes),
+        "skills": [f"{s.id}: {s.name}" for s in card.skills]})
+
+    text, policy = message_data(await ask(client, {"action": "policy"}))
+    await ev.emit("policy", text or "Scan policy", {
+        "principal": policy.get("principal", {}).get("sub"),
+        "roles": policy.get("principal", {}).get("roles"),
+        "allowed_targets": policy.get("allowed_targets"),
+        "profiles_allowed": [p["profile"] for p in policy.get("profiles", []) if p.get("allowed")],
+        "credential_profiles": [p.get("name") for p in
+                                policy.get("authenticated_scans", {}).get("credential_profiles", [])]})
+    return policy
+
+
+async def _not_allowlisted(a: argparse.Namespace, ev: Events, policy: dict, started: bool) -> int | None:
+    """Exit code when --target is not on the agent's allowlist (None = it is)."""
+    if a.target and not allowlisted(a.target, policy.get("allowed_targets") or []):
+        if not started:  # the shared agent's .env does not list it: use a private agent instead
+            await ev.emit("switch", f"{urlparse(a.target).netloc} is not on the running agent's allowlist",
+                          "Starting a private pentest-agent for this run (free port, only this host "
+                          "allowlisted, stopped afterwards). To scan it on the shared agent:\n"
+                          + allowlist_hint(a.target, "A2A_ALLOWED_TARGETS", started).split("\nOr ")[0])
+            return NEED_PRIVATE
+        await ev.emit("setup", f"{urlparse(a.target).netloc} is not on this server's allowlist",
+                      allowlist_hint(a.target, "A2A_ALLOWED_TARGETS", started))
+        return 2
+    return None
+
+
+def _scan_request(a: argparse.Namespace) -> dict:
+    """The A2A request: a scan of --target and/or --git-url, or the demo scan."""
+    if a.target or a.git_url:
+        req = {"action": "scan", "authorization_confirmed": True, "profile": a.profile,
+               "max_findings": a.findings}
+        if a.target:
+            req["target_url"] = a.target
+        if a.credentials:
+            req["credentials"] = a.credentials  # only the profile name travels
+        if a.git_url:  # A2A takes code only as a git link (no files / zip): see the module note
+            req["git_url"] = a.git_url
+            req["scan_scope"] = "website_and_code" if a.target else "code"
+            if a.git_ref:
+                req["git_ref"] = a.git_ref
+    else:
+        req = {"action": "demo_scan", "profile": a.profile, "sign_in": a.sign_in,
+               "max_findings": a.findings}
+    return req
+
+
+async def _stream(client, ev: Events, req: dict) -> tuple[str | None, dict]:
+    """Send the request and print every task event; (final state, result data)."""
+    final, result = None, {}
+    async for event in client.send_message(request(req)):
+        if event.HasField("task"):
+            await ev.emit("task", f"Task created: {event.task.id}",
+                          f"state: {TaskState.Name(event.task.status.state)}")
+        elif event.HasField("status_update"):
+            st = event.status_update.status
+            meta = MessageToDict(event.status_update.metadata) if event.status_update.metadata else {}
+            text = get_message_text(st.message) if st.HasField("message") else ""
+            if meta.get("node"):
+                await ev.emit("step", f"{meta['node']}  (scan time {meta.get('at_seconds')}s)",
+                              (NODE_NOTES.get(meta["node"], "") + f"\nphase -> {meta.get('phase')}").strip())
+            else:
+                await ev.emit("status", TaskState.Name(st.state), text or None)
+            if st.state in TERMINAL:
+                final = TERMINAL[st.state]
+        elif event.HasField("artifact_update"):
+            art = event.artifact_update.artifact
+            result = next((d for d in get_data_parts(art.parts) if isinstance(d, dict)), {})
+            await ev.emit("artifact", f"Artifact: {art.name}", {
+                "status": result.get("status"), "signed_in": result.get("signed_in"),
+                "credentials": result.get("credentials"), "severity_counts": result.get("severity_counts"),
+                "findings_total": result.get("findings_total")})
+        elif event.HasField("message"):
+            await ev.emit("message", get_message_text(event.message))
+    return final, result
+
+
+async def _show_result(ev: Events, result: dict) -> None:
+    findings = result.get("findings") or []
+    for i, f in enumerate(findings, 1):
+        await ev.finding(i, len(findings), f)
+    if result.get("findings_omitted"):
+        await ev.emit("more", f"{result['findings_omitted']} more finding(s) not returned",
+                      "See the full list in the report files below.")
+    for flag in result.get("red_flags") or []:
+        await ev.emit("red flag", short(flag, 300))
+    if result.get("report_files"):
+        await ev.emit("report", "Report files", result["report_files"])
+    if result.get("audit"):
+        await ev.emit("audit", "Tamper-evident audit record written", result["audit"])
+
+
 async def session(a: argparse.Namespace, ev: Events, token: str, base: str, started: bool, log_path) -> int:
     await ev.emit("launch", "pentest-agent " + ("started for this run (headless)" if started
                                                 else "already running: using it"),
@@ -120,94 +220,20 @@ async def session(a: argparse.Namespace, ev: Events, token: str, base: str, star
     async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"},
                                  timeout=httpx.Timeout(60, read=None)) as http:
         client = await create_client(base, ClientConfig(httpx_client=http, streaming=True))
-        card = client._card
-        await ev.emit("card", f"Agent card: {card.name}", {
-            "url": [i.url for i in card.supported_interfaces],
-            "streaming": card.capabilities.streaming,
-            "security": list(card.security_schemes),
-            "skills": [f"{s.id}: {s.name}" for s in card.skills]})
-
-        text, policy = message_data(await ask(client, {"action": "policy"}))
-        await ev.emit("policy", text or "Scan policy", {
-            "principal": policy.get("principal", {}).get("sub"),
-            "roles": policy.get("principal", {}).get("roles"),
-            "allowed_targets": policy.get("allowed_targets"),
-            "profiles_allowed": [p["profile"] for p in policy.get("profiles", []) if p.get("allowed")],
-            "credential_profiles": [p.get("name") for p in
-                                    policy.get("authenticated_scans", {}).get("credential_profiles", [])]})
-
-        if a.target and not allowlisted(a.target, policy.get("allowed_targets") or []):
-            if not started:  # the shared agent's .env does not list it: use a private agent instead
-                await ev.emit("switch", f"{urlparse(a.target).netloc} is not on the running agent's allowlist",
-                              "Starting a private pentest-agent for this run (free port, only this host "
-                              "allowlisted, stopped afterwards). To scan it on the shared agent:\n"
-                              + allowlist_hint(a.target, "A2A_ALLOWED_TARGETS", started).split("\nOr ")[0])
-                return NEED_PRIVATE
-            await ev.emit("setup", f"{urlparse(a.target).netloc} is not on this server's allowlist",
-                          allowlist_hint(a.target, "A2A_ALLOWED_TARGETS", started))
-            return 2
-
+        policy = await _card_and_policy(client, ev)
+        problem = await _not_allowlisted(a, ev, policy, started)
+        if problem is not None:
+            return problem
         if a.show_refusal:
             events = await ask(client, {"action": "scan", "target_url": "https://example.com/",
                                         "authorization_confirmed": True, "profile": "quick"})
             await ev.emit("guardrail", "A host that is NOT allowlisted (expected: task rejected)",
                           short(_last_status_text(events), 400))
 
-        if a.target or a.git_url:
-            req = {"action": "scan", "authorization_confirmed": True, "profile": a.profile,
-                   "max_findings": a.findings}
-            if a.target:
-                req["target_url"] = a.target
-            if a.credentials:
-                req["credentials"] = a.credentials  # only the profile name travels
-            if a.git_url:  # A2A takes code only as a git link (no files / zip): see the module note
-                req["git_url"] = a.git_url
-                req["scan_scope"] = "website_and_code" if a.target else "code"
-                if a.git_ref:
-                    req["git_ref"] = a.git_ref
-        else:
-            req = {"action": "demo_scan", "profile": a.profile, "sign_in": a.sign_in,
-                   "max_findings": a.findings}
+        req = _scan_request(a)
         await ev.emit("send", "SendStreamingMessage", req)
-
-        final, result = None, {}
-        async for event in client.send_message(request(req)):
-            if event.HasField("task"):
-                await ev.emit("task", f"Task created: {event.task.id}",
-                              f"state: {TaskState.Name(event.task.status.state)}")
-            elif event.HasField("status_update"):
-                st = event.status_update.status
-                meta = MessageToDict(event.status_update.metadata) if event.status_update.metadata else {}
-                text = get_message_text(st.message) if st.HasField("message") else ""
-                if meta.get("node"):
-                    await ev.emit("step", f"{meta['node']}  (scan time {meta.get('at_seconds')}s)",
-                                  (NODE_NOTES.get(meta["node"], "") + f"\nphase -> {meta.get('phase')}").strip())
-                else:
-                    await ev.emit("status", TaskState.Name(st.state), text or None)
-                if st.state in TERMINAL:
-                    final = TERMINAL[st.state]
-            elif event.HasField("artifact_update"):
-                art = event.artifact_update.artifact
-                result = next((d for d in get_data_parts(art.parts) if isinstance(d, dict)), {})
-                await ev.emit("artifact", f"Artifact: {art.name}", {
-                    "status": result.get("status"), "signed_in": result.get("signed_in"),
-                    "credentials": result.get("credentials"), "severity_counts": result.get("severity_counts"),
-                    "findings_total": result.get("findings_total")})
-            elif event.HasField("message"):
-                await ev.emit("message", get_message_text(event.message))
-
-        findings = result.get("findings") or []
-        for i, f in enumerate(findings, 1):
-            await ev.finding(i, len(findings), f)
-        if result.get("findings_omitted"):
-            await ev.emit("more", f"{result['findings_omitted']} more finding(s) not returned",
-                          "See the full list in the report files below.")
-        for flag in result.get("red_flags") or []:
-            await ev.emit("red flag", short(flag, 300))
-        if result.get("report_files"):
-            await ev.emit("report", "Report files", result["report_files"])
-        if result.get("audit"):
-            await ev.emit("audit", "Tamper-evident audit record written", result["audit"])
+        final, result = await _stream(client, ev, req)
+        await _show_result(ev, result)
         await client.close()
     await ev.emit("exit", f"Task finished: {final}")
     return 0 if final == "completed" else 1

@@ -18,7 +18,8 @@ from __future__ import annotations
 
 import math
 import os
-import subprocess
+import subprocess  # nosec B404 - fixed argument lists only, never a shell
+import sys
 import tempfile
 from dataclasses import dataclass
 
@@ -166,7 +167,7 @@ class _WindowsJob:
     def assign(self, proc: subprocess.Popen) -> None:
         import ctypes
 
-        if not self._k32.AssignProcessToJobObject(self.handle, int(proc._handle)):
+        if not self._k32.AssignProcessToJobObject(self.handle, int(proc._handle)):  # type: ignore[attr-defined]  # Windows Popen's handle
             raise OSError(ctypes.get_last_error(), "AssignProcessToJobObject failed")
 
     def close(self) -> None:
@@ -201,7 +202,7 @@ def run_limited(cmd: list[str], *, stdin: bytes | None = None, cwd: str | None =
 
 def _run(cmd, stdin, cwd, env, kwargs, job, out_f, err_f, timeout, max_output, memory_mb) -> RunResult:
     timed_out = False
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if stdin is not None else subprocess.DEVNULL,  # nosec B603 - sandbox launcher: argument list built by the callers, no shell
                             stdout=out_f, stderr=err_f, cwd=cwd, env=env, **kwargs)
     try:
         if job is not None:
@@ -230,7 +231,7 @@ def _run(cmd, stdin, cwd, env, kwargs, job, out_f, err_f, timeout, max_output, m
 
 def _kill(proc: subprocess.Popen) -> None:
     try:
-        if os.name == "posix":
+        if sys.platform != "win32":
             import signal
             os.killpg(proc.pid, signal.SIGKILL)
         else:
