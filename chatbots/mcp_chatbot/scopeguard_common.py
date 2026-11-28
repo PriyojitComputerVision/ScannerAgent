@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+import context_fit
 import guardrails
 
 log = logging.getLogger("scopeguard.chatbot")
@@ -69,7 +70,8 @@ PROFILE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 LANGUAGE_NOTICE = "Python only for now: other languages are only partly covered."
 # Groq's on_demand tier allows 8,000 tokens per request (prompt + reply budget), so tool
 # results are kept compact and old tool outputs are cleared from the history.
-MAX_TOOL_TEXT = 9_000      # chars of one tool result shown to the model
+MAX_TOOL_TEXT = 9_000      # chars of one tool result shown to the model (also capped by PROBE_CONTEXT_CHUNK_CHARS);
+                           # a longer one is chunked and summarized (context_fit), never clipped
 MAX_FINDINGS = 100         # findings fetched when a scan ends (the server maximum)
 CLEAR_TOOLS_AT = 3_000     # approx. tokens of history before old tool outputs are cleared
 SUMMARIZE_AT = 3_500       # approx. tokens of history before older messages are summarized
@@ -104,7 +106,7 @@ def load_settings() -> Settings:
     # The Groq settings (GROQ_API_KEY, GROQ_MODEL, GROQ_REASONING_EFFORT) come only from the
     # repo's main .env, the same key and model as the scanner: GROQ_* in this folder's .env or
     # in the environment is ignored.
-    prefixes = ("GROQ_", "JWT_", "SCOPEGUARD_", "CHATBOT_")
+    prefixes = ("GROQ_", "JWT_", "SCOPEGUARD_", "CHATBOT_", "PROBE_CONTEXT_CHUNK_CHARS")
     env: dict[str, str] = {}
     for env_file in (REPO / ".env", HERE / ".env"):
         if env_file.is_file():
@@ -339,7 +341,8 @@ def hitl_middleware():
 def tool_guard_middleware():
     """Pre-guardrail on every tool call's arguments (the model's own calls and calls a
     reviewer edited), then: tool errors become messages the model can explain (instead
-    of ending the turn), and very long tool results are clipped (token limits)."""
+    of ending the turn), and very long tool results are chunked (10% overlap) and summarized
+    recursively until they fit one chunk (context_fit; token limits), never clipped."""
     from langchain.agents.middleware import wrap_tool_call
     from langchain_core.messages import ToolMessage
 
@@ -366,13 +369,22 @@ def tool_guard_middleware():
                                status="error")
         if isinstance(result, ToolMessage):
             text = result.content if isinstance(result.content, str) else _content_text(result.content)
-            if len(text) > MAX_TOOL_TEXT:
-                result.content = text[:MAX_TOOL_TEXT] + (
-                    f"\n... [clipped: {len(text) - MAX_TOOL_TEXT} more characters; the full text is "
-                    "in the report files]")
+            budget = min(MAX_TOOL_TEXT, context_fit.chunk_chars(load_settings()))
+            if len(text) > budget:
+                result.content = (await context_fit.fit_text(text, budget, _summary_model())) + (
+                    "\n[summarized to fit the model; the full text is in the report files]")
         return result
 
     return guard
+
+
+def _summary_model():
+    """The chat model with a small reply budget for chunk summaries; None (deterministic) without a key."""
+    try:
+        s = load_settings()
+        return make_llm(s, max_tokens=context_fit.SUMMARY_MAX_TOKENS) if s.groq_api_key else None
+    except Exception:  # noqa: BLE001 - deterministic summaries instead
+        return None
 
 
 def _content_text(content) -> str:
@@ -729,6 +741,9 @@ def build_agent(tools: list, extra_middleware: list | None = None, model=None, s
         middleware=[summarization_middleware(summary_model or model), hitl_middleware(), tool_guard_middleware(),
                     # keep only the latest tool output once the history grows (token limit)
                     ContextEditingMiddleware(edits=[ClearToolUsesEdit(trigger=CLEAR_TOOLS_AT, keep=1)]),
+                    # a 413 (request above the model's limit): tool results summarized smaller, retried
+                    context_fit.fit_model_call_middleware(summary_model or _summary_model(),
+                                                          max_tokens=load_settings().groq_max_tokens),
                     *(extra_middleware or [])],
         state_schema=AgentState,
         checkpointer=InMemorySaver(),
@@ -815,8 +830,9 @@ def describe_error(exc: BaseException) -> dict:
         return {"kind": "rate_limit", "limit": code, "retry_after_seconds": round(retry) if retry else None,
                 "text": text}
     if status == 413 or "Request too large" in raw:
-        return {"kind": "too_large", "text": "That request was too large for the model's token limit. "
-                                             "Start a new chat (New chat) or ask for less at once."}
+        return {"kind": "too_large", "text": "That request was still too large for the model's token limit "
+                                             "after summarizing the tool results three times. Start a new chat "
+                                             "(New chat) or ask for less at once."}
     if status in (401, 403) and "groq" in type(exc).__module__:
         return {"kind": "llm_auth", "text": "Groq rejected the API key. Check GROQ_API_KEY in the repo's .env."}
     if type(exc).__name__ in ("APIConnectionError", "APITimeoutError"):

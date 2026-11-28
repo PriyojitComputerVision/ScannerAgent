@@ -60,7 +60,13 @@ Copy `mcp_chatbot/.env.example` to `mcp_chatbot/.env` (gitignored).
 - **`CHATBOT_DISABLED_TOOLS`:** chat tools to switch off, comma separated (see below).
 - **Groq limits:** Groq's on_demand tier allows 8,000 tokens per request and per minute, so
   results reach the model in compact form and old tool outputs are cleared from the
-  history. Each turn may wait briefly for the rate limit.
+  history. Each turn may wait briefly for the rate limit. A tool result longer than one chunk
+  (`PROBE_CONTEXT_CHUNK_CHARS` from the main `.env`, 8000 characters, the scanner's setting) is
+  not clipped: it is split with LangChain's `RecursiveCharacterTextSplitter` (10% overlap) and
+  summarized recursively until it fits, keeping scan ids and `[Sn]` finding ids
+  (`mcp_chatbot/context_fit.py`). If Groq still answers 413 ("Limit 8000, Requested ..."), the
+  request's tool results are summarized to the limit read from that message and the call is
+  retried (tenacity, 3 tries).
 
 ## Run it: one command
 
@@ -157,6 +163,7 @@ The message after **Upload failed:** says why:
 | Message | Cause | What to do |
 | --- | --- | --- |
 | *the archive is 12.3 MB; at most 10 MB can be attached* | Checked in the page / backend before sending | Zip only the source (leave out `node_modules`, build output, data). |
+| *That request was still too large for the model's token limit* | Groq refused the chat request (HTTP 413) even after the tool results were summarized smaller three times (`context_fit.py`) | Start a new chat, or ask for less at once. Lower `PROBE_CONTEXT_CHUNK_CHARS` or `CHATBOT_MAX_TOKENS` if it keeps happening. |
 | *the scanner refused the 9.5 MB archive as too large (HTTP 413)* | The scanner's limit is lower than 10 MB, or it runs an older version whose `/mcp` endpoint stopped at 4 MB | Lower the size, or raise `MCP_MAX_UPLOAD_MB` in the main `.env` and restart the scanner (the launcher restarts it with the UI). |
 | *the scanner refused the request (HTTP 401/403)* | The chatbot's token lacks the admin role | Set `CHATBOT_ROLES=admin` in `chatbots/mcp_chatbot/.env`. |
 | *the scanner refused it: role(s) scanner lack permission 'scan:source'* | The tool answered with a refusal; its reason is shown as is | Follow the reason (role, file type, size). |
