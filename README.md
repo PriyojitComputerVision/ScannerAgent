@@ -798,12 +798,13 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
     ..."); "vulnerability database not reachable" appears only for network errors.
   - **semgrep** cannot share this venv (it pins MCP 1.x) and has no native Windows build: install it on its
     own (`uv tool install semgrep`, the Docker image does) or set `SEMGREP_BIN`; otherwise it is reported as
-    "not installed".
+    "not installed" with a note, e.g. on Windows: "Code SAST tool semgrep could not run: semgrep is not
+    installed (uv tool install semgrep; no native Windows build); its 8 local rules (...) were not checked."
   - Tool findings go through the same post-guardrail as the sandbox output (`code_guardrails.post_tools`)
     and land in the scan's one report, with a **Code tools** table (version, status, findings per tool)
     and the requirements files pip-audit read. `get_scan.code_sast.tools` / `.dependencies`, the console
-    and the code audit trail (`tools.completed`) show the same. A tool that is missing, fails or times out
-    is listed with its status and a **note** ("Code SAST tool pip-audit could not run ..."), not a red
+    and the code audit trail (`tools.completed`) show the same. A tool that is not installed (or has no build
+    for this OS, like semgrep on Windows), fails or times out is listed with its status and a **note** ("Code SAST tool pip-audit could not run ..."), not a red
     flag: the rest of the scan is complete. Vulnerable dependencies stay a warning. Settings: `CODE_TOOLS_ENABLED`, `CODE_TOOLS`,
     `CODE_TOOLS_TIMEOUT_SECONDS`, `CODE_TOOLS_MEMORY_MB`, `CODE_TOOLS_MAX_FINDINGS`, `PIP_AUDIT_SERVICE`,
     `SEMGREP_BIN`.
