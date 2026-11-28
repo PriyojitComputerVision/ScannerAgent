@@ -89,11 +89,11 @@ def test_split_chunks_uses_the_recursive_splitter():
 
 def test_one_setting_fits_groq_on_demand_with_4096_output_tokens():
     """Groq on-demand: 8000 tokens per request, GROQ_MAX_TOKENS (4096) included, so about 3900
-    tokens are left for the prompt. One chunk (8000 chars, ~2700 tokens at a conservative 3
-    chars/token) plus ~1000 tokens of fixed prompt text stays below that; 60000 did not."""
+    tokens are left for the prompt. One chunk (4000 chars, ~1300 tokens at a conservative 3
+    chars/token) plus ~1000 tokens of fixed prompt text stays well below that; 60000 did not."""
     from pentest_agent.config import Settings
 
     default = Settings.model_fields["probe_context_chunk_chars"].default
-    assert default == 8000
+    assert default == 4000
     assert "probe_context_max_chars" not in Settings.model_fields
     assert default / 3 + 1000 + Settings.model_fields["groq_max_tokens"].default <= 8000

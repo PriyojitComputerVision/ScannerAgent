@@ -107,7 +107,7 @@ def load_settings() -> Settings:
     # The Groq settings (GROQ_API_KEY, GROQ_MODEL, GROQ_REASONING_EFFORT) come only from the
     # repo's main .env, the same key and model as the scanner: GROQ_* in this folder's .env or
     # in the environment is ignored.
-    prefixes = ("GROQ_", "JWT_", "SCOPEGUARD_", "CHATBOT_", "PROBE_CONTEXT_CHUNK_CHARS")
+    prefixes = ("GROQ_", "JWT_", "SCOPEGUARD_", "CHATBOT_", "PROBE_CONTEXT_CHUNK_CHARS", "LLM_SUMMARY_DELAY_SECONDS")
     env: dict[str, str] = {}
     for env_file in (REPO / ".env", HERE / ".env"):
         if env_file.is_file():
@@ -375,7 +375,8 @@ def tool_guard_middleware():
             text = result.content if isinstance(result.content, str) else _content_text(result.content)
             budget = min(MAX_TOOL_TEXT, context_fit.chunk_chars(load_settings()))
             if len(text) > budget:
-                result.content = (await context_fit.fit_text(text, budget, _summary_model())) + (
+                result.content = (await context_fit.fit_text(
+                    text, budget, _summary_model(), context_fit.summary_delay(load_settings()))) + (
                     "\n[summarized to fit the model; the full text is in the report files]")
         return result
 
@@ -747,6 +748,7 @@ def build_agent(tools: list, extra_middleware: list | None = None, model=None, s
                     ContextEditingMiddleware(edits=[ClearToolUsesEdit(trigger=CLEAR_TOOLS_AT, keep=1)]),
                     # a 413 (request above the model's limit): tool results summarized smaller, retried
                     context_fit.fit_model_call_middleware(summary_model or _summary_model(),
+                                                          delay=context_fit.summary_delay(load_settings()),
                                                           max_tokens=load_settings().groq_max_tokens),
                     *(extra_middleware or [])],
         state_schema=AgentState,

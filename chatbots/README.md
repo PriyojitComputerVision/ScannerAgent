@@ -13,7 +13,8 @@ shows the scanner's verified result and explains it.
   order, after one "running in parallel: ..." line (from `get_scan`'s `running_steps`). Waits inside
   a step (the scanner's LLM pacing to Groq's per-minute budget, rate-limit retries) appear as
   "note: ..." lines (`get_scan` `notices`). The chat model itself retries a 429 `GROQ_MAX_RETRIES`
-  (5) times, after the wait Groq asks for.
+  (5) times, after the wait Groq asks for. Its own tool-result summaries keep the same gap as the
+  scanner's, `LLM_SUMMARY_DELAY_SECONDS` (main `.env`, default 60) between two summary calls.
 - **Human in the loop:** `HumanInTheLoopMiddleware` pauses before every `start_scan`,
   `start_demo_scan` and `cancel_scan`. You approve, edit the arguments, or reject.
   Approving `start_scan` *is* the authorization confirmation: the chatbot sets
@@ -66,7 +67,7 @@ Copy `mcp_chatbot/.env.example` to `mcp_chatbot/.env` (gitignored).
 - **Groq limits:** Groq's on_demand tier allows 8,000 tokens per request and per minute, so
   results reach the model in compact form and old tool outputs are cleared from the
   history. Each turn may wait briefly for the rate limit. A tool result longer than one chunk
-  (`PROBE_CONTEXT_CHUNK_CHARS` from the main `.env`, 8000 characters, the scanner's setting) is
+  (`PROBE_CONTEXT_CHUNK_CHARS` from the main `.env`, 4000 characters, the scanner's setting) is
   not clipped: it is split with LangChain's `RecursiveCharacterTextSplitter` (10% overlap) and
   summarized recursively until it fits, keeping scan ids and `[Sn]` finding ids
   (`mcp_chatbot/context_fit.py`). If Groq still answers 413 ("Limit 8000, Requested ..."), the

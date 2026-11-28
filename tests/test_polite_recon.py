@@ -33,15 +33,18 @@ def test_map_keeps_input_order_and_caps_the_width():
 
 @pytest.mark.parametrize("status, seconds, failed", [(429, 0.1, False), (503, 0.1, False), (500, 0.1, False),
                                                      (200, 9.0, False), (None, 0.1, True)])
-def test_strain_drops_to_one_request_at_a_time_for_good(status, seconds, failed):
+def test_every_strain_takes_one_request_off_for_good(status, seconds, failed):
     f = PoliteFetcher(width=3)
     f.note(200, 0.1)
     f.note(404, 0.1)                         # a missing page is not strain
     assert f.current == 3
     f.note(status, seconds, failed=failed)
-    assert f.current == 1 and f.strained and f.reason
+    assert f.current == 2 and f.strained and f.reason      # 3 -> 2
     f.note(200, 0.1)
-    assert f.current == 1                    # never undone
+    assert f.current == 2                    # never back up
+    f.note(status, seconds, failed=failed)
+    f.note(status, seconds, failed=failed)
+    assert f.current == 1                    # 2 -> 1, and never below one
 
 
 def test_a_429_the_transport_handled_counts_as_strain():
@@ -49,6 +52,8 @@ def test_a_429_the_transport_handled_counts_as_strain():
     f = PoliteFetcher(width=3, rate_stats=stats)
     assert f.current == 3                    # throttles before this crawl do not count
     stats.throttled = 3
+    assert f.current == 2
+    stats.throttled = 4
     assert f.current == 1
 
 
@@ -150,4 +155,24 @@ def test_a_struggling_site_gets_one_request_at_a_time(site, monkeypatch):
     out = _crawl(site, monkeypatch, width=3)
     crawl_paths = [p for p in site.paths if p.startswith("/p")]
     assert crawl_paths                        # the crawl went on, slowly
-    assert any("one request at a time" in f for f in out.get("red_flags", []))
+    assert any("slowed down to 1 request(s) at a time" in f for f in out.get("red_flags", []))
+
+
+def test_recon_retries_a_failed_page_at_a_reduced_width(site, monkeypatch):
+    """A page that fails is retried (up to 3 times) and the crawl takes one request off its width."""
+    calls = {}
+    real_get = recon._get
+
+    def flaky_get(client, url, **kw):
+        calls[url] = calls.get(url, 0) + 1
+        if url.endswith("/p3") and calls[url] <= 2:
+            raise recon.httpx.ReadError("connection dropped")
+        return real_get(client, url, **kw)
+
+    # the same retry policy as recon._get, without the real backoff
+    monkeypatch.setattr(recon, "_get", recon.retry(retry=recon.retry_if_exception(recon._retryable),
+                                                   stop=recon.stop_after_attempt(recon.PAGE_RETRIES + 1),
+                                                   sleep=lambda s: None)(flaky_get))
+    out = _crawl(site, monkeypatch, width=3)
+    assert f"{site.url}p3" in out["crawled_pages"] and calls[f"{site.url}p3"] == 3
+    assert not any(f["title"] == "Page fetch failed" for f in out["findings"])

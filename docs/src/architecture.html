@@ -101,7 +101,7 @@
         <div class="tags"><i class="tag you">human</i><i class="tag disk">no network</i></div>
 
         <div class="node"><span class="t">recon</span><span>crawl + discovery</span></div>
-        <div class="mod"><b>tools/recon.py · discovery.py</b><span>in-scope pages, robots, sitemap, .well-known; file links never fetched; ≤3 requests at once, each page once (no #fragment copies), one at a time after a 429 / 5xx / slow answer</span></div>
+        <div class="mod"><b>tools/recon.py · discovery.py</b><span>in-scope pages, robots, sitemap, .well-known; file links never fetched; ≤3 requests at once, each page once (no #fragment copies), one request fewer after each 429 / 5xx / slow answer (3 → 2 → 1); a failed page retried 3 times</span></div>
         <div class="tags"><i class="tag web">target</i></div>
 
         <div class="node"><span class="t">auth</span><span>JWT · form login · SSO/MFA detection</span></div>
@@ -129,7 +129,7 @@
         <div class="tags"><i class="tag web">target</i><i class="tag box">sandbox</i></div>
 
         <div class="node"><span class="t">dast</span><span>sandboxed child process · parallel</span></div>
-        <div class="mod"><b>scopeguard sandbox.py → worker.py → engine.py</b><span>python -I, audit hook, pinned egress IPs; GET/HEAD/OPTIONS/TRACE; session cookie/bearer; headers, CORS, exposed files, GraphQL introspection, SRI, XSS/SSTI/SQLi/CRLF … (docs/SECURITY_CHECKS.md)</span></div>
+        <div class="mod"><b>scopeguard sandbox.py → worker.py → engine.py</b><span>starts from recon's pages, up to MAX_CRAWL_PAGES (60); failed pages retried 3 times; python -I, audit hook, pinned egress IPs; GET/HEAD/OPTIONS/TRACE; session cookie/bearer; headers, CORS, exposed files, GraphQL introspection, SRI, XSS/SSTI/SQLi/CRLF … (docs/SECURITY_CHECKS.md)</span></div>
         <div class="tags"><i class="tag web">target</i><i class="tag box">sandbox</i></div>
 
         <div class="node"><span class="t">plan_probes</span><span>joins the parallel scans · LLM plan</span></div>
@@ -176,7 +176,7 @@
           <li>IdP password and MFA factor never reach the agent</li>
         </ul></div>
       <div class="box"><div class="h">optional</div><b>Groq LLM · llm.py</b>
-        <ul><li>plan_probes and summarize only</li><li>≤ PROBE_CONTEXT_CHUNK_CHARS (8000) of data per request; more is chunked, summarized, extracted</li><li>413: limit learned, rebuilt smaller (tenacity, 3 tries)</li><li>paced to Groq's per-minute budget (x-ratelimit headers): waits for the reset instead of a 429</li><li>429: waits exactly what Groq asks, 5 retries, ≤ 120 s, then fallback</li><li>no key or prompt file → deterministic output</li></ul></div>
+        <ul><li>plan_probes and summarize only</li><li>≤ PROBE_CONTEXT_CHUNK_CHARS (4000) of data per request; more is chunked, summarized, extracted</li><li>413: limit learned, rebuilt smaller (tenacity, 3 tries)</li><li>paced to Groq's per-minute budget (x-ratelimit headers): waits for the reset instead of a 429</li><li>429: waits exactly what Groq asks, 5 retries, ≤ 120 s, then fallback</li><li>≥ 60 s between two summary calls (LLM_SUMMARY_DELAY_SECONDS)</li><li>no key or prompt file → deterministic output</li></ul></div>
       <div class="box"><div class="h">optional</div><b>LangSmith</b>
         <ul><li>one trace per scan; tokens, keys, passwords, cookies redacted</li></ul></div>
       <div class="box disk"><div class="h">local disk · data/</div><b>Files the server writes</b>
