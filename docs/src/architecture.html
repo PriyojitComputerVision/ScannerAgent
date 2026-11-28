@@ -113,27 +113,27 @@
         <div class="tags"><i class="tag you">human</i><i class="tag web">target</i></div>
 
         <div class="node hitl"><span class="t">code_source</span><span>interrupt() · human in the loop</span></div>
-        <div class="mod"><b>SAST step: code files · .zip · public .git link (+ branch/tag) · skip</b><span>paused + checkpointed; pre-guardrails: authorization, scan:source, owner · git: .git link, allowlisted host, network policy, ls-remote reachable + ref exists, hardened shallow clone (1 retry)</span></div>
+        <div class="mod"><b>SAST step: code files · .zip · public .git link (+ branch/tag) · skip</b><span>paused + checkpointed; pre-guardrails: authorization, scan:source, owner · git: .git link, allowlisted host, network policy, ls-remote reachable + ref exists, hardened shallow clone (1 retry) · then starts code_sast ∥ JS check ∥ dast in parallel (LangGraph Send, CPU count, 1-4 at once)</span></div>
         <div class="tags"><i class="tag you">human</i></div>
 
         <div class="node"><span class="t">code_sast</span><span>your source code, sandboxed</span></div>
-        <div class="mod"><b>code_upload.analyse_for_scan → Kubernetes Job (or the Python process sandbox)</b><span>pre/post guardrails (sandbox + code step); no network; non-Python files marked partial; .exe/.bat/.cmd = warnings, .sh = notes; PEP 8 + ruff lint rules for Python; one report</span></div>
+        <div class="mod"><b>code_upload.analyse_for_scan → Kubernetes Job (or the Python process sandbox)</b><span>pre/post guardrails (sandbox + code step); no network; non-Python files marked partial; .exe/.bat/.cmd = warnings, .sh = notes; PEP 8 + ruff lint rules for Python; one report · parallel with sandbox_check and dast</span></div>
         <div class="tags"><i class="tag box">sandbox</i></div>
 
         <div class="node"><span class="t">sast</span><span>only if sandbox check is off</span></div>
         <div class="mod"><b>subagents/sast_subagent.py (subgraph)</b><span>skipped while sandbox_check runs the same JavaScript rules</span></div>
         <div class="tags"><i class="tag web">target</i></div>
 
-        <div class="node"><span class="t">sandbox_check</span><span>also does the website's JS SAST</span></div>
+        <div class="node"><span class="t">sandbox_check</span><span>website JS SAST · parallel</span></div>
         <div class="mod"><b>Kubernetes Job scopeguard-job-&lt;session_id&gt;</b><span>source + page/script text as a zip on stdin; deny-all NetworkPolicy; memory 5x, 10x on OOM retry (resumes from checkpoint); deleted after · no kubectl (auto-check at start) or cluster not ready → Python process sandbox</span></div>
         <div class="tags"><i class="tag web">target</i><i class="tag box">sandbox</i></div>
 
-        <div class="node"><span class="t">dast</span><span>sandboxed child process</span></div>
+        <div class="node"><span class="t">dast</span><span>sandboxed child process · parallel</span></div>
         <div class="mod"><b>scopeguard sandbox.py → worker.py → engine.py</b><span>python -I, audit hook, pinned egress IPs; GET/HEAD/OPTIONS/TRACE; session cookie/bearer; headers, CORS, exposed files, GraphQL introspection, SRI, XSS/SSTI/SQLi/CRLF … (docs/SECURITY_CHECKS.md)</span></div>
         <div class="tags"><i class="tag web">target</i><i class="tag box">sandbox</i></div>
 
-        <div class="node"><span class="t">plan_probes</span><span>LLM plan · scan:probes</span></div>
-        <div class="mod"><b>code_exec.plan_probes → codegen_subagent.py</b><span>large context chunked (10% overlap) + summarized until it fits one chunk, then extracted as a validated ProbePlan of whitelisted probes, stored in state</span></div>
+        <div class="node"><span class="t">plan_probes</span><span>joins the parallel scans · LLM plan</span></div>
+        <div class="mod"><b>code_exec.plan_probes → codegen_subagent.py</b><span>large context chunked (10% overlap) + summarized until it fits one chunk, then extracted as a validated ProbePlan of whitelisted probes, stored in state · deferred: runs once, after every scan branch; LLM steps from here on are sequential</span></div>
         <div class="tags"><i class="tag llm">LLM</i></div>
 
         <div class="node"><span class="t">run_probes</span><span>runs the stored plan</span></div>

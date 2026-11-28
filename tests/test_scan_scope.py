@@ -115,11 +115,11 @@ def _mini_graph():
     g.add_node("sandbox_check", graph.sandbox_check_node)
     g.add_node("sast", lambda s: {"phase": "sast_complete"})
     g.add_node("dast", graph.dast_node)
-    g.add_node("plan_probes", graph.plan_probes_node)
+    g.add_node("plan_probes", graph.plan_probes_node, defer=True)  # the join of the parallel scans
     g.add_node("run_probes", graph.run_probes_node)
     g.add_node("aggregate", lambda s: {"phase": "aggregated"})
     g.add_edge(START, "choose_scope")
-    g.add_edge("sast", "sandbox_check")
+    g.add_edge("sast", "plan_probes")
     for n in ("recon", "aggregate"):
         g.add_edge(n, END)
     return g.compile(checkpointer=InMemorySaver())
@@ -166,7 +166,8 @@ def test_website_only_skips_the_code_step():
     assert done["scan_scope"] == "website" and done["phase"] == "website_steps"
     # code_source on its own passes straight on for a website-only scan
     cmd = graph.code_source_node({**_state("sc-3", ask_scan_scope=True), "scan_scope": "website"})
-    assert cmd.goto == graph._js_sast_step() and cmd.update["phase"] == "code_source_none"
+    assert [s.node for s in cmd.goto] == [graph._js_sast_step(), "dast"]   # no code_sast
+    assert cmd.update["phase"] == "code_source_none"
 
 
 def test_named_scope_and_no_permission_do_not_pause():
@@ -318,14 +319,16 @@ def test_scan_service_code_only_without_target_url():
     assert target.url is None
 
 
-@pytest.mark.parametrize("sandbox_check_enabled, js_step", [(True, []), (False, ["sast"])])
+@pytest.mark.parametrize("sandbox_check_enabled, js_step", [(True, "sandbox_check"), (False, "sast")])
 def test_code_only_path_skips_only_recon(monkeypatch, sandbox_check_enabled, js_step):
     monkeypatch.setattr(settings, "sandbox_check_enabled", sandbox_check_enabled)
     meta = code_source.store_files(ADMIN, [{"name": "app/views.py", "content": VULN_PY}])
     app, cfg = _mini_graph(), {"configurable": {"thread_id": f"sc-path-{sandbox_check_enabled}"}}
     order = [n for chunk in app.stream(_state("sc-path", scan_scope="code", upload_id=meta["upload_id"]), cfg,
                                        stream_mode="updates") for n in chunk]
-    assert order == ["choose_scope", "auth", "code_source", "code_sast", *js_step, "sandbox_check", "dast",
-                     "plan_probes", "run_probes", "aggregate"]
+    # the three scan branches run in one step (parallel, any order), then the sequential rest
+    assert order[:3] == ["choose_scope", "auth", "code_source"]
+    assert sorted(order[3:6]) == sorted(["code_sast", js_step, "dast"])
+    assert order[6:] == ["plan_probes", "run_probes", "aggregate"]
     final = app.get_state(cfg).values
     assert final["findings"] and not final.get("crawled_pages")  # only the code was analysed

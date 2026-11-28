@@ -16,10 +16,13 @@ agent as a character with one job, from your request to your report, in plain la
 
 A client signs in at `/auth/token` and sends the scan request over `/ws`. The request waits in the
 server-wide queue (1 scan runs at a time, up to 50 wait; see [API management](#api-management-queues)),
-then the server runs the LangGraph pipeline `validate → choose_scope → recon → auth → [auth_challenge] → code_source → [code_sast] → sast → sandbox_check → dast → plan_probes → run_probes → aggregate → summarize → report → audit`
-and streams progress back. `choose_scope` asks you first, before any request, what the scan tests:
+then the server runs the LangGraph pipeline `validate → choose_scope → recon → auth → [auth_challenge] → code_source → ( [code_sast] ∥ sandbox_check or sast ∥ dast ) → plan_probes → run_probes → aggregate → summarize → report → audit`
+and streams progress back. After `code_source` the scans that need nothing from each other run **in
+parallel** (LangGraph `Send`; as many at once as the machine has CPUs, 1 to 4): the code check and the website's
+JavaScript check (each its own Kubernetes Job) and DAST (process sandbox). `plan_probes` waits for all of
+them (a deferred join); the LLM steps and the probes they plan stay sequential. `choose_scope` asks you first, before any request, what the scan tests:
 the **website + its source code**, the **website only**, or the **code only** (then the run skips the
-recon layer, `choose_scope → auth → code_source → code_sast → sandbox_check → dast → plan_probes → run_probes → aggregate`, and the website steps pass straight on, so nothing is sent to any site; see
+recon layer, `choose_scope → auth → code_source → (code_sast ∥ sandbox_check ∥ dast) → plan_probes → run_probes → aggregate`, and the website steps pass straight on, so nothing is sent to any site; see
 [What to test](#what-to-test-website--code-website-only-code-only-human-in-the-loop)). `auth_challenge` runs only when the target needs a human for SSO or MFA
 (see [Sign-in with SSO / MFA](#sign-in-with-sso--mfa-human-in-the-loop)); `code_source` is the SAST step's
 human in the loop: it pauses and asks you for code files, a .zip or a public repository's `.git` link (or skip), and
@@ -606,7 +609,7 @@ what the scan tests:
 | --- | --- | --- |
 | `website_and_code` | every website step, then the code at the SAST step (`code_source` → `code_sast`) | yes |
 | `website` | every website step; no code step | yes |
-| `code` | every step but `recon`: `choose_scope → auth → code_source → code_sast → sandbox_check → dast → plan_probes → run_probes → aggregate → summarize → report → audit`; auth, sandbox_check, dast and the probes pass straight on (phase `<step>_code_only`) | **none**: no website is needed; a URL, if given, only labels the report |
+| `code` | every step but `recon`: `choose_scope → auth → code_source → (code_sast ∥ sandbox_check ∥ dast) → plan_probes → run_probes → aggregate → summarize → report → audit`; auth, sandbox_check, dast and the probes pass straight on (phase `<step>_code_only`) | **none**: no website is needed; a URL, if given, only labels the report |
 
 * **Ask me (human in the loop).** With `"ask_scan_scope": true` the run pauses (LangGraph `interrupt`,
   checkpointed) and the server sends `input_required` with `request.type == "scan_scope"`, the offered

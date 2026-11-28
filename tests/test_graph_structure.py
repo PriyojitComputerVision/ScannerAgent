@@ -31,18 +31,22 @@ def test_every_route_is_visible_in_the_drawn_graph():
         # human in the loop: auth pauses in auth_challenge for SSO / MFA, then continues
         ("auth", "auth_challenge"), ("auth_challenge", "code_source"),
         # human in the loop at the SAST step: code_source pauses for code files / a .zip / a git
-        # link; code_sast analyses that code in the sandbox, then the website's JavaScript SAST
+        # link, then starts the scans in parallel (Send): code_sast, the website's JavaScript
+        # check (sandbox_check, or sast while it is off) and dast; all meet at plan_probes
         ("code_source", "code_sast"), ("code_source", "sast:run_sast"), ("code_source", "sandbox_check"),
-        ("code_sast", "sast:run_sast"), ("code_sast", "sandbox_check"),
-        ("sast:run_sast", "sandbox_check"),
-        ("sandbox_check", "dast"), ("dast", "plan_probes"), ("plan_probes", "run_probes"),
+        ("code_source", "dast"),
+        ("code_sast", "plan_probes"), ("sast:run_sast", "plan_probes"), ("sandbox_check", "plan_probes"),
+        ("dast", "plan_probes"), ("plan_probes", "run_probes"),
         ("plan_probes", "aggregate"), ("run_probes", "aggregate"),
         ("aggregate", "summarize"), ("summarize", "report"), ("report", "audit"),
         ("audit", "__end__"),  # the audit record is the last step of every run
-        # safety stop (AGENT_MAX_ITERATIONS): any step can jump to aggregate
-        ("recon", "aggregate"), ("dast", "aggregate"), ("aggregate", "audit"),
+        # safety stop (AGENT_MAX_ITERATIONS): any step can jump to aggregate (a scan branch to its join)
+        ("recon", "aggregate"), ("aggregate", "audit"),
     }
     assert expected <= edges
+    # the scan branches never wait for each other: no edge between them
+    branches = {"code_sast", "sast:run_sast", "sandbox_check", "dast"}
+    assert not {(a, b) for a, b in edges if a in branches and b in branches}
     assert ("choose_scope", "code_source") not in edges  # code only keeps every step but recon
     assert "flowchart" in graph.build_graph().get_graph(xray=True).draw_mermaid()
 
@@ -204,14 +208,79 @@ def _auth_state():
     return {**_probe_state(), "crawled_pages": ["https://example.com/"]}
 
 
+def _sent(cmd) -> list[str]:
+    return [s.node for s in cmd.goto]
+
+
 @pytest.mark.parametrize("enabled, expected", [(True, "sandbox_check"), (False, "sast")])
 def test_code_steps_skip_sast_while_the_sandbox_check_is_on(monkeypatch, enabled, expected):
     monkeypatch.setattr(graph.settings, "sandbox_check_enabled", enabled)
     monkeypatch.setattr(graph, "authenticate",
                         SimpleNamespace(invoke=lambda args: SimpleNamespace(update={"phase": "auth_complete"})))
     assert graph.auth_node(_auth_state()).goto == "code_source"
-    assert graph.code_source_node(_auth_state()).goto == expected   # no code asked for or named
-    assert graph.code_sast_node(_auth_state()).goto == expected     # nothing to analyse
+    assert _sent(graph.code_source_node(_auth_state())) == [expected, "dast"]   # no code: no code_sast
+    assert graph.code_sast_node(_auth_state()).goto == "plan_probes"            # nothing to analyse
+
+
+def test_code_source_sends_the_scans_out_in_parallel_with_its_own_update(monkeypatch):
+    monkeypatch.setattr(graph.settings, "sandbox_check_enabled", True)
+    monkeypatch.setattr(graph.code_source, "pre_code_checks", lambda **_k: [{"name": "x", "passed": True}])
+    monkeypatch.setattr(graph.code_source, "resolve_answer", lambda *_a, **_k: {
+        "code_source": {"status": "ready", "upload_id": "0" * 32}, "red_flags": ["note from code_source"]})
+    state = {**_auth_state(), "scan_scope": "website_and_code", "red_flags": ["earlier"],
+             "target": {**_auth_state()["target"], "upload_id": "0" * 32}}
+    cmd = graph.code_source_node(state)
+    assert _sent(cmd) == ["code_sast", "sandbox_check", "dast"]
+    for send in cmd.goto:  # every branch starts from the same input: the state + code_source's update
+        assert send.arg["code_source"]["upload_id"] == "0" * 32
+        assert send.arg["red_flags"] == ["earlier", "note from code_source"]
+
+
+def test_parallel_branches_run_together_and_the_join_runs_once():
+    """Send fan-out + deferred join on the real reducers: phase / notes written by all branches in
+    one step do not conflict, findings add up, plan_probes runs once after the slowest branch."""
+    import threading
+    import time
+
+    from langgraph.graph import END, START, StateGraph
+
+    running, peak, joins = set(), [0], []
+    lock = threading.Lock()
+
+    def branch(name, delay):
+        def run(state):
+            with lock:
+                running.add(name)
+                peak[0] = max(peak[0], len(running))
+            time.sleep(delay)
+            with lock:
+                running.discard(name)
+            return graph.Command(update={"phase": f"{name}_done", "notes": f"{name} ran.",
+                                         "findings": [{"title": name}]}, goto="plan_probes")
+        return run
+
+    g = StateGraph(graph.AgentState)
+    g.add_node("fan", lambda s: graph.Command(goto=[graph.Send(n, s) for n in ("code_sast", "sandbox_check",
+                                                                               "dast")]))
+    g.add_node("code_sast", branch("code_sast", 0.3))
+    g.add_node("sandbox_check", branch("sandbox_check", 0.3))
+    g.add_node("dast", branch("dast", 0.3))
+    g.add_node("plan_probes", lambda s: joins.append(sorted(f["title"] for f in s["findings"])) or {},
+               defer=True)
+    g.add_edge(START, "fan")
+    g.add_edge("plan_probes", END)
+    out = g.compile().invoke({"findings": []}, {"max_concurrency": 4})
+    assert peak[0] == 3                                   # all three at the same time
+    assert joins == [["code_sast", "dast", "sandbox_check"]]  # one join, after all three
+    assert all(f"{n} ran." in out["notes"] for n in ("code_sast", "sandbox_check", "dast"))
+
+
+@pytest.mark.parametrize("cpus, expected", [(None, 1), (1, 1), (2, 2), (4, 4), (32, 4)])
+def test_max_concurrency_follows_the_cpu_count_between_one_and_four(monkeypatch, cpus, expected):
+    monkeypatch.setattr(graph.os, "cpu_count", lambda: cpus)
+    cfg = graph.run_config("s1")
+    assert cfg["max_concurrency"] == expected and cfg["configurable"]["thread_id"] == "s1"
+    assert cfg["recursion_limit"] == graph.recursion_limit()
 
 
 def test_failed_sandbox_check_falls_back_to_in_process_js_sast(monkeypatch):
@@ -221,7 +290,7 @@ def test_failed_sandbox_check_falls_back_to_in_process_js_sast(monkeypatch):
     monkeypatch.setattr(graph, "run_sast_on_client_assets", SimpleNamespace(invoke=lambda args: SimpleNamespace(
         update={"findings": [{"title": "JS_EVAL"}], "notes": "scanned"})))
     cmd = graph.sandbox_check_node(_auth_state())
-    assert cmd.goto == "dast" and cmd.update["findings"] == [{"title": "JS_EVAL"}]
+    assert cmd.goto == "plan_probes" and cmd.update["findings"] == [{"title": "JS_EVAL"}]
     assert any("in-process" in f for f in cmd.update["red_flags"])
 
 

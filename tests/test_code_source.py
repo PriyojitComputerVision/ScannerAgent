@@ -210,12 +210,17 @@ def _mini_graph():
     g = StateGraph(graph.AgentState)
     g.add_node("code_source", graph.code_source_node)
     g.add_node("code_sast", graph.code_sast_node)
-    g.add_node("sandbox_check", lambda s: {"phase": "next_step"})
-    g.add_node("sast", lambda s: {"phase": "next_step"})
-    g.add_node("aggregate", lambda s: {"phase": "aggregate_step"})  # code-only scans end their code steps here
+    # The scan branches code_source starts in parallel (Send), each stubbed except code_sast, and the
+    # deferred join they all go to (plan_probes): it runs once, after every branch.
+    g.add_node("sandbox_check", lambda s: {"phase": "branch_done"})
+    g.add_node("sast", lambda s: {"phase": "branch_done"})
+    g.add_node("dast", lambda s: {"phase": "branch_done"})
+    g.add_node("plan_probes", lambda s: {"phase": "next_step"}, defer=True)
+    g.add_node("aggregate", lambda s: {"phase": "aggregate_step"})
     g.add_edge(START, "code_source")
-    g.add_edge("sandbox_check", END)
-    g.add_edge("sast", END)
+    for branch in ("sandbox_check", "sast", "dast"):
+        g.add_edge(branch, "plan_probes")
+    g.add_edge("plan_probes", END)
     g.add_edge("aggregate", END)
     return g.compile(checkpointer=InMemorySaver())
 
