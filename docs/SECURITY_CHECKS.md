@@ -14,6 +14,7 @@ Every check is read-only towards the target: GET, HEAD, OPTIONS and TRACE only (
 | Source-code SAST | your uploaded / git code | `src/scopeguard/codecheck.py` (`BACKEND_RULES`, `scan_routes`, `scan_file_level`) | Kubernetes Job (or the process sandbox); code is never run |
 | Coding standard + ruff lint | Python files of your code | `src/scopeguard/codestyle.py` | same sandbox, parsed with `ast` / `tokenize`, never executed |
 | Archive safety | the uploaded .zip itself | `src/scopeguard/archive.py` | inside the sandbox |
+| Code tools (ruff, mypy, bandit, radon, semgrep, pip-audit) | Python files of your code; versions pinned in its requirements-type files | `src/pentest_agent/code_tools.py`, `src/scopeguard/deps.py` | child processes on the server in the same code SAST step (audit hook: no processes, writes only in a temp folder, network only for pip-audit's vulnerability database); code is never run |
 
 Profiles (`engine.PROFILES`): `quick` = crawl + passive checks only; `standard` adds safe active checks; `aggressive` / `auth_deep` add payload variants, time-based checks and upload tests.
 
@@ -241,6 +242,21 @@ One finding per rule and file (with a count and the first lines), capped at 150 
 | `STYLE_IS_LITERAL` | ruff F632 (Pyflakes) | low | 'is' / 'is not' compared with a str, bytes or number literal |
 | `STYLE_AMBIGUOUS_NAME` | ruff E741 (pycodestyle) | info | ambiguous variable name (l, O or I) |
 
+## Code tools (`src/pentest_agent/code_tools.py`)
+
+Run in the graph's `code_sast` step after the sandbox analysis, on the same upload, before it is deleted. Static only: nothing from the upload is run, imported or installed, and the project's own tool settings are ignored. Findings go through the same post-guardrail as the sandbox output (`code_guardrails.post_tools`) and land in the scan's one report.
+
+| Tool | Checks | Rule ids | Severity | Settings used |
+|---|---|---|---|---|
+| ruff | pyflakes, pycodestyle errors, flake8-bugbear | `RUFF_<code>` (one per rule and file) | low | `--isolated --select E4,E7,E9,F,B` |
+| mypy | type errors | `MYPY_<error code>` (one per code and file) | low | our own config file (no project plugins), `--no-site-packages` |
+| bandit | Python security issues | `BANDIT_<test id>` | bandit's own (high / medium / low) | defaults, from a neutral working folder |
+| radon | cyclomatic complexity, rank C or worse | `RADON_COMPLEXITY` | info (C), low (D-F) | `cc -n C` |
+| semgrep | the local rules in `src/pentest_agent/semgrep/python.yml` | `SEMGREP_<rule>` | ERROR high, WARNING medium | `--config <local file> --metrics=off`; optional install |
+| pip-audit | known vulnerabilities (OSV or PyPI) in exactly pinned versions | `VULNERABLE_DEPENDENCY` (one per package version) | medium (pip-audit gives no CVSS) | `--disable-pip --no-deps`, our own `name==version` file; `PIP_AUDIT_SERVICE` |
+
+Requirements-type files (`scopeguard.deps.is_requirements_file`): `requirements*.txt` / `*.in` (also in a `requirements/` folder), `constraints*.txt`, `pyproject.toml` (PEP 621, PEP 735 groups, Poetry), `setup.cfg`, `Pipfile`, `Pipfile.lock`, `uv.lock`, `poetry.lock`, `pdm.lock`, `pylock*.toml`. Only entries pinned to one version (`==` / `===`, Poetry's bare version, lock files) are audited; the rest is listed as not audited. Packages from git, a path or a URL and the project itself are skipped.
+
 ## Automated tests (`tests/`)
 
 Run everything with `uv run pytest` (no real network or LLM calls; the golden live judge needs `GOLDEN_LIVE=1`). Other gates: `uv run ruff check src tests` (lint), `uv run python -m scopeguard.cli --simulate` (all planted issues found), `uv run golden-check --allow-no-llm` (data drift) and `uv run pentest-audit verify` (audit chain).
@@ -263,6 +279,7 @@ Run everything with `uv run pytest` (no real network or LLM calls; the golden li
 | `tests/test_code_precision.py` | Sharper SAST rules (no false positives from strings, docstrings, comments, Markdown prose, BroadcastChannel, 'del x') and the post-guardrail that re-checks every finding against the source. |
 | `tests/test_code_rules.py` | SAST rules for uploaded / backend code: XSS, IDOR, injection, SSRF, supply chain, IaC, with a recommendation for every rule and no false alarm on the safe variants. |
 | `tests/test_code_source.py` | Source code at the SAST step: human in the loop (graph code_source -> code_sast), code files without a zip, git links (validation, hardened shallow clone, network policy), and the WebSocket question/answer. No real network: git is faked, DNS is stubbed by conftest. |
+| `tests/test_code_tools.py` | The code SAST step's tools: requirements-type files and their pins (scopeguard.deps), the host-side unpacking (keep_requirements), the tool child's audit hook, ruff / bandit / radon / mypy on real files (local, no network), pip-audit with a stubbed answer, post_tools, and the code_sast integration (findings, report, get_scan, upload deleted afterwards). No network: pip-audit is always stubbed. |
 | `tests/test_code_upload.py` | Source-code uploads: HTTP API and MCP tools, type checks, RBAC/ownership, the sandbox scan (process backend here), reports, audit, and the Kubernetes pod runner (faked kubectl). |
 | `tests/test_codegen_subagent.py` | Probe planner: LLM plan validation, whitelisted probe types, default plan fallback. |
 | `tests/test_codestyle.py` | PEP 8 coding-standard check for uploaded Python code (scopeguard.codestyle): rules, one finding per rule and file, caps, the sandbox analyzer path, remediation and the report section. |

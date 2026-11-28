@@ -142,16 +142,19 @@ def _is_text_name(rel: str) -> bool:
 
 
 def inspect_and_extract(data: bytes, dest: str, *, skip: set[str] | frozenset[str] = frozenset(),
-                        max_file_bytes: int | None = None) -> ArchiveReport:
+                        max_file_bytes: int | None = None, keep_requirements: bool = False) -> ArchiveReport:
     """Inspect every entry of the zip in ``data``; write the text files the analyzer needs
     into ``dest`` (created). ``skip`` holds relative paths already analysed by an earlier
-    attempt (checkpoint resume): they are inspected but not written again."""
+    attempt (checkpoint resume): they are inspected but not written again. ``keep_requirements``
+    also writes requirements-type files (``scopeguard.deps.is_requirements_file``: requirements*.txt,
+    lock files, Pipfile, ...) that the SAST itself skips; the SAST step's tools use it for pip-audit."""
     from scopeguard.codecheck import (
         ANALYSIS_SKIP_DIRS,
         MAX_FILE_BYTES,
         is_model_weight,
         is_not_analysed,
     )
+    from scopeguard.deps import is_requirements_file
     from scopeguard.gitignore import GitIgnore
 
     max_file = max_file_bytes or MAX_FILE_BYTES
@@ -246,7 +249,9 @@ def inspect_and_extract(data: bytes, dest: str, *, skip: set[str] | frozenset[st
                      evidence=f"{info.file_size} / {info.compress_size} bytes")
             rep.stats["refused"] += 1
             continue
-        if any(p in ANALYSIS_SKIP_DIRS for p in rel.split("/")[:-1]) or is_not_analysed(rel.rsplit("/", 1)[-1]):
+        wanted = keep_requirements and is_requirements_file(rel)  # dependency declarations only, never code
+        if any(p in ANALYSIS_SKIP_DIRS for p in rel.split("/")[:-1]) or (
+                is_not_analysed(rel.rsplit("/", 1)[-1]) and not wanted):
             continue  # the analyzer skips vendored / build / .claude folders, pytest, Markdown and images anyway
         if ignore and ignore.ignored(rel):
             rep.stats["gitignored"] = rep.stats.get("gitignored", 0) + 1
@@ -276,7 +281,7 @@ def inspect_and_extract(data: bytes, dest: str, *, skip: set[str] | frozenset[st
                 rep.flag("NESTED_ARCHIVE", "low", A08, "Nested archive inside the upload; not unpacked or analysed.",
                          rel, "CWE-829", "Upload the source of bundled archives, or verify their checksums.")
             continue
-        if not _is_text_name(rel):
+        if not _is_text_name(rel) and not wanted:
             continue
         if b"\x00" in head:
             rep.stats["skipped_binary"] += 1

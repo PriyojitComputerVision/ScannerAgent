@@ -636,7 +636,20 @@ def _code_sast_markdown(code: dict | None) -> list[str]:
                           for rid, n in (std.get("files_by_rule") or {}).items())
         out.append(f"- **Coding standard (PEP 8):** {std.get('files_with_issues') or 0} Python file(s) with issues"
                    + (f": {rules}" if rules else ""))
+    tools = code.get("tools") or {}
+    if tools:
+        out.append("- **Code tools:** " + "; ".join(_tool_label(n, t) for n, t in tools.items() if isinstance(t, dict)))
+    for name in (code.get("dependencies") or {}).get("files") or []:  # file names from the upload, shown as code
+        clean = " ".join(_MARKER_RE.sub("", str(name)).split()).replace("`", "")[:200]
+        out.append(f"  - requirements file read by pip-audit: `{clean}`")
     return out
+
+
+def _tool_label(name: str, info: dict) -> str:
+    """'bandit 1.9.4: ok, 3 finding(s)' / 'semgrep: not_installed' (only status ok means the tool ran)."""
+    version = f" {info['version']}" if info.get("version") else ""
+    count = f", {info.get('findings') or 0} finding(s)" if info.get("status") == "ok" else ""
+    return f"{name}{version}: {info.get('status')}{count}"
 
 
 def compact_scan_result(r: dict) -> str:
@@ -693,6 +706,13 @@ def compact_scan_result(r: dict) -> str:
         if std.get("standard"):
             lines.append(f"coding standard (PEP 8; STYLE_* findings are info/low): "
                          f"{std.get('files_with_issues') or 0} file(s) with issues, by rule: {std.get('files_by_rule')}")
+        tools = code.get("tools") or {}
+        if tools:  # only status ok means the tool ran; pip-audit audits exact pins only
+            lines.append("code tools (only status ok ran; never call a tool that did not run clean): "
+                         + "; ".join(_tool_label(n, t) for n, t in tools.items() if isinstance(t, dict)))
+            pip = tools.get("pip-audit") or {}
+            if pip.get("unpinned"):
+                lines.append(f"pip-audit: {pip['unpinned']} dependenc(ies) not pinned to one version, not audited")
         if langs.get("warnings"):
             lines.append("executable / script files (level warning: tell the user to review them; "
                          "level note: shell scripts, mention briefly): "

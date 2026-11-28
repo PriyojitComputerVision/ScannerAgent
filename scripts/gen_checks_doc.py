@@ -1,5 +1,6 @@
 """Write docs/SECURITY_CHECKS.md: every check the scanner runs (DAST, custom probes, website JavaScript
-SAST, source-code SAST, PEP 8 / ruff lint) and every automated test file, with where to look.
+SAST, source-code SAST, PEP 8 / ruff lint, the code SAST step's tools) and every automated test file,
+with where to look.
 
 The rule tables are read from the code (engine.JS_RULES, engine.SENSITIVE_PATHS, codecheck.BACKEND_RULES,
 codestyle.STYLE_RULES, probe_models.ProbeType), the test list from each test file's docstring, so the
@@ -16,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from pentest_agent import code_tools
 from pentest_agent.tools.probe_models import PARAMETER_PROBES, ProbeType
 from scopeguard import codecheck, codestyle, engine
 
@@ -144,6 +146,11 @@ def build() -> str:
             ["Coding standard + ruff lint", "Python files of your code", "`src/scopeguard/codestyle.py`",
              "same sandbox, parsed with `ast` / `tokenize`, never executed"],
             ["Archive safety", "the uploaded .zip itself", "`src/scopeguard/archive.py`", "inside the sandbox"],
+            ["Code tools (ruff, mypy, bandit, radon, semgrep, pip-audit)",
+             "Python files of your code; versions pinned in its requirements-type files",
+             "`src/pentest_agent/code_tools.py`, `src/scopeguard/deps.py`",
+             ("child processes on the server in the same code SAST step (audit hook: no processes, writes only "
+             "in a temp folder, network only for pip-audit's vulnerability database); code is never run")],
         ]),
         "",
         ("Profiles (`engine.PROFILES`): `quick` = crawl + passive checks only; `standard` adds safe active "
@@ -198,6 +205,35 @@ def build() -> str:
         "",
         *_table(["Rule", "Code", "Severity", "Finds"],
                 [[f"`{rid}`", codestyle.code_label(r[0]), r[1], r[2]] for rid, r in codestyle.STYLE_RULES.items()]),
+        "",
+        "## Code tools (`src/pentest_agent/code_tools.py`)",
+        "",
+        ("Run in the graph's `code_sast` step after the sandbox analysis, on the same upload, before it is "
+        "deleted. Static only: nothing from the upload is run, imported or installed, and the project's own "
+        "tool settings are ignored. Findings go through the same post-guardrail as the sandbox output "
+        "(`code_guardrails.post_tools`) and land in the scan's one report."),
+        "",
+        *_table(["Tool", "Checks", "Rule ids", "Severity", "Settings used"], [
+            ["ruff", "pyflakes, pycodestyle errors, flake8-bugbear", "`RUFF_<code>` (one per rule and file)", "low",
+             f"`--isolated --select {code_tools.RUFF_SELECT}`"],
+            ["mypy", "type errors", "`MYPY_<error code>` (one per code and file)", "low",
+             "our own config file (no project plugins), `--no-site-packages`"],
+            ["bandit", "Python security issues", "`BANDIT_<test id>`", "bandit's own (high / medium / low)",
+             "defaults, from a neutral working folder"],
+            ["radon", "cyclomatic complexity, rank C or worse", "`RADON_COMPLEXITY`", "info (C), low (D-F)",
+             "`cc -n C`"],
+            ["semgrep", "the local rules in `src/pentest_agent/semgrep/python.yml`", "`SEMGREP_<rule>`",
+             "ERROR high, WARNING medium", "`--config <local file> --metrics=off`; optional install"],
+            ["pip-audit", "known vulnerabilities (OSV or PyPI) in exactly pinned versions",
+             "`VULNERABLE_DEPENDENCY` (one per package version)", "medium (pip-audit gives no CVSS)",
+             "`--disable-pip --no-deps`, our own `name==version` file; `PIP_AUDIT_SERVICE`"],
+        ]),
+        "",
+        ("Requirements-type files (`scopeguard.deps.is_requirements_file`): `requirements*.txt` / `*.in` (also "
+        "in a `requirements/` folder), `constraints*.txt`, `pyproject.toml` (PEP 621, PEP 735 groups, Poetry), "
+        "`setup.cfg`, `Pipfile`, `Pipfile.lock`, `uv.lock`, `poetry.lock`, `pdm.lock`, `pylock*.toml`. Only "
+        "entries pinned to one version (`==` / `===`, Poetry's bare version, lock files) are audited; the "
+        "rest is listed as not audited. Packages from git, a path or a URL and the project itself are skipped."),
         "",
         "## Automated tests (`tests/`)",
         "",

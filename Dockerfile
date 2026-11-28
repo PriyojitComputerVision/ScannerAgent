@@ -4,7 +4,7 @@
 #   docker run --rm -p 8765:8765 --env-file .env -v "$PWD/keys:/app/keys" pentest-agent
 #
 # The container runs, in order, and stops at the first failure:
-#   1. pytest                       (offline; LLM/LangSmith keys are masked for this step)
+#   1. pytest + coverage            (offline; LLM/LangSmith keys are masked for this step)
 #   2. golden dataset drift check   (needs GROQ_API_KEY; prints NO_DRIFT / DATA_DRIFT /
 #                                    MODEL_DRIFT / DATA_AND_MODEL_DRIFT and exits non-zero on drift)
 #   3. the WebSocket server         (ws://localhost:8765/ws, reports at http://localhost:8765/reports/)
@@ -31,6 +31,12 @@ RUN useradd --create-home --uid 10001 app
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
  && rm -rf /var/lib/apt/lists/*
+
+# semgrep for the code SAST step's tools (pentest_agent/code_tools.py): its own uv tool environment,
+# because it pins MCP 1.x and cannot share the project venv (MCP 2.x). Runs only with the local rules
+# file, --metrics=off. Pinned version; bump it deliberately.
+ENV UV_TOOL_DIR=/opt/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin SEMGREP_BIN=/usr/local/bin/semgrep
+RUN uv tool install semgrep==1.173.0 && semgrep --version
 
 # Dependencies first (cached layer), including the dev group for pytest.
 COPY pyproject.toml uv.lock README.md ./
