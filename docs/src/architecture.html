@@ -58,7 +58,7 @@
 </head>
 <body>
   <h1>ScopeGuard architecture</h1>
-  <p class="sub">A browser console, any WebSocket client, or another agent over MCP / A2A starts a scan; the FastAPI server queues it and runs the 16-step LangGraph pipeline. Every route ends in a tamper-evident audit record.</p>
+  <p class="sub">A browser console, any WebSocket client, or another agent over MCP / A2A starts a scan; the FastAPI server queues it and runs the 15-step LangGraph pipeline. Every route ends in a tamper-evident audit record.</p>
   <div class="legend">
     <span><i class="tag web">target</i> sends in-scope requests to the website</span>
     <span><i class="tag llm">LLM</i> calls Groq (optional, offline fallback)</span>
@@ -144,10 +144,6 @@
         <div class="mod"><b>pentest_agent/dedupe.py · scopeguard/citations.py</b><span>one finding per issue + URL (merged duplicates, highest severity), red flags, built-in summary citing [Sn]</span></div>
         <div class="tags"></div>
 
-        <div class="node"><span class="t">summarize</span><span>LLM summary</span></div>
-        <div class="mod"><b>generate_executive_summary</b><span>must cite [Sn]; long SOURCES digested per severity, every [Sn] kept (context_fit.fit_sources); otherwise aggregate's summary stays</span></div>
-        <div class="tags"><i class="tag llm">LLM</i></div>
-
         <div class="node"><span class="t">report</span><span>html · md · json · docx</span></div>
         <div class="mod"><b>tools/report_tool.py · scopeguard report / docx_report</b><span>all four formats from the same structured data</span></div>
         <div class="tags"><i class="tag disk">disk</i></div>
@@ -176,7 +172,7 @@
           <li>IdP password and MFA factor never reach the agent</li>
         </ul></div>
       <div class="box"><div class="h">optional</div><b>Groq LLM · llm.py</b>
-        <ul><li>plan_probes and summarize only</li><li>≤ PROBE_CONTEXT_CHUNK_CHARS (4000) of data per request; more is chunked, summarized, extracted</li><li>413: limit learned, rebuilt smaller (tenacity, 3 tries)</li><li>paced to Groq's per-minute budget (x-ratelimit headers): waits for the reset instead of a 429</li><li>429: waits exactly what Groq asks, 5 retries, ≤ 120 s, then fallback</li><li>≥ 60 s between two summary calls (LLM_SUMMARY_DELAY_SECONDS)</li><li>no key or prompt file → deterministic output</li></ul></div>
+        <ul><li>plan_probes only (the report keeps aggregate's cited summary)</li><li>≤ PROBE_CONTEXT_CHUNK_CHARS (4000) of data per request; more is chunked, summarized, extracted</li><li>413: limit learned, rebuilt smaller (tenacity, 3 tries)</li><li>paced to Groq's per-minute budget (x-ratelimit headers): waits for the reset instead of a 429</li><li>429: waits exactly what Groq asks, 5 retries, ≤ 120 s, then fallback</li><li>≥ 60 s between two summary calls (LLM_SUMMARY_DELAY_SECONDS)</li><li>no key or prompt file → deterministic output</li></ul></div>
       <div class="box"><div class="h">optional</div><b>LangSmith</b>
         <ul><li>one trace per scan; tokens, keys, passwords, cookies redacted</li></ul></div>
       <div class="box disk"><div class="h">local disk · data/</div><b>Files the server writes</b>

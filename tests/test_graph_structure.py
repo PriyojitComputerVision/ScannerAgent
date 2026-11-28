@@ -38,7 +38,7 @@ def test_every_route_is_visible_in_the_drawn_graph():
         ("code_sast", "plan_probes"), ("sast:run_sast", "plan_probes"), ("sandbox_check", "plan_probes"),
         ("dast", "plan_probes"), ("plan_probes", "run_probes"),
         ("plan_probes", "aggregate"), ("run_probes", "aggregate"),
-        ("aggregate", "summarize"), ("summarize", "report"), ("report", "audit"),
+        ("aggregate", "report"), ("report", "audit"),   # no summarize step: the report comes straight
         ("audit", "__end__"),  # the audit record is the last step of every run
         # safety stop (AGENT_MAX_ITERATIONS): any step can jump to aggregate (a scan branch to its join)
         ("recon", "aggregate"), ("aggregate", "audit"),
@@ -193,14 +193,13 @@ def test_aggregate_never_calls_the_llm(monkeypatch):
                         lambda *a, **k: (_ for _ in ()).throw(AssertionError("LLM called")))
     state = {**_probe_state(), "started_at": dt.datetime(2026, 1, 1, tzinfo=dt.UTC).isoformat()}
     cmd = graph.aggregate_node(state)
-    assert cmd.goto == "summarize" and cmd.update["phase"] == "aggregated"
+    assert cmd.goto == "report" and cmd.update["phase"] == "aggregated"
 
 
-def test_summarize_safety_stop_goes_to_report_not_back_to_aggregate():
-    run = graph.with_iteration_limit("summarize", graph.summarize_node)
-    assert set(graph.command_destinations(run)) == {"report"}
-    cmd = run({"node_runs": {"summarize": graph.settings.agent_max_iterations}})
-    assert cmd.goto == "report" and cmd.update["phase"] == "iteration_limit"
+def test_there_is_no_summarize_node_the_report_follows_aggregate():
+    nodes = graph.build_graph().get_graph().nodes
+    assert "summarize" not in nodes and "summarize" not in graph.NODE_NAMES
+    assert set(graph.command_destinations(graph.aggregate_node)) == {"report"}
 
 
 # ---------------------------------------------------------------- sast vs sandbox_check

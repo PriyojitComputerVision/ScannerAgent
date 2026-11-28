@@ -30,7 +30,6 @@ NODE_NOTES = {
     "plan_probes": "Probe plan (LLM or built-in default; skipped for quick).",
     "run_probes": "Ran the whitelisted probes.",
     "aggregate": "Deduplicated findings and wrote the cited summary.",
-    "summarize": "Executive summary (LLM if configured, else the built-in one).",
     "report": "Wrote report.md / .html / .json / .docx.",
     "audit": "Appended the hash-chained audit record.",
 }

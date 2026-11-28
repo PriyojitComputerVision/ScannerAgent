@@ -135,11 +135,13 @@ def _run_aggregate(monkeypatch, llm_text):
     monkeypatch.setattr(graph, "get_llm", lambda **_: None)
     monkeypatch.setattr(graph, "invoke_with_backoff", lambda *_a, **_k: SimpleNamespace(content=llm_text))
     state = _aggregate_state()
-    aggregated = graph.aggregate_node(state)              # deterministic, no LLM
-    assert aggregated.goto == "summarize"
-    cmd = graph.summarize_node({**state, **aggregated.update})  # LLM summary step
-    assert cmd.goto == "report"
-    return FinalReport.model_validate_json(cmd.update["_final_report_json"])
+    aggregated = graph.aggregate_node(state)              # deterministic, no LLM; straight to the report
+    assert aggregated.goto == "report"
+    rep = FinalReport.model_validate_json(aggregated.update["_final_report_json"])
+    # The LLM summarizer is kept (no longer a graph node; the golden check uses it): same grounding.
+    res = graph.generate_executive_summary(rep.target_url, rep.profile.value, rep.pages_crawled, rep.findings,
+                                           [], use_cache=False)
+    return rep.model_copy(update={"executive_summary": res.text, "sources": res.sources})
 
 
 def test_aggregate_keeps_valid_citations_and_strips_hallucinations(monkeypatch):

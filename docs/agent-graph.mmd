@@ -17,13 +17,12 @@ graph TD;
 	plan_probes(plan_probes<hr/><small><em>defer = True</em></small>)
 	run_probes(run_probes)
 	aggregate(aggregate)
-	summarize(summarize)
 	report(report)
 	audit(audit)
 	__end__([<p>__end__</p>]):::last
 	__start__ --> validate;
 	aggregate -.-> audit;
-	aggregate -.-> summarize;
+	aggregate -.-> report;
 	audit -.-> __end__;
 	auth -.-> aggregate;
 	auth -.-> auth_challenge;
@@ -48,7 +47,6 @@ graph TD;
 	run_probes -.-> aggregate;
 	sandbox_check -.-> plan_probes;
 	sast\3arun_sast --> plan_probes;
-	summarize -.-> report;
 	validate -.-> aggregate;
 	validate -.-> audit;
 	validate -.-> choose_scope;
