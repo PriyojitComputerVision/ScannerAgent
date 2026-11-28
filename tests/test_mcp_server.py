@@ -158,6 +158,36 @@ async def test_scan_runs_and_returns_cleaned_results(fake_graph):
     assert inputs["target"]["jwt"] is None and inputs["target"]["auth"] is None
 
 
+async def test_parallel_steps_show_as_running_and_keep_their_own_phase(fake_graph, monkeypatch):
+    """code_source starts three scans in parallel; they finish in any order (dast first here).
+    get_scan lists the ones still running, and each finished step keeps its own phase."""
+    gate = asyncio.Event()
+
+    async def parallel_stream(inputs, config=None, stream_mode=None):
+        fake_graph.inputs = inputs
+        yield {"code_source": {"phase": "code_source_ready",
+                               "scan_branches": ["code_sast", "sandbox_check", "dast"]}}
+        yield {"dast": {"phase": "dast_complete"}}
+        await gate.wait()
+        yield {"code_sast": {"findings": []}, "sandbox_check": {"phase": "sandbox_check_complete"}}
+        yield {"plan_probes": {"phase": "probe_plan_ready"}}
+
+    monkeypatch.setattr(fake_graph, "astream", parallel_stream)
+    started = await _call("start_scan", {"target_url": "https://app.example.com/", "authorization_confirmed": True})
+    mid = None
+    for _ in range(50):
+        mid = await _call("get_scan", {"scan_id": started["scan_id"]})
+        if [s["node"] for s in mid["steps_completed"]] == ["code_source", "dast"]:
+            break
+        await asyncio.sleep(0.02)
+    assert mid["running_steps"] == ["code_sast", "sandbox_check"]  # dast done, the other two still running
+    gate.set()
+    done = await _call("get_scan", {"scan_id": started["scan_id"], "wait_seconds": 5})
+    assert "running_steps" not in done
+    phases = {s["node"]: s["phase"] for s in done["steps_completed"]}
+    assert phases["dast"] == "dast_complete" and phases["sandbox_check"] == "sandbox_check_complete"
+
+
 async def test_one_scan_at_a_time(fake_graph):
     fake_graph.delay = 0.2
     first = await _call("start_scan", {"target_url": "https://app.example.com/", "authorization_confirmed": True})

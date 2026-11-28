@@ -146,6 +146,8 @@ async def test_watch_scan_streams_each_step_then_returns_a_compact_result():
         if max_findings == 0:
             n = next(polls)
             data = {"scan_id": scan_id, "status": "running" if n < 3 else "completed", "steps_completed": steps[:n]}
+            if n == 2:  # the parallel scan steps are still running
+                data["running_steps"] = ["code_sast", "dast"]
         else:
             data = {"scan_id": scan_id, "status": "completed", "target_url": "https://app.example.test/",
                     "profile": "standard", "steps_completed": steps, "severity_counts": {"medium": 2},
@@ -160,8 +162,8 @@ async def test_watch_scan_streams_each_step_then_returns_a_compact_result():
     events: list[dict] = []
     await eng.send("t5", "watch it", events.append)
     progress = [e["text"] for e in events if e["type"] == "progress"]
-    assert progress[:3] == ["validate done (phase validated, 0.3s)", "recon done (phase recon_complete, 4.7s)",
-                            "audit done (phase audited, 16.4s)"]
+    assert progress[:4] == ["validate done (phase validated, 0.3s)", "recon done (phase recon_complete, 4.7s)",
+                            "running in parallel: code_sast, dast", "audit done (phase audited, 16.4s)"]
     assert progress[-1].startswith("scan completed: 2 finding(s)")
     # The user gets the scanner's own result block (exact severities, real file paths) ...
     block = next(e for e in events if e["type"] == "scan_result")["markdown"]

@@ -91,8 +91,9 @@ else's site is an attack on it, whatever the intent.
      continue unauthenticated. No answer within `sign_in.timeout_seconds` = skip. Never ask for
      passwords or MFA seeds in the chat. `start_scan(pause_for_sign_in=false)` never pauses.
    - Each call returns `steps_completed`, so you can tell the user which step it is on (recon,
-     dast, report, ...) instead of going silent. A standard scan of a real site can take
-     several minutes.
+     dast, report, ...) instead of going silent. The code check, the website check and DAST run
+     in parallel, so they finish in any order; while they run, `running_steps` lists the ones
+     not finished yet. A standard scan of a real site can take several minutes.
 
 7. **Report the result** (format below), and offer the HTML or DOCX report from `report_files`.
 
