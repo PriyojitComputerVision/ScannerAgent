@@ -153,6 +153,13 @@ def test_tools_find_issues_and_pip_audit_audits_only_pins(tools_on):
     tools = out["tools"]
     assert {n: tools[n]["status"] for n in code_tools.TOOLS} == {
         "ruff": "ok", "mypy": "ok", "bandit": "ok", "radon": "ok", "semgrep": "not_installed", "pip-audit": "ok"}
+    # an enabled tool that is not installed (semgrep on Windows) is a note, never a red flag
+    note = next(f for f in out["red_flags"] if "semgrep" in f)
+    assert note.startswith("Code SAST tool semgrep could not run: semgrep is not installed")
+    assert "uv tool install semgrep" in note
+    assert "8 local rules" in note and "were not checked" in note
+    from scopeguard import flag_levels
+    assert flag_levels.level(note) == "note" and flag_levels.level("Code upload: " + note) == "note"
     rules = {f["title"].split(":", 1)[0] for f in out["findings"]}
     # the project's own [tool.ruff] select = [] is ignored (--isolated); pytest files are not analysed
     assert {"RUFF_F401", "MYPY_ASSIGNMENT", "BANDIT_B602", "BANDIT_B506", "VULNERABLE_DEPENDENCY"} <= rules
@@ -287,7 +294,7 @@ def test_one_package_pinned_twice_is_audited_in_separate_runs(tools_on):
     files = [text for tool, text, _ in tools_on if tool == "requirements"]
     assert files == ["charset-normalizer==3.4.1\nrequests==2.19.0\n", "charset-normalizer==3.5.3\n"]
     assert out["tools"]["pip-audit"]["status"] == "ok" and out["tools"]["pip-audit"]["pinned"] == 3
-    assert not [f for f in out["red_flags"] if "could not run" in f]
+    assert not [f for f in out["red_flags"] if "pip-audit could not run" in f]
 
 
 def test_pip_audit_errors_are_shown_in_plain_words():
@@ -310,3 +317,23 @@ def test_mypy_notes_only_is_a_clean_run(monkeypatch, tools_on, tmp_path):
     assert run.status == "ok" and not run.findings
     monkeypatch.setattr(code_tools, "_run_python_tool", lambda *a, **k: RunResult(2, "", "src is not a valid name"))
     assert code_tools.run_mypy(ws).status == "failed"
+
+
+def test_every_tool_that_cannot_run_gets_the_same_note(monkeypatch, tools_on):
+    """Not installed (or no Windows build): one wording for every tool, always a note."""
+    from scopeguard import flag_levels
+
+    monkeypatch.setattr(code_tools, "_version", lambda tool: None)  # pretend no tool is installed
+    monkeypatch.setattr(code_tools, "semgrep_binary", lambda: None)
+    import ruff.__main__ as ruff_main
+    monkeypatch.setattr(ruff_main, "find_ruff_bin", lambda: (_ for _ in ()).throw(FileNotFoundError()))
+    out = code_tools.run_for_archive(_zip([("a.py", "x = 1\n"), ("requirements.txt", "a==1\n")]))
+    notes = [f for f in out["red_flags"] if "could not run" in f]
+    assert len(notes) == len(code_tools.TOOLS)
+    for name in code_tools.TOOLS:
+        assert out["tools"][name]["status"] == "not_installed"
+        note = next(f for f in notes if f.startswith(f"Code SAST tool {name} could not run: {name} is not installed ("))
+        assert note.endswith("were not checked.") and flag_levels.level(note) == "note"
+    monkeypatch.setattr(code_tools.os, "name", "nt")
+    assert "no native Windows build" in code_tools._not_installed("semgrep").detail
+    assert "Windows" not in code_tools._not_installed("bandit").detail
