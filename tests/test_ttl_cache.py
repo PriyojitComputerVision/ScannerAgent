@@ -126,7 +126,9 @@ def test_same_scan_request_within_ttl_is_served_instantly(monkeypatch, tmp_path)
             yield {"report": {"phase": "done"}}
 
         async def aget_state(self, config):
-            return SimpleNamespace(values={"report_md_path": str(report), "phase": "done"})
+            return SimpleNamespace(values={"report_md_path": str(report), "phase": "done",
+                                           "crawled_pages": [f"https://example.com/p{i}" for i in range(60)],
+                                           "findings": [{"title": "x"}] * 7})
 
     monkeypatch.setattr(websocket_server, "get_graph", lambda: FakeGraph())
     with TestClient(websocket_server.app) as client:
@@ -142,6 +144,9 @@ def test_same_scan_request_within_ttl_is_served_instantly(monkeypatch, tmp_path)
     assert first["type"] == "complete" and not first.get("cached")
     assert second["cached"] is True and second["cached_from_session"] == "scan-a"
     assert second["session_id"] == "scan-b" and second["report_md"] == "# report"
+    # the totals travel with the reply, also when it is served from the cache (no phase updates then)
+    assert first["pages_crawled"] == second["pages_crawled"] == 60
+    assert first["findings_total"] == second["findings_total"] == 7
     assert not third.get("cached") and not fourth.get("cached")
     assert runs == ["scan-a", "scan-c", "scan-d"]
     assert second["report_url"] == "http://testserver/reports/scan-a/"
