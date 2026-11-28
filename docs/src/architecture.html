@@ -117,7 +117,7 @@
         <div class="tags"><i class="tag you">human</i></div>
 
         <div class="node"><span class="t">code_sast</span><span>your source code, sandboxed</span></div>
-        <div class="mod"><b>code_upload.analyse_for_scan → Kubernetes Job (or the Python process sandbox)</b><span>pre/post guardrails (sandbox + code step); no network; non-Python files marked partial; .exe/.bat/.cmd = warnings, .sh = notes; PEP 8 + ruff lint rules for Python; one report · parallel with sandbox_check and dast</span></div>
+        <div class="mod"><b>code_upload.analyse_for_scan → Kubernetes Job (or the Python process sandbox)</b><span>pre/post guardrails (sandbox + code step); no network; non-Python files marked partial; .exe/.bat/.cmd = warnings, .sh = notes; PEP 8 + ruff lint rules for Python; then code_tools on the host (static, never run): ruff, mypy, bandit, radon, semgrep + pip-audit on pinned requirements (only network: the vulnerability DB); one report · parallel with sandbox_check and dast</span></div>
         <div class="tags"><i class="tag box">sandbox</i></div>
 
         <div class="node"><span class="t">sast</span><span>only if sandbox check is off</span></div>

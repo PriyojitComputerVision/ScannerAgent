@@ -307,7 +307,8 @@ def test_disabled_tools_are_neither_listed_nor_callable():
         "        called = type(exc).__name__\n"
         "    print(json.dumps({'names': names, 'called': called, 'disabled': s.DISABLED_TOOLS}))\n"
         "asyncio.run(main())\n")
-    env = {**os.environ, "MCP_DISABLED_TOOLS": "cancel_scan, verify_audit_log, no_such_tool"}
+    # COLUMNS: the MCP SDK logs through rich when it is installed (pip-audit brings it): no line wrapping
+    env = {**os.environ, "MCP_DISABLED_TOOLS": "cancel_scan, verify_audit_log, no_such_tool", "COLUMNS": "400"}
     out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=120,
                          check=False)
     assert out.returncode == 0, out.stderr[-2000:]

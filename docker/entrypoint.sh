@@ -4,11 +4,11 @@
 # (golden check: 10 DATA_DRIFT, 20 MODEL_DRIFT, 30 DATA_AND_MODEL_DRIFT, 2 NOT_EVALUATED).
 set -eu
 
-echo "== [1/3] pytest"
+echo "== [1/3] pytest (with coverage of src/, pytest-cov)"
 # Unit tests are offline by design: mask real keys so no test can reach Groq/LangSmith.
 GROQ_API_KEY="test-key-not-a-real-credential" \
 LANGSMITH_TRACING=false LANGCHAIN_TRACING_V2=false LANGSMITH_API_KEY="" \
-    uv run pytest
+    uv run pytest --cov --cov-report=term
 
 echo "== [2/3] golden dataset drift check"
 # shellcheck disable=SC2086  # GOLDEN_ARGS is intentionally word-split

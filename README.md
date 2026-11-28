@@ -771,6 +771,37 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
   `low` for the ones that hide bugs; at most 150 per scan so they never crowd out security findings. The
   report gets a **Coding standard (PEP 8)** table with a fix per rule and the PEP 8 link; MCP
   `get_scan.code_sast.coding_standard`, the console and the chatbot show the same summary.
+* **Code tools** in the same code SAST step (`pentest_agent/code_tools.py`), after the sandbox analysis
+  and before the upload is deleted: **ruff** (pyflakes, pycodestyle errors, flake8-bugbear), **mypy**
+  (type errors), **bandit** (Python security issues), **radon** (cyclomatic complexity, rank C or worse),
+  **semgrep** (the local rules in `src/pentest_agent/semgrep/python.yml`) and **pip-audit** (known
+  vulnerabilities in the dependency versions). They need third-party packages that the code sandbox (stock
+  image, no network) cannot hold, so each runs as a child process on the server: the upload is unpacked
+  by an isolated child with the sandbox's archive checks (`scopeguard/tools_extract.py`); the Python
+  tools start under an audit hook (no subprocesses, writes only in their temp folder, no network); every
+  tool has a scrubbed env, a timeout and a memory cap. Static only: nothing from the upload is run,
+  imported or installed, and the project's own tool settings are ignored (ruff `--isolated`, our own mypy
+  config, so project plugins cannot load).
+  - **pip-audit reads only requirements-type files** (`scopeguard/deps.py`): `requirements*.txt` / `*.in`
+    (also in a `requirements/` folder), `constraints*.txt`, `pyproject.toml` (PEP 621, PEP 735 groups,
+    Poetry), `setup.cfg`, `Pipfile`, `Pipfile.lock`, `uv.lock`, `poetry.lock`, `pdm.lock`, `pylock*.toml`.
+    It audits only versions pinned exactly (`==`, lock files) from a `name==version` file the server
+    writes itself, with `--disable-pip --no-deps`, so nothing is resolved or installed. Unpinned entries are
+    listed as "not audited". It is the only tool with network access, and only to the vulnerability
+    database (`PIP_AUDIT_SERVICE`: `osv` = api.osv.dev, `pypi` = pypi.org; public APIs, no account),
+    resolved once, pinned, on port 443. Each vulnerable package version is one `VULNERABLE_DEPENDENCY`
+    finding (A06, medium: pip-audit gives no CVSS score), pointing at the file and line that pins it, with
+    the advisory ids and the lowest version that fixes them all.
+  - **semgrep** cannot share this venv (it pins MCP 1.x) and has no native Windows build: install it on its
+    own (`uv tool install semgrep`, the Docker image does) or set `SEMGREP_BIN`; otherwise it is reported as
+    "not installed".
+  - Tool findings go through the same post-guardrail as the sandbox output (`code_guardrails.post_tools`)
+    and land in the scan's one report, with a **Code tools** table (version, status, findings per tool)
+    and the requirements files pip-audit read. `get_scan.code_sast.tools` / `.dependencies`, the console
+    and the code audit trail (`tools.completed`) show the same. A tool that is missing, fails or times out
+    is listed with its status (and a red flag for failures). Settings: `CODE_TOOLS_ENABLED`, `CODE_TOOLS`,
+    `CODE_TOOLS_TIMEOUT_SECONDS`, `CODE_TOOLS_MEMORY_MB`, `CODE_TOOLS_MAX_FINDINGS`, `PIP_AUDIT_SERVICE`,
+    `SEMGREP_BIN`.
 * **Remediation**: every rule carries a fix, and the IDOR, XSS, DOM, DoS, injection and SSRF rules carry
   structured guidance (`scopeguard/remediation.py`): a summary, ordered steps, a **before/after code fix in
   the language of the affected file** (JS/TS, Python or PHP) and OWASP Cheat Sheet links. Reports have a

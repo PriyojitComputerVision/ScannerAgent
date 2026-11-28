@@ -40,6 +40,9 @@ os.environ["AUTH_CLIENT_SECRET"] = ""
 os.environ["CODE_UPLOAD_DIR"] = str(_TMP_ROOT / "uploads")
 # Code checks and uploads use the process sandbox in tests; never a real cluster.
 os.environ["SANDBOX_BACKEND"] = "process"
+# The code SAST step's tools (ruff, mypy, bandit, radon, semgrep, pip-audit) are off in tests: pip-audit
+# would reach the vulnerability database. tests/test_code_tools.py turns them on with stubs.
+os.environ["CODE_TOOLS_ENABLED"] = "false"
 os.environ.setdefault("SQUID_CONF_PATH", str(_TMP_ROOT / "squid" / "squid.conf"))
 os.environ.setdefault("SQUID_ACL_TARGET_FILE", str(_TMP_ROOT / "squid" / "allowed_target.acl"))
 
