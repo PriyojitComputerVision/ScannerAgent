@@ -78,6 +78,7 @@ def make_watch_scan(get_scan):
         seen = 0
         announced = None  # the sign-in pause already shown to the user
         methods_shown = False
+        parallel_shown = None  # the parallel steps already announced
         while True:
             data = mcp_json(await get_scan.ainvoke({"scan_id": scan_id, "wait_seconds": POLL_SECONDS,
                                                     "max_findings": 0}))
@@ -87,6 +88,10 @@ def make_watch_scan(get_scan):
                 seen += 1
                 write({"text": f"{step.get('node')} done (phase {step.get('phase')}, "
                                f"{step.get('at_seconds')}s)"})
+            running = [str(r) for r in data.get("running_steps") or []]
+            if running and parallel_shown is None:  # code check, website check and DAST run together
+                parallel_shown = running
+                write({"text": "running in parallel: " + ", ".join(running)})
             methods = data.get("login_methods") or {}
             if methods and not methods_shown and methods.get("kind") not in (None, "none"):
                 methods_shown = True

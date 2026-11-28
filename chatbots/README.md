@@ -8,7 +8,9 @@ shows the scanner's verified result and explains it.
   (one conversation per thread, kept in memory).
 - **Tools:** the scanner's MCP server (`<server>/mcp`, Streamable HTTP), loaded with
   `langchain-mcp-adapters`. A small `watch_scan` tool built on the MCP `get_scan` tool
-  streams each finished scan step and returns the result when the scan ends.
+  streams each finished scan step and returns the result when the scan ends. The code check,
+  the website check and DAST run in parallel on the scanner, so their steps arrive in finishing
+  order, after one "running in parallel: ..." line (from `get_scan`'s `running_steps`).
 - **Human in the loop:** `HumanInTheLoopMiddleware` pauses before every `start_scan`,
   `start_demo_scan` and `cancel_scan`. You approve, edit the arguments, or reject.
   Approving `start_scan` *is* the authorization confirmation: the chatbot sets

@@ -20,7 +20,11 @@ then the server runs the LangGraph pipeline `validate → choose_scope → recon
 and streams progress back. After `code_source` the scans that need nothing from each other run **in
 parallel** (LangGraph `Send`; as many at once as the machine has CPUs, 1 to 4): the code check and the website's
 JavaScript check (each its own Kubernetes Job) and DAST (process sandbox). `plan_probes` waits for all of
-them (a deferred join); the LLM steps and the probes they plan stay sequential. `choose_scope` asks you first, before any request, what the scan tests:
+them (a deferred join); the LLM steps and the probes they plan stay sequential. Every client follows
+the parallel steps: `code_source` names the steps it started (`scan_branches`), the console shows them
+running side by side (a finished one never marks a sibling skipped; each shows its own time), MCP / A2A
+`get_scan` lists the unfinished ones as `running_steps` and every step keeps its own phase, and the
+chatbot says which steps run in parallel. `choose_scope` asks you first, before any request, what the scan tests:
 the **website + its source code**, the **website only**, or the **code only** (then the run skips the
 recon layer, `choose_scope → auth → code_source → (code_sast ∥ sandbox_check ∥ dast) → plan_probes → run_probes → aggregate`, and the website steps pass straight on, so nothing is sent to any site; see
 [What to test](#what-to-test-website--code-website-only-code-only-human-in-the-loop)). `auth_challenge` runs only when the target needs a human for SSO or MFA
