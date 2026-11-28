@@ -80,9 +80,8 @@
       <div class="act-label">Act 3 · Testing and writing it up</div>
       <div class="step web"><span class="n">14</span><b>Prober</b><small>run_probes</small><span class="marks"><i class="d-web"></i></span></div>
       <div class="step"><span class="n">15</span><b>Collector</b><small>aggregate</small></div>
-      <div class="step ai"><span class="n">16</span><b>AI writer</b><small>summarize</small><span class="marks"><i class="d-ai"></i></span></div>
-      <div class="step"><span class="n">17</span><b>Publisher</b><small>report</small></div>
-      <div class="step"><span class="n">18</span><b>Notary</b><small>audit</small></div>
+      <div class="step"><span class="n">16</span><b>Publisher</b><small>report</small></div>
+      <div class="step"><span class="n">17</span><b>Notary</b><small>audit</small></div>
 
       <div class="act-label">Act 4 · Your report</div>
       <div class="step endcap" style="grid-column: span 2"><b>Your report + a signed record</b><small>web page · Word · Markdown · JSON · audit log</small></div>
@@ -130,12 +129,10 @@
     <div class="card"><span class="n">14</span><h3>The Prober</h3><code>run_probes</code><span class="chip c-web">visits your website</span>
       <p>Double-checks the plan, then runs those checks with reading requests only. If your site is slow to answer, it waits a little longer each time and tries again (up to 5 times); a check that still gets no answer is listed as not run. A resumed scan doesn't ask the AI again.</p></div>
     <div class="card"><span class="n">15</span><h3>The Collector</h3><code>aggregate</code>
-      <p>Gathers every finding, removes duplicates (one issue on one page counts once, even when several helpers found it; the console's live counts and risk grade count the same way), notes what couldn't be tested, and writes a factual summary where each statement points to its source, like [S1].</p></div>
-    <div class="card"><span class="n">16</span><h3>The AI writer</h3><code>summarize</code><span class="chip c-ai">uses the AI</span>
-      <p>Drafts a friendlier executive summary, kept only if every claim cites a real finding; otherwise the Collector's summary stays. A long finding list is shortened first, keeping every [S1]-style reference.</p></div>
-    <div class="card"><span class="n">17</span><h3>The Publisher</h3><code>report</code>
+      <p>Gathers every finding, removes duplicates (one issue on one page counts once, even when several helpers found it; the console's live counts and risk grade count the same way), notes what couldn't be tested, and writes a factual summary where each statement points to its source, like [S1]; that summary goes straight into the report (no AI rewrite, so the report is ready sooner).</p></div>
+    <div class="card"><span class="n">16</span><h3>The Publisher</h3><code>report</code>
       <p>Produces the report as a web page, a Word document, Markdown and JSON. Everything taken from your site is shown as plain text, so nothing in it can run in your browser.</p></div>
-    <div class="card new"><span class="n">18</span><h3>The Notary</h3><code>audit</code>
+    <div class="card new"><span class="n">17</span><h3>The Notary</h3><code>audit</code>
       <p>Writes one record of the whole scan: who asked, what was scanned, how it ended, whether sign-in worked and a fingerprint of each report file. Records are chained and sealed, so any later edit shows. It never writes passwords, tokens or codes.</p></div>
   </div>
 

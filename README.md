@@ -12,11 +12,11 @@ to package test -> drift check -> server).
 New to ScopeGuard? Start with **[How a scan works, told as a story](docs/scan-story.png)**: every
 agent as a character with one job, from your request to your report, in plain language.
 
-![Architecture: the browser console or a WebSocket client signs in and sends a scan request to the FastAPI server; the request waits in a server-wide queue, then runs the 16-step LangGraph pipeline; the choose_scope, auth_challenge and code_source steps can pause for the operator (what to test: website + code, website only or code only; SSO / MFA sign-in; source code at the SAST step), several steps send in-scope requests to the target, two call the Groq LLM, the report step writes files and the audit step appends a tamper-evident record.](docs/architecture.png)
+![Architecture: the browser console or a WebSocket client signs in and sends a scan request to the FastAPI server; the request waits in a server-wide queue, then runs the 15-step LangGraph pipeline; the choose_scope, auth_challenge and code_source steps can pause for the operator (what to test: website + code, website only or code only; SSO / MFA sign-in; source code at the SAST step), several steps send in-scope requests to the target, one calls the Groq LLM (plan_probes), the report step writes files and the audit step appends a tamper-evident record.](docs/architecture.png)
 
 A client signs in at `/auth/token` and sends the scan request over `/ws`. The request waits in the
 server-wide queue (1 scan runs at a time, up to 50 wait; see [API management](#api-management-queues)),
-then the server runs the LangGraph pipeline `validate → choose_scope → recon → auth → [auth_challenge] → code_source → ( [code_sast] ∥ sandbox_check or sast ∥ dast ) → plan_probes → run_probes → aggregate → summarize → report → audit`
+then the server runs the LangGraph pipeline `validate → choose_scope → recon → auth → [auth_challenge] → code_source → ( [code_sast] ∥ sandbox_check or sast ∥ dast ) → plan_probes → run_probes → aggregate → report → audit`
 and streams progress back. After `code_source` the scans that need nothing from each other run **in
 parallel** (LangGraph `Send`; as many at once as the machine has CPUs, 1 to 4): the code check and the website's
 JavaScript check (each its own Kubernetes Job) and DAST (process sandbox). `plan_probes` waits for all of
@@ -35,7 +35,9 @@ every route, including
 refused and safety-stopped runs, ends in `audit` (see [Audit log](#audit-log)). `sast` runs only when the sandbox check is off (`SANDBOX_CHECK_ENABLED=false`):
 otherwise `sandbox_check` applies the same JavaScript rules inside its Kubernetes Job
 (`scopeguard-job-<session_id>`, deleted after the run). Orange lines mark the only traffic to the target website (in scope only).
-Only `plan_probes` and `summarize` call the LLM, and both have offline fallbacks. Every LLM request
+Only `plan_probes` calls the LLM in a scan, and it has an offline fallback. The report's executive summary is
+the built-in one `aggregate` writes (every statement cited `[Sn]`, no LLM), so the report follows straight after
+`aggregate`; the LLM summarizer (`graph.generate_executive_summary`) is kept for the golden drift check. Every LLM request
 that carries scan data (probe plan, executive summary, run summary, golden judge) fits one chunk,
 `PROBE_CONTEXT_CHUNK_CHARS` (4000 characters, about 1300 tokens: Groq's on-demand tier allows 8000 tokens per
 request, `GROQ_MAX_TOKENS=4096` included, and a smaller chunk uses less of its per-minute budget). Larger data is never cut off; it is **chunked** with LangChain's
@@ -75,8 +77,8 @@ standalone through `python -m scopeguard.cli`.
 Drawn by LangGraph itself (`get_graph(xray=True).draw_mermaid()`). Solid edges are fixed, dashed
 edges are `Command(goto=...)` routes declared in each node's return annotation, and the `sast` box
 is the SAST sub-agent running as a subgraph. `choose_scope`, `code_source` and `auth_challenge` are the human-in-the-loop
-steps (LangGraph `interrupt`); `code_sast` analyses your source code in the sandbox. The LLM steps (`plan_probes`, `summarize`) are their own
-nodes, so their results are checkpointed and a resumed run doesn't call the LLM again. Regenerate
+steps (LangGraph `interrupt`); `code_sast` analyses your source code in the sandbox. The LLM step (`plan_probes`) is its own
+node, so its result is checkpointed and a resumed run doesn't call the LLM again. Regenerate
 after changing the graph with `uv run python scripts/draw_graph.py` (writes
 [docs/agent-graph.mmd](docs/agent-graph.mmd) and the PNG; rendered locally, nothing is sent to a
 diagram service).
@@ -113,7 +115,7 @@ uv run scopeguard-demo        # same, but always loopback-only and on a free por
 ```
 
 The console is served by the agent server itself at `http://127.0.0.1:8765/`: a live view of the
-16-step pipeline, an event stream, a findings radar, severity mix and risk grade, the cited executive
+15-step pipeline, an event stream, a findings radar, severity mix and risk grade, the cited executive
 summary (each `[Sn]` jumps to its finding), attack coverage, a findings explorer and all saved
 reports with html/docx/md/json downloads, and the **agent integrations** (MCP and A2A endpoints,
 see below). Admins also see the **audit trail** (live chain check) and
@@ -631,7 +633,7 @@ what the scan tests:
 | --- | --- | --- |
 | `website_and_code` | every website step, then the code at the SAST step (`code_source` → `code_sast`) | yes |
 | `website` | every website step; no code step | yes |
-| `code` | every step but `recon`: `choose_scope → auth → code_source → (code_sast ∥ sandbox_check ∥ dast) → plan_probes → run_probes → aggregate → summarize → report → audit`; auth, sandbox_check, dast and the probes pass straight on (phase `<step>_code_only`) | **none**: no website is needed; a URL, if given, only labels the report |
+| `code` | every step but `recon`: `choose_scope → auth → code_source → (code_sast ∥ sandbox_check ∥ dast) → plan_probes → run_probes → aggregate → report → audit`; auth, sandbox_check, dast and the probes pass straight on (phase `<step>_code_only`) | **none**: no website is needed; a URL, if given, only labels the report |
 
 * **Ask me (human in the loop).** With `"ask_scan_scope": true` the run pauses (LangGraph `interrupt`,
   checkpointed) and the server sends `input_required` with `request.type == "scan_scope"`, the offered

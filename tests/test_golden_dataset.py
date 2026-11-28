@@ -579,3 +579,22 @@ def test_uncited_high_finding_is_a_repair_issue():
     sources = {"S1": {"severity": "high", "title": "SQLi"}, "S2": {"severity": "low", "title": "hdr"}}
     assert graph.severity_issues("A low finding is a header [S2].", sources) == ["S1 is high but not cited"]
     assert graph.severity_issues("A high finding is SQLi [S1]. A low one [S2].", sources) == []
+
+
+
+def test_golden_judges_the_llm_summarizer_directly_not_a_graph_node(monkeypatch):
+    """The graph has no summarize node (the report keeps aggregate's cited summary), so the golden
+    check calls the kept LLM summarizer itself: a fresh answer, never the cache."""
+    from pentest_agent import graph
+
+    assert "summarize" not in graph.NODE_NAMES
+    seen = {}
+    good = _summarizer(GOOD_TWO)
+
+    def fake_summarizer(*, use_cache=True, **kw):
+        seen.update(kw, use_cache=use_cache)
+        return good(**kw)
+
+    monkeypatch.setattr(graph, "generate_executive_summary", fake_summarizer)
+    golden.evaluate_case(_case("static-two-findings"), DATASET.thresholds, use_llm=True, judge=_good_judge())
+    assert seen["use_cache"] is False and seen["target_url"]
