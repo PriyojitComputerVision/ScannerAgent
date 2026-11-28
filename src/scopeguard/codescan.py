@@ -17,6 +17,7 @@ backend folder + staged website text (:func:`scan_dirs`, which packs them into a
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import io
 import json
@@ -102,10 +103,8 @@ def scan_archive(data: bytes, *, backend: str = "kubernetes", k8s_config: k8s.K8
             attempt.setdefault("job", k8s.job_name(session_id))
         state.attempts.append(attempt)
         if attempt_cb:
-            try:
+            with contextlib.suppress(Exception):  # a broken listener must not break the scan
                 attempt_cb(dict(attempt), dict(sandbox))
-            except Exception:  # noqa: BLE001, S110 - a broken listener must not break the scan
-                pass
 
     content = archive.archive_content_bytes(data)
     plan = [memory_multiplier, retry_multiplier]

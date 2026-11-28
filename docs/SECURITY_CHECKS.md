@@ -253,7 +253,7 @@ Run in the graph's `code_sast` step after the sandbox analysis, on the same uplo
 | bandit | Python security issues | `BANDIT_<test id>` | bandit's own (high / medium / low) | defaults, from a neutral working folder |
 | radon | cyclomatic complexity, rank C or worse | `RADON_COMPLEXITY` | info (C), low (D-F) | `cc -n C` |
 | semgrep | the local rules in `src/pentest_agent/semgrep/python.yml` | `SEMGREP_<rule>` | ERROR high, WARNING medium | `--config <local file> --metrics=off`; optional install |
-| pip-audit | known vulnerabilities (OSV or PyPI) in exactly pinned versions | `VULNERABLE_DEPENDENCY` (one per package version) | medium (pip-audit gives no CVSS) | `--disable-pip --no-deps`, our own `name==version` file; `PIP_AUDIT_SERVICE` |
+| pip-audit | known vulnerabilities (OSV or PyPI) in exactly pinned versions | `VULNERABLE_DEPENDENCY` (one per package version) | medium (pip-audit gives no CVSS) | `--disable-pip --no-deps`, our own `name==version` files (a package pinned at two versions: one run per batch); `PIP_AUDIT_SERVICE` |
 
 Requirements-type files (`scopeguard.deps.is_requirements_file`): `requirements*.txt` / `*.in` (also in a `requirements/` folder), `constraints*.txt`, `pyproject.toml` (PEP 621, PEP 735 groups, Poetry), `setup.cfg`, `Pipfile`, `Pipfile.lock`, `uv.lock`, `poetry.lock`, `pdm.lock`, `pylock*.toml`. Only entries pinned to one version (`==` / `===`, Poetry's bare version, lock files) are audited; the rest is listed as not audited. Packages from git, a path or a URL and the project itself are skipped.
 

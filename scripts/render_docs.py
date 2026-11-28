@@ -17,7 +17,7 @@ import base64
 import json
 import shutil
 import socket
-import subprocess
+import subprocess  # nosec B404 - fixed argument lists only, never a shell
 import sys
 import tempfile
 import time
@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(f"Unknown diagram(s) {names}; choose from: {', '.join(Path(p).stem for p in PAGES)}")
     port = _free_port()
     profile = tempfile.mkdtemp(prefix="render-docs-")
-    proc = subprocess.Popen([_browser(), "--headless=new", "--disable-gpu", "--hide-scrollbars",
+    proc = subprocess.Popen([_browser(), "--headless=new", "--disable-gpu", "--hide-scrollbars",  # nosec B603 - a local browser binary, fixed flags
                              f"--remote-debugging-port={port}", "--remote-allow-origins=*",
                              f"--user-data-dir={profile}", "about:blank"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -98,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         deadline = time.time() + 20
         while True:
             try:
-                tabs = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=2))
+                tabs = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=2))  # nosec B310 - fixed http://127.0.0.1 URL
                 page = next(t for t in tabs if t.get("type") == "page")
                 break
             except Exception:  # noqa: BLE001 - browser still starting

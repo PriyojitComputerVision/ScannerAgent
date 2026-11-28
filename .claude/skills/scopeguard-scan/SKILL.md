@@ -234,7 +234,9 @@ the admin role (`scan:source`) and covers **Python projects only for now** (tell
    part clean. pip-audit audits exact pins only: unpinned dependencies (`code_sast.tools.pip-audit.unpinned`)
    were not checked; suggest pinning or a lock file.
    Not analysed (say so if the user asks why something was not reported): whatever the project's
-   `.gitignore` excludes, pytest files (`test_*.py`, `*_test.py`, `conftest.py`), `.claude/` and cache /
+   `.gitignore` excludes, pytest files (`test_*.py`, `*_test.py`, `conftest.py`), semgrep rule files
+   (YAML `rules:` with `id` / `languages` / `pattern`: the patterns are vulnerable code on purpose),
+   `.claude/` and cache /
    vendored folders, documents (`.md`, `.txt`, `.pdf`, `.docx`, `.mmd`, ...), images and model weights
    (`.pkl`, `.pt`, `.onnx`, `.h5`, `.keras`, `.tflite`, `.ckpt`, ...; never opened). A bundled zip whose
    files are all in the upload as source is not reported as `NESTED_ARCHIVE`. An `upload_code` refusal

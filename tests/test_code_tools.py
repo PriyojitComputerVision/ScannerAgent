@@ -15,7 +15,7 @@ import pytest
 
 from pentest_agent import code_guardrails, code_tools, code_upload, rbac
 from pentest_agent.config import settings
-from scopeguard import archive, deps
+from scopeguard import archive, deps, flag_levels
 from scopeguard.limits import RunResult, sandbox_python
 
 _ADMIN = rbac.Principal(sub="op", roles=["admin"])
@@ -177,7 +177,9 @@ def test_disabled_tools_and_unreachable_database(monkeypatch, tools_on):
     out = code_tools.run_for_archive(_zip([("requirements.txt", "a==1\n")]))
     assert out["tools"]["ruff"]["status"] == "disabled" and out["tools"]["pip-audit"]["status"] == "failed"
     assert "unreachable" in out["tools"]["pip-audit"]["detail"]
-    assert any("pip-audit failed" in f for f in out["red_flags"])
+    flag = next(f for f in out["red_flags"] if "pip-audit" in f)
+    assert "could not run" in flag and flag_levels.level(flag) == "note"
+    assert flag_levels.level("Code upload: " + flag) == "note"  # as execute_upload_analysis prefixes it
     monkeypatch.setattr(settings, "code_tools_enabled", False)
     assert code_tools.run_for_archive(b"")["enabled"] is False
 
@@ -192,7 +194,10 @@ def test_a_crashed_tool_never_reads_as_clean(monkeypatch, tools_on):
 def test_refused_archive_runs_no_tool(tools_on):
     out = code_tools.run_for_archive(b"not a zip")
     assert all(out["tools"][n]["status"] == "failed" for n in code_tools.enabled_tools())
-    assert any("could not be unpacked" in f for f in out["red_flags"])
+    flag = next(f for f in out["red_flags"] if "could not be unpacked" in f)
+    assert flag_levels.level(flag) == "note"
+    # a vulnerable dependency stays a warning: that is a result, not a tool that could not run
+    assert flag_levels.level("pip-audit: 1 pinned dependency has known vulnerabilities.") == "warn"
 
 
 # ------------------------------------------------------------------ post-guardrail
@@ -251,3 +256,57 @@ def test_semgrep_rules_file_is_valid_and_categories_are_known():
     cats = {line.split('category: "', 1)[1].split('"', 1)[0] for line in text.splitlines() if 'category: "' in line}
     assert cats and cats <= code_tools._KNOWN_CATEGORIES
     assert os.path.basename(code_tools.SEMGREP_RULES) == "python.yml"
+
+
+def test_semgrep_rules_files_are_not_analysed_as_code(tmp_path):
+    """A semgrep rules file holds vulnerable code as its patterns (jwt.decode(verify=False), debug=True,
+    SQL f-strings): data, not code. The SAST skips it with a note; other YAML is still analysed."""
+    from scopeguard import codecheck
+
+    assert codecheck.is_detection_rules("python.yml", code_tools.SEMGREP_RULES.read_text(encoding="utf-8"))
+    (tmp_path / "rules").mkdir()
+    (tmp_path / "rules" / "python.yml").write_text(code_tools.SEMGREP_RULES.read_text(encoding="utf-8"),
+                                                   encoding="utf-8")
+    (tmp_path / "config.yml").write_text("app:\n  debug: true\n  verify: false\nrules:\n  - allow\n",
+                                         encoding="utf-8")
+    res = codecheck.Results()
+    codecheck.scan_source(res, str(tmp_path))
+    assert not [f for f in res.findings if "rules/python.yml" in f["affected_url"]]
+    assert any(n["kind"] == "rules" and "rules/python.yml" in n["detail"] for n in res.notices)
+    assert not codecheck.is_detection_rules("config.yml", (tmp_path / "config.yml").read_text(encoding="utf-8"))
+    assert not codecheck.is_detection_rules("rules.py", "rules:\n- id: x\n  languages: [python]\n  pattern: x\n")
+
+
+def test_one_package_pinned_twice_is_audited_in_separate_runs(tools_on):
+    """requirements.txt and uv.lock pin different versions: pip-audit refuses one file naming a package
+    twice ("duplicate requirements"), so each run names every package once and the results are merged."""
+    assert code_tools.pin_batches([("a", "1"), ("a", "2"), ("b", "1")]) == [[("a", "1"), ("b", "1")], [("a", "2")]]
+    data = _zip([("requirements.txt", "requests==2.19.0\ncharset-normalizer==3.4.1\n"),
+                 ("uv.lock", 'version = 1\n[[package]]\nname = "charset-normalizer"\nversion = "3.5.3"\n')])
+    out = code_tools.run_for_archive(data)
+    files = [text for tool, text, _ in tools_on if tool == "requirements"]
+    assert files == ["charset-normalizer==3.4.1\nrequests==2.19.0\n", "charset-normalizer==3.5.3\n"]
+    assert out["tools"]["pip-audit"]["status"] == "ok" and out["tools"]["pip-audit"]["pinned"] == 3
+    assert not [f for f in out["red_flags"] if "could not run" in f]
+
+
+def test_pip_audit_errors_are_shown_in_plain_words():
+    dup = RunResult(1, "", "WARNING:pip_audit._cli:--no-deps is supported\nERROR:pip_audit._cli:package x has "
+                           "duplicate requirements: x==2 (from RequirementLine(line_number=13, line='x==2', "
+                           "filename=WindowsPath('C:/t/r.txt')))")
+    assert code_tools.pip_audit_error(dup) == "pip-audit error: package x has duplicate requirements: x==2"
+    net = RunResult(1, "", "requests.exceptions.ConnectionError: Max retries exceeded with url: /v1/query")
+    assert code_tools.pip_audit_error(net).startswith("vulnerability database (osv) not reachable")
+
+
+def test_mypy_notes_only_is_a_clean_run(monkeypatch, tools_on, tmp_path):
+    """mypy exits 1 when it printed only notes (annotation-unchecked): that is a clean run, not a failure."""
+    note = json.dumps({"file": "src/a.py", "line": 1, "message": "By default the bodies of untyped functions are "
+                       "not checked", "code": "annotation-unchecked", "severity": "note"})
+    ws = code_tools.Workspace(tmp_path, tmp_path / "src", 1, {})
+    (tmp_path / "tmp").mkdir()
+    monkeypatch.setattr(code_tools, "_run_python_tool", lambda *a, **k: RunResult(1, note + "\n", ""))
+    run = code_tools.run_mypy(ws)
+    assert run.status == "ok" and not run.findings
+    monkeypatch.setattr(code_tools, "_run_python_tool", lambda *a, **k: RunResult(2, "", "src is not a valid name"))
+    assert code_tools.run_mypy(ws).status == "failed"

@@ -160,7 +160,7 @@ def sources_prompt_block(sources: dict[str, dict], limit: int = 60) -> str:
     counts: dict[str, int] = {}
     for s in sources.values():
         counts[s["severity"]] = counts.get(s["severity"], 0) + 1
-    lines = []
+    lines: list[str] = []
     current = None
     for sid, s in list(sources.items())[:limit]:
         if s["severity"] != current:

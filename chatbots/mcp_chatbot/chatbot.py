@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import io
 import sys
 
 from scopeguard_common import (
@@ -100,9 +101,10 @@ def make_watch_scan(get_scan):
             methods = data.get("login_methods") or {}
             if methods and not methods_shown and methods.get("kind") not in (None, "none"):
                 methods_shown = True
-                kinds = {"password": "a password form only", "sso": "SSO only",
-                         "password_and_sso": "both a password form and SSO"}
-                write({"text": f"sign-in found: {kinds.get(methods.get('kind'), methods.get('kind'))}"
+                kinds = {"password": "a password form only", "sso": "SSO only",  # nosec B105 - UI labels, not secrets
+                         "password_and_sso": "both a password form and SSO"}  # nosec B105 - UI label
+                kind = str(methods.get("kind"))
+                write({"text": f"sign-in found: {kinds.get(kind, kind)}"
                                + (f" (identity provider {methods['idp_host']})" if methods.get("idp_host") else "")})
             if data.get("status") == "input_required":
                 # SSO / MFA: the UI shows a sign-in card (open the page, enter a code or a session
@@ -199,8 +201,9 @@ async def make_engine(base: str, roles: list[str], disabled: set[str] | None = N
 
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
-        with contextlib.suppress(AttributeError, ValueError):
-            stream.reconfigure(encoding="utf-8", errors="replace")
+        if isinstance(stream, io.TextIOWrapper):
+            with contextlib.suppress(ValueError):
+                stream.reconfigure(encoding="utf-8", errors="replace")
     env = load_settings().env  # defaults: this folder's .env, then the repo's .env
     ap = argparse.ArgumentParser(description=NAME)
     ap.add_argument("--url", default=env.get("SCOPEGUARD_URL") or "http://127.0.0.1:8765",

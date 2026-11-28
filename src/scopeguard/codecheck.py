@@ -20,6 +20,7 @@ can raise red flags.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import html.parser
 import io
 import json
@@ -28,7 +29,7 @@ import re
 import sys
 import tokenize
 import urllib.parse as up
-from typing import ClassVar
+from typing import Any, ClassVar
 
 # codestyle: PEP 8 coding standard (stdlib; imported here, so before the sandbox audit hook)
 from scopeguard import codestyle, gitignore
@@ -579,13 +580,13 @@ class Results:
         self.findings: list[dict] = []
         self.refs: dict[tuple, dict] = {}
         self.notices: list[dict] = []
-        self.stats = {"source_files": 0, "source_bytes": 0, "site_files": 0, "skipped_files": 0,
+        self.stats: dict[str, Any] = {"source_files": 0, "source_bytes": 0, "site_files": 0, "skipped_files": 0,
                       "symlinks_outside": 0}
         self._seen: set[tuple] = set()
         self.style_findings = 0  # coding-standard findings, capped at codestyle.MAX_STYLE_FINDINGS
         # Post-guardrail (verify_findings): line-rule findings are re-checked against the source.
         self._line_rule: set[int] = set()
-        self.verification = {"checked": 0, "verified": 0, "dropped": 0, "reasons": {}}
+        self.verification: dict[str, Any] = {"checked": 0, "verified": 0, "dropped": 0, "reasons": {}}
         self.stats["verification"] = self.verification
 
     def add(self, *, source, rid, severity, category, title, description, where, line_no, evidence,
@@ -815,6 +816,24 @@ def verify_findings(res: Results, start: int, text: str, ext: str) -> None:
     res.findings[start:] = kept
 
 
+def _backend_match(rid: str, rx: re.Pattern | None, line: str, no: int, code_view: list[str] | None,
+                   literal: list[list[tuple[int, int]]] | None) -> re.Match | None:
+    """One backend rule on one line: Python call rules on the code view (strings / comments
+    blanked), value rules without quoted text, other rules only outside string literals."""
+    if rx is None:  # route- / file-level rules have no line regex (filtered out by the caller)
+        return None
+    target = line
+    if code_view is not None and rid in _PY_CODE_ONLY_RULES:
+        target = code_view[no - 1][:5000]
+    elif rid in _VALUE_RULES:
+        target = _without_quoted(line)
+    if literal is not None and rid not in _STRING_CONTENT_RULES and rid not in _PY_CODE_ONLY_RULES:
+        m = _code_match(rx, target, literal[no - 1])  # text in a string / comment is not code
+    else:
+        m = rx.search(target)
+    return _real_secret(rid, m)
+
+
 def _scan_lines(res: Results, text: str, *, source: str, where: str, ext: str, js: bool,
                 backend: bool, name: str = "") -> None:
     base = name.lower()
@@ -825,51 +844,28 @@ def _scan_lines(res: Results, text: str, *, source: str, where: str, ext: str, j
                       and not _JQUERY_REF.search(text[:2_000_000]))
     literal = python_literal_spans(text) if code_view is not None else None
     doc_code = _fenced_lines(text) if ext in DOC_EXT else None
+    # The rules that apply to this file, chosen once (not per line).
+    backend_rules = [r for r in BACKEND_RULES
+                     if r[1] is not None and (r[7] is None or ext in r[7] or base in r[7])
+                     and not (own_dollar and r[0] == "XSS_JQUERY_HTML")] if backend else []
+    # JavaScript files get every JS rule; any other text only the secret rules.
+    js_rules = [r for r in JS_RULES if js or r[0] in _SECRET_RULE_IDS]
     for no, line in enumerate(text.splitlines(), 1):
-        if len(line) > 5000:
-            line = line[:5000]
-        if backend:
-            for rid, rx, sev, cat, desc, cwe, rec, langs in BACKEND_RULES:
-                if rx is None or (langs is not None and ext not in langs and base not in langs):
-                    continue
-                if doc_code is not None and no not in doc_code and rid not in _SECRET_RULE_IDS:
-                    continue  # Markdown prose is not code
-                if own_dollar and rid == "XSS_JQUERY_HTML":
-                    continue
-                target = line
-                if code_view is not None and rid in _PY_CODE_ONLY_RULES:
-                    target = code_view[no - 1][:5000]
-                elif rid in _VALUE_RULES:
-                    target = _without_quoted(line)
-                if literal is not None and rid not in _STRING_CONTENT_RULES and rid not in _PY_CODE_ONLY_RULES:
-                    m = _code_match(rx, target, literal[no - 1])  # text in a string / comment is not code
-                else:
-                    m = rx.search(target)
-                m = _real_secret(rid, m)
-                if m:
-                    res.add(source=source, rid=rid, line_rule=True, severity=sev, category=cat, title=f"{rid}: {desc}",
-                            description=desc, where=where, line_no=no, evidence=_excerpt(line, rid, m),
-                            cwe=cwe, recommendation=rec)
-        if js or not backend:
-            for rid, rx, sev, cat, desc, cwe in JS_RULES:
-                if not js and rid not in _SECRET_RULE_IDS:
-                    continue  # non-JS text: only secret rules
-                if rid == "JS_HTTP_URL" and not js:
-                    continue
-                m = _real_secret(rid, rx.search(line))
-                if m:
-                    res.add(source=source, rid=rid, line_rule=True, severity=sev, category=cat, title=f"{rid}: {desc}",
-                            description=desc, where=where, line_no=no, evidence=_excerpt(line, rid, m),
-                            cwe=cwe, recommendation=JS_RECOMMENDATIONS.get(rid, ""))
-        elif backend:
-            for rid, rx, sev, cat, desc, cwe in JS_RULES:
-                if rid in _SECRET_RULE_IDS:
-                    m = _real_secret(rid, rx.search(line))
-                    if m:
-                        res.add(source=source, rid=rid, line_rule=True, severity=sev, category=cat, title=f"{rid}: {desc}",
-                                description=desc, where=where, line_no=no,
-                                evidence=_excerpt(line, rid, m), cwe=cwe,
-                                recommendation=JS_RECOMMENDATIONS.get(rid, ""))
+        line = line[:5000]
+        for rid, rx, sev, cat, desc, cwe, rec, _langs in backend_rules:
+            if doc_code is not None and no not in doc_code and rid not in _SECRET_RULE_IDS:
+                continue  # Markdown prose is not code
+            m = _backend_match(rid, rx, line, no, code_view, literal)
+            if m:
+                res.add(source=source, rid=rid, line_rule=True, severity=sev, category=cat, title=f"{rid}: {desc}",
+                        description=desc, where=where, line_no=no, evidence=_excerpt(line, rid, m),
+                        cwe=cwe, recommendation=rec)
+        for rid, rx, sev, cat, desc, cwe in js_rules:
+            m = _real_secret(rid, rx.search(line))
+            if m:
+                res.add(source=source, rid=rid, line_rule=True, severity=sev, category=cat, title=f"{rid}: {desc}",
+                        description=desc, where=where, line_no=no, evidence=_excerpt(line, rid, m),
+                        cwe=cwe, recommendation=JS_RECOMMENDATIONS.get(rid, ""))
 
 
 # --------------------------------------------------------------------------- checkpoints
@@ -924,6 +920,39 @@ class Progress:
 
 
 # --------------------------------------------------------------------------- access control
+def _route_starts(lines: list[str], literal: list[list[tuple[int, int]]] | None) -> list[tuple[int, str, str]]:
+    """(line index, path, method) of every route definition outside string literals / comments."""
+    starts = []
+    for i, line in enumerate(lines):
+        for rx in _ROUTE_PATTERNS:
+            m = rx.search(line[:2000]) if literal is None else _code_match(rx, line[:2000], literal[i])
+            if m:
+                starts.append((i, m.group("p"), m.group("m")))
+                break
+    return starts
+
+
+def _idor_route(res: Results, lines: list[str], i: int, end: int, path: str, window: str, where: str) -> None:
+    """A route with a path id that loads an object without any visible ownership check."""
+    params = [next(g for g in m.groups() if g) for m in _PATH_PARAM.finditer(path)]
+    id_params = [p for p in params if p.lower() in ("id", "pk", "uuid", "slug") or p.lower().endswith(("id", "_id"))]
+    if not id_params or _OWNERSHIP.search(window):
+        return
+    uses = [j for j in range(i, end) if _LOOKUP.search(lines[j][:2000])
+            and any(re.search(rf"\b{re.escape(p)}\b", lines[j][:2000]) for p in id_params)]
+    if not uses:
+        return
+    j = uses[0]
+    res.add(source="sandbox_source", rid="IDOR_ROUTE_NO_OWNERSHIP_CHECK", severity="medium",
+            category=A01, title="IDOR_ROUTE_NO_OWNERSHIP_CHECK: route loads an object by id "
+            "without a visible ownership check",
+            description=f"Route {path[:120]} looks up the object by {', '.join(id_params)} and no "
+                        "ownership/permission check was found in the handler.",
+            where=where, line_no=j + 1, evidence=strip_hyperlinks(lines[j].strip()[:300]) or "",
+            cwe="CWE-639", recommendation=RECOMMENDATIONS["IDOR_ROUTE_NO_OWNERSHIP_CHECK"],
+            confidence="low")
+
+
 def scan_routes(res: Results, text: str, *, where: str, ext: str) -> None:
     """Route-level checks no single line shows: a route with a path id that loads an
     object without any visible ownership/permission check (IDOR), and admin routes
@@ -932,47 +961,26 @@ def scan_routes(res: Results, text: str, *, where: str, ext: str) -> None:
         return
     lines = text.splitlines()
     # A route written inside a Python string or comment (an example, a fixture) is text, not a route.
-    literal = python_literal_spans(text) if ext in PY_EXT else None
-    starts = []
-    for i, line in enumerate(lines):
-        for rx in _ROUTE_PATTERNS:
-            m = rx.search(line[:2000]) if literal is None else _code_match(rx, line[:2000], literal[i])
-            if m:
-                starts.append((i, m.group("p"), m.group("m")))
-                break
+    starts = _route_starts(lines, python_literal_spans(text) if ext in PY_EXT else None)
     for k, (i, path, _method) in enumerate(starts):
         end = min(starts[k + 1][0] if k + 1 < len(starts) else len(lines), i + 60)
         lo = max(0, i - 3)  # decorators / middleware just above the route line
         window = "\n".join(x[:2000] for x in lines[lo:end])
-        params = [next(g for g in m.groups() if g) for m in _PATH_PARAM.finditer(path)]
-        id_params = [p for p in params
-                     if p.lower() in ("id", "pk", "uuid", "slug") or p.lower().endswith(("id", "_id"))]
-        if id_params and not _OWNERSHIP.search(window):
-            uses = [j for j in range(i, end) if _LOOKUP.search(lines[j][:2000])
-                    and any(re.search(rf"\b{re.escape(p)}\b", lines[j][:2000]) for p in id_params)]
-            if uses:
-                j = uses[0]
-                res.add(source="sandbox_source", rid="IDOR_ROUTE_NO_OWNERSHIP_CHECK", severity="medium",
-                        category=A01, title="IDOR_ROUTE_NO_OWNERSHIP_CHECK: route loads an object by id "
-                        "without a visible ownership check",
-                        description=f"Route {path[:120]} looks up the object by {', '.join(id_params)} and no "
-                                    "ownership/permission check was found in the handler.",
-                        where=where, line_no=j + 1, evidence=strip_hyperlinks(lines[j].strip()[:300]) or "",
-                        cwe="CWE-639", recommendation=RECOMMENDATIONS["IDOR_ROUTE_NO_OWNERSHIP_CHECK"],
-                        confidence="low")
+        _idor_route(res, lines, i, end, path, window, where)
+        evidence = strip_hyperlinks(lines[i].strip()[:300]) or ""
         if (_method or "").lower() in ("post", "route", "all", "api_route", "request", "any") and \
                 _AUTH_PATHS.search(path) and not _RATE_LIMIT.search(window) and not _RATE_LIMIT.search(text[:4000]):
             res.add(source="sandbox_source", rid="LOGIN_ROUTE_NO_RATE_LIMIT", severity="medium", category=A07,
                     title="LOGIN_ROUTE_NO_RATE_LIMIT: login/reset route without visible rate limiting",
                     description=f"Route {path[:120]} handles credentials or one-time codes and no rate limiter "
                                 "was found near it or in the file.",
-                    where=where, line_no=i + 1, evidence=strip_hyperlinks(lines[i].strip()[:300]) or "",
+                    where=where, line_no=i + 1, evidence=evidence,
                     cwe="CWE-307", recommendation=RECOMMENDATIONS["LOGIN_ROUTE_NO_RATE_LIMIT"], confidence="low")
         if "admin" in path.lower() and not _AUTH.search(window):
             res.add(source="sandbox_source", rid="ADMIN_ROUTE_NO_AUTH", severity="medium", category=A01,
                     title="ADMIN_ROUTE_NO_AUTH: admin route without a visible auth check",
                     description=f"Route {path[:120]} has no authentication or role check near its handler.",
-                    where=where, line_no=i + 1, evidence=strip_hyperlinks(lines[i].strip()[:300]) or "",
+                    where=where, line_no=i + 1, evidence=evidence,
                     cwe="CWE-862", recommendation=RECOMMENDATIONS["ADMIN_ROUTE_NO_AUTH"], confidence="low")
 
 
@@ -1037,6 +1045,21 @@ def is_not_analysed(name: str) -> bool:
     return is_pytest_file(name) or name.lower().endswith(NOT_ANALYSED_EXT) or is_model_weight(name)
 
 
+_RULES_TOP = re.compile(r"(?m)^rules:\s*(?:#.*)?$")
+_RULE_KEYS = (re.compile(r"(?m)^\s*-?\s*id:\s*\S"), re.compile(r"(?m)^\s*languages:\s*\S"),
+              re.compile(r"(?m)^\s*-?\s*pattern(?:s|-either|-regex|-inside|-not)?:"))
+
+
+def is_detection_rules(name: str, text: str) -> bool:
+    """A semgrep rules file (YAML: a top-level ``rules:`` list whose entries have ``id``,
+    ``languages`` and a ``pattern*`` key). Its patterns are vulnerable code on purpose (that is
+    what the rules look for), so the line rules would report every pattern as a finding."""
+    if not name.lower().endswith((".yml", ".yaml")):
+        return False
+    head = text[:200_000]
+    return bool(_RULES_TOP.search(head)) and all(rx.search(head) for rx in _RULE_KEYS)
+
+
 def is_pytest_file(name: str) -> bool:
     """A pytest test module or fixture file (pytest's discovery names: test_*.py, *_test.py,
     conftest.py). Not part of the SAST: tests hold deliberately vulnerable snippets."""
@@ -1092,6 +1115,12 @@ def scan_source(res: Results, root: str, progress: Progress | None = None) -> No
                 continue
             if text is None:
                 res.stats["skipped_files"] += 1
+                progress.file_done(res, key)
+                continue
+            if is_detection_rules(name, text):  # vulnerable code as rule patterns: data, not code
+                res.stats["skipped_files"] += 1
+                res.notice("rules", f"{rel}: semgrep detection rules (vulnerable code is the pattern, not "
+                                    "code that runs); not analysed")
                 progress.file_done(res, key)
                 continue
             res.stats["source_files"] += 1
@@ -1237,13 +1266,13 @@ def _scan_site_file(res: Results, path: str, rel: str, url: str, kind: str, allo
             _record_ref(res, "fetch", m.group(1), url, allowed)
     _scan_lines(res, text, source="sandbox_site", where=where, ext=".html", js=False, backend=False)
     visible = " ".join(parser.text)
-    m = PROMPT_INJECTION.search(visible)
-    if m:
+    hit = PROMPT_INJECTION.search(visible)
+    if hit:
         res.add(source="sandbox_site", rid="PROMPT_INJECTION", severity="medium", category=OTHER,
                 title="PROMPT_INJECTION: page text tries to instruct automated agents",
                 description="Page content contains instructions aimed at an AI agent or scanner. "
                             "It was treated as data and not followed.",
-                where=where, line_no=0, evidence=strip_hyperlinks(m.group(0))[:200] or "", cwe="CWE-1427",
+                where=where, line_no=0, evidence=(strip_hyperlinks(hit.group(0)) or "")[:200], cwe="CWE-1427",
                 recommendation="Review where this text comes from (user content, compromised page).",
                 confidence="low")
 
@@ -1252,20 +1281,18 @@ def _scan_site_file(res: Results, path: str, rel: str, url: str, kind: str, allo
 def probe_egress(out_dir_hint: str) -> None:
     """Deliberately try forbidden actions (tests): each must be blocked and recorded."""
     import socket
-    import subprocess
+    import subprocess  # nosec B404 - only to prove the sandbox blocks it (probe_egress)
 
     attempts = [
         lambda: socket.getaddrinfo("example.com", 443),
         lambda: socket.create_connection(("93.184.216.34", 80), timeout=2),
-        lambda: subprocess.run(["echo", "hi"], check=False),
+        lambda: subprocess.run(["echo", "hi"], check=False),  # nosec B603 B607 - must be blocked by the sandbox
         lambda: open(os.path.join(out_dir_hint, "written.txt"), "w"),  # noqa: SIM115
         lambda: open(os.path.join(os.sep, "etc", "hostname")).read(),  # noqa: SIM115
     ]
     for attempt in attempts:
-        try:
+        with contextlib.suppress(Exception):  # every attempt is expected to fail (blocked by the guard)
             attempt()
-        except Exception:  # noqa: BLE001, S110 - every attempt is expected to fail
-            pass
 
 
 # --------------------------------------------------------------------------- recommendations
@@ -1299,7 +1326,7 @@ def build_recommendations(findings: list[dict]) -> list[dict]:
         if f.get("affected_url"):
             path, line = split_location(f["affected_url"])
             places[rid].add((path, line or 0))
-        if _SEV_ORDER.get(f.get("severity"), 9) < _SEV_ORDER.get(g["severity"], 9):
+        if _SEV_ORDER.get(str(f.get("severity")), 9) < _SEV_ORDER.get(str(g["severity"]), 9):
             g["severity"], g["example"] = f.get("severity"), f.get("affected_url")
     for rid, g in groups.items():
         ordered = sorted(places[rid])

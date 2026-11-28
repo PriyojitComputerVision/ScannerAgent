@@ -146,7 +146,7 @@ def _audit_cli(ctx: dict, rc: int | None, started: str) -> None:
     finished = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
     record = {
         "event": "scan",
-        "outcome": _CLI_OUTCOMES.get(rc, "rejected"),
+        "outcome": _CLI_OUTCOMES.get(rc, "rejected") if rc is not None else "rejected",
         "reason": audit.scrub(ctx.get("reason", "")),
         "session_id": (report or {}).get("folder") or "",
         "actor": {"sub": user[:200], "roles": ["local-cli"]},

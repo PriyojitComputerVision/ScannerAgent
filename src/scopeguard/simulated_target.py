@@ -22,7 +22,7 @@ fetch("http://legacy.example.invalid/api");
 
 # Public, fake demo account (the demo app is loopback-only and holds no real data).
 DEMO_USERNAME = "demo"
-DEMO_PASSWORD = "demo-password"
+DEMO_PASSWORD = "demo-password"  # nosec B105 - the demo app's public fake login
 DEMO_SESSION = "demo-session-0001"
 
 PAGE = """<!doctype html><html><head><title>SimShop</title>

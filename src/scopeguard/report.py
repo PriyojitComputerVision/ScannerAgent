@@ -123,6 +123,72 @@ def location_markdown(rec: dict) -> list[str]:
     return [f"- `{f}`: {lines}" if f else f"- {lines}" for f, lines in location_lines(rec)]
 
 
+def _recommendations_html(recommendations: list[dict]) -> list[str]:
+    b: list[str] = []
+    b += ["<h2>Recommendations</h2>",
+          "<table><tr><th>Severity</th><th>Issue</th><th>Count</th><th>What to do</th></tr>"]
+    b += [f'<tr><td><span class="sev {_e(r.get("severity"))}">{_e(r.get("severity"))}</span></td>'
+          f'<td>{_e(r.get("rule"))}<div class="small">{_e(r.get("cwe") or "")}</div>'
+          f'<div class="small"><b>{_e(where_heading(r))}:</b></div><ul class="small">'
+          + "".join(f"<li><code>{_e(f)}</code>{': ' if f and lines else ''}{_e(lines)}</li>"
+                    for f, lines in location_lines(r))
+          + f'</ul></td><td>{_e(r.get("count"))}</td><td>{_e(r.get("recommendation"))}</td></tr>'
+          for r in recommendations]
+    b.append("</table>")
+    b += _remediation_html(recommendations)
+    return b
+
+
+def _guardrails_html(guardrails: dict) -> list[str]:
+    b: list[str] = []
+    b += ["<h2>Guardrails</h2>", "<table><tr><th>Stage</th><th>Check</th><th>Result</th><th>Detail</th></tr>"]
+    for stage in ("pre", "post"):
+        for c in guardrails.get(stage) or []:
+            ok = "passed" if c.get("passed") else "FAILED"
+            b.append(f"<tr><td>{_e(stage)}</td><td>{_e(c.get('name'))}</td><td>{_e(ok)}</td>"
+                     f"<td>{_e(c.get('detail'))}</td></tr>")
+    b.append("</table>")
+    return b
+
+
+def _finding_html(f, sources: dict[str, dict]) -> list[str]:
+    b: list[str] = []
+    sev = str(_val(f, "severity")).lower()
+    sid = citations.source_for_finding(sources, f)
+    ref = f' <a class="cite" href="#src-{sid}">[{sid}]</a>' if sid else ""
+    cwe = _val(f, "cwe")
+    cwe_html = (_link(citations.cwe_url(cwe), f"CWE-{citations.cwe_id(cwe)}")
+                if citations.cwe_id(cwe) else _e(cwe or "n/a"))
+    b += ['<div class="finding">',
+          f'<h3><span class="sev {_e(sev)}">{_e(sev)}</span> {_e(_val(f, "title"))}{ref}</h3>',
+          (f'<div class="small">Category: {_e(_val(f, "category"))} · CWE: {cwe_html} · '
+          f'Confidence: {_e(_val(f, "confidence"))} · Source: {_e(_val(f, "source"))}</div>'),
+          (f'<div class="small">URL: {_link(_val(f, "affected_url"))}</div>'
+           if str(_val(f, "affected_url") or "").startswith(("http://", "https://"))
+           else f'<div class="small">File and line: <code>{_e(_val(f, "affected_url"))}</code></div>'),
+          f"<p>{_e(_val(f, 'description'))}</p>"]
+    if _val(f, "evidence"):
+        b.append(f"<pre>{_e(_val(f, 'evidence'))}</pre>")
+    if _val(f, "recommendation"):
+        b.append(f"<p><b>Fix:</b> {_e(_val(f, 'recommendation'))}</p>")
+    b.append("</div>")
+    return b
+
+
+def _sources_html(sources: dict[str, dict]) -> list[str]:
+    b: list[str] = []
+    b += ["<h2>Sources</h2>", '<ol class="sources">']
+    for sid, s in sources.items():
+        parts = [f'<b>[{sid}]</b> <span class="sev {_e(s["severity"])}">{_e(s["severity"])}</span> {_e(s["title"])}']
+        if s["url"]:
+            parts.append(_link(s["url"]))
+        if s["cwe_url"]:
+            parts.append(_link(s["cwe_url"], s["cwe"]))
+        b.append(f'<li id="src-{sid}" value="{sid[1:]}">' + " · ".join(parts) + "</li>")
+    b.append("</ol>")
+    return b
+
+
 def render_html(*, title: str, meta: list[tuple[str, str]], summary: str | None, findings: list,
                 sources: dict[str, dict], red_flags: list[str], blocked: list[str],
                 downloads: list[tuple[str, str]] | None = None, download_base: str | None = None,
@@ -147,58 +213,16 @@ def render_html(*, title: str, meta: list[tuple[str, str]], summary: str | None,
             f'<li class="flag {flag_levels.level(r)}"><b>{flag_levels.label(r)}</b> {_e(r)}</li>'
             for r in flag_levels.ordered(red_flags)] + ["</ul>"]
     if recommendations:
-        b += ["<h2>Recommendations</h2>",
-              "<table><tr><th>Severity</th><th>Issue</th><th>Count</th><th>What to do</th></tr>"]
-        b += [f'<tr><td><span class="sev {_e(r.get("severity"))}">{_e(r.get("severity"))}</span></td>'
-              f'<td>{_e(r.get("rule"))}<div class="small">{_e(r.get("cwe") or "")}</div>'
-              f'<div class="small"><b>{_e(where_heading(r))}:</b></div><ul class="small">'
-              + "".join(f"<li><code>{_e(f)}</code>{': ' if f and lines else ''}{_e(lines)}</li>"
-                        for f, lines in location_lines(r))
-              + f'</ul></td><td>{_e(r.get("count"))}</td><td>{_e(r.get("recommendation"))}</td></tr>'
-              for r in recommendations]
-        b.append("</table>")
-        b += _remediation_html(recommendations)
+        b += _recommendations_html(recommendations)
     if guardrails:
-        b += ["<h2>Guardrails</h2>", "<table><tr><th>Stage</th><th>Check</th><th>Result</th><th>Detail</th></tr>"]
-        for stage in ("pre", "post"):
-            for c in guardrails.get(stage) or []:
-                ok = "passed" if c.get("passed") else "FAILED"
-                b.append(f"<tr><td>{_e(stage)}</td><td>{_e(c.get('name'))}</td><td>{_e(ok)}</td>"
-                         f"<td>{_e(c.get('detail'))}</td></tr>")
-        b.append("</table>")
+        b += _guardrails_html(guardrails)
     b.append("<h2>Detailed findings</h2>")
     ranked = sorted(findings, key=lambda f: ORDER.index(str(_val(f, "severity")).lower())
                     if str(_val(f, "severity")).lower() in ORDER else 9)
     for f in ranked:
-        sev = str(_val(f, "severity")).lower()
-        sid = citations.source_for_finding(sources, f)
-        ref = f' <a class="cite" href="#src-{sid}">[{sid}]</a>' if sid else ""
-        cwe = _val(f, "cwe")
-        cwe_html = (_link(citations.cwe_url(cwe), f"CWE-{citations.cwe_id(cwe)}")
-                    if citations.cwe_id(cwe) else _e(cwe or "n/a"))
-        b += ['<div class="finding">',
-              f'<h3><span class="sev {_e(sev)}">{_e(sev)}</span> {_e(_val(f, "title"))}{ref}</h3>',
-              (f'<div class="small">Category: {_e(_val(f, "category"))} · CWE: {cwe_html} · '
-              f'Confidence: {_e(_val(f, "confidence"))} · Source: {_e(_val(f, "source"))}</div>'),
-              (f'<div class="small">URL: {_link(_val(f, "affected_url"))}</div>'
-               if str(_val(f, "affected_url") or "").startswith(("http://", "https://"))
-               else f'<div class="small">File and line: <code>{_e(_val(f, "affected_url"))}</code></div>'),
-              f"<p>{_e(_val(f, 'description'))}</p>"]
-        if _val(f, "evidence"):
-            b.append(f"<pre>{_e(_val(f, 'evidence'))}</pre>")
-        if _val(f, "recommendation"):
-            b.append(f"<p><b>Fix:</b> {_e(_val(f, 'recommendation'))}</p>")
-        b.append("</div>")
+        b += _finding_html(f, sources)
     if sources:
-        b += ["<h2>Sources</h2>", '<ol class="sources">']
-        for sid, s in sources.items():
-            parts = [f'<b>[{sid}]</b> <span class="sev {_e(s["severity"])}">{_e(s["severity"])}</span> {_e(s["title"])}']
-            if s["url"]:
-                parts.append(_link(s["url"]))
-            if s["cwe_url"]:
-                parts.append(_link(s["cwe_url"], s["cwe"]))
-            b.append(f'<li id="src-{sid}" value="{sid[1:]}">' + " · ".join(parts) + "</li>")
-        b.append("</ol>")
+        b += _sources_html(sources)
     if blocked:
         b += ["<h2>Out-of-scope links (never fetched)</h2>", "<ul>"]
         b += [f"<li>{_e(u)}</li>" for u in blocked[:200]] + ["</ul>"]

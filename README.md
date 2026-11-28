@@ -791,7 +791,11 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
     database (`PIP_AUDIT_SERVICE`: `osv` = api.osv.dev, `pypi` = pypi.org; public APIs, no account),
     resolved once, pinned, on port 443. Each vulnerable package version is one `VULNERABLE_DEPENDENCY`
     finding (A06, medium: pip-audit gives no CVSS score), pointing at the file and line that pins it, with
-    the advisory ids and the lowest version that fixes them all.
+    the advisory ids and the lowest version that fixes them all. When two files pin one package at
+    different versions (e.g. `requirements.txt` and `uv.lock`), both versions are audited: pip-audit
+    refuses a file that names a package twice, so the pins go in batches (each package once per run)
+    and the results are merged. A run that fails shows pip-audit's own error line ("pip-audit error:
+    ..."); "vulnerability database not reachable" appears only for network errors.
   - **semgrep** cannot share this venv (it pins MCP 1.x) and has no native Windows build: install it on its
     own (`uv tool install semgrep`, the Docker image does) or set `SEMGREP_BIN`; otherwise it is reported as
     "not installed".
@@ -799,9 +803,16 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
     and land in the scan's one report, with a **Code tools** table (version, status, findings per tool)
     and the requirements files pip-audit read. `get_scan.code_sast.tools` / `.dependencies`, the console
     and the code audit trail (`tools.completed`) show the same. A tool that is missing, fails or times out
-    is listed with its status (and a red flag for failures). Settings: `CODE_TOOLS_ENABLED`, `CODE_TOOLS`,
+    is listed with its status and a **note** ("Code SAST tool pip-audit could not run ..."), not a red
+    flag: the rest of the scan is complete. Vulnerable dependencies stay a warning. Settings: `CODE_TOOLS_ENABLED`, `CODE_TOOLS`,
     `CODE_TOOLS_TIMEOUT_SECONDS`, `CODE_TOOLS_MEMORY_MB`, `CODE_TOOLS_MAX_FINDINGS`, `PIP_AUDIT_SERVICE`,
     `SEMGREP_BIN`.
+* **This repository's own code quality** is held to the same tools: a scan of this repo's code
+  (website-less, scope `code`) reports no ruff, mypy or bandit finding and no function at radon
+  rank E/F. Where bandit is wrong by design (fixed-argument `subprocess` calls, UI labels that contain
+  the word "password", the demo app's public fake login), the line carries
+  `# nosec <test id> - <reason>`; anything else is fixed in the code. `uv run pytest --cov` reports
+  test coverage of `src/`.
 * **Remediation**: every rule carries a fix, and the IDOR, XSS, DOM, DoS, injection and SSRF rules carry
   structured guidance (`scopeguard/remediation.py`): a summary, ordered steps, a **before/after code fix in
   the language of the affected file** (JS/TS, Python or PHP) and OWASP Cheat Sheet links. Reports have a
@@ -842,6 +853,9 @@ reported as a note. A cluster that is reachable but unsafe (NetworkPolicy not en
   - vendored / cache / build folders (`.venv`, `node_modules`, `__pycache__`, `.pytest_cache`, `.ruff_cache`,
     `.mypy_cache`, `dist`, `build`, ...) and `.claude/` (assistant configuration),
   - pytest files (`test_*.py`, `*_test.py`, `conftest.py`),
+  - semgrep detection-rule files (YAML with a top-level `rules:` list whose entries have `id`,
+    `languages` and a `pattern*` key, e.g. `src/pentest_agent/semgrep/python.yml`): their patterns are
+    vulnerable code on purpose; the scan notes "semgrep detection rules ...; not analysed",
   - documents and diagrams (`.md`, `.txt`, `.rst`, `.pdf`, `.doc`/`.docx`, `.odt`, `.rtf`, slides,
     spreadsheets, `.mmd` / Mermaid, PlantUML, draw.io),
   - images (`.png`, `.jpg`/`.jpeg`, `.gif`, `.webp`, `.ico`, `.svg`, ...),

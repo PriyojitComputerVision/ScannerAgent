@@ -29,7 +29,7 @@ import json
 import os
 import re
 import shutil
-import subprocess
+import subprocess  # nosec B404 - fixed argument lists only, never a shell
 import time
 from dataclasses import dataclass
 
@@ -108,7 +108,7 @@ def base_cmd(cfg: K8sConfig) -> list[str]:
 
 
 def _run(args: list[str], *, input_: bytes | None = None, timeout: float = 60.0) -> subprocess.CompletedProcess:
-    return subprocess.run(args, input=input_, capture_output=True, timeout=timeout, check=False)
+    return subprocess.run(args, input=input_, capture_output=True, timeout=timeout, check=False)  # nosec B603 - kubectl/kind/docker argument lists built here, no shell
 
 
 def analyzer_files() -> dict[str, str]:
@@ -342,7 +342,7 @@ def pod_spec(*, cfg: K8sConfig, memory_mb: int, args: list[str], configmap: str)
             "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
                                 "privileged": False, "runAsNonRoot": True, "capabilities": {"drop": ["ALL"]},
                                 "seccompProfile": {"type": "RuntimeDefault"}},
-            "volumeMounts": [{"name": "work", "mountPath": "/work"}, {"name": "tmp", "mountPath": "/tmp"},
+            "volumeMounts": [{"name": "work", "mountPath": "/work"}, {"name": "tmp", "mountPath": "/tmp"},  # nosec B108 - the pod's own emptyDir, not the host's /tmp
                              {"name": "analyzer", "mountPath": f"{APP_DIR}/scopeguard", "readOnly": True}],
         }],
         "volumes": [{"name": "work", "emptyDir": {"sizeLimit": f"{WORK_MB}Mi"}},
@@ -465,7 +465,7 @@ def run_job(stdin: bytes, *, cfg: K8sConfig, memory_mb: int, timeout: int, args:
         pod_name = (pod.get("metadata") or {}).get("name", "")
         attach_timed_out = False
         try:
-            subprocess.run([*base, "attach", "-i", "-q", "-c", CONTAINER, f"pod/{pod_name}"], input=stdin,
+            subprocess.run([*base, "attach", "-i", "-q", "-c", CONTAINER, f"pod/{pod_name}"], input=stdin,  # nosec B603 - resolved kubectl, no shell
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
                            timeout=max(5.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
@@ -546,7 +546,7 @@ def _calico_manifest(cache_dir: str) -> str:
         with open(path, "rb") as fh:
             if hashlib.sha256(fh.read()).hexdigest() == CALICO_SHA256:
                 return path
-    with urllib.request.urlopen(CALICO_URL, timeout=60) as resp:  # fixed, pinned https URL
+    with urllib.request.urlopen(CALICO_URL, timeout=60) as resp:  # fixed, pinned https URL  # nosec B310 - pinned https URL, SHA-256 checked
         data = resp.read(CALICO_MAX_BYTES + 1)
     if len(data) > CALICO_MAX_BYTES or hashlib.sha256(data).hexdigest() != CALICO_SHA256:
         raise K8sError(f"Calico {CALICO_VERSION} manifest failed its SHA-256 check; not applied")
@@ -593,7 +593,7 @@ def _create_kind_cluster(cluster: str, kind_config: str | None, cfg: K8sConfig, 
     if kind_config and os.path.isfile(kind_config):
         args += ["--config", kind_config]
     try:
-        made = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=KIND_CREATE_TIMEOUT, check=False)
+        made = subprocess.run(args, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=KIND_CREATE_TIMEOUT, check=False)  # nosec B603 - resolved kind binary, no shell
     except (OSError, subprocess.TimeoutExpired) as exc:
         return f"kind create failed: {exc.__class__.__name__}"
     if made.returncode != 0:
@@ -615,12 +615,12 @@ def _start_kind_node(cluster: str, wait_seconds: int, cfg: K8sConfig) -> str:
     if not _on_host():
         return "running inside a container: the local kind node is not started from here"
     try:
-        state = subprocess.run([docker, "inspect", "-f", "{{.State.Running}}", node], capture_output=True,
+        state = subprocess.run([docker, "inspect", "-f", "{{.State.Running}}", node], capture_output=True,  # nosec B603 - resolved docker binary, no shell
                                text=True, timeout=20, check=False)
         if state.returncode != 0:
             return f"{MISSING_NODE} {node!r} (create one: kind create cluster --name {cluster})"
         if state.stdout.strip() != "true":
-            started = subprocess.run([docker, "start", node], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
+            started = subprocess.run([docker, "start", node], capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,  # nosec B603 - resolved docker binary, no shell
                                      check=False)
             if started.returncode != 0:
                 return f"could not start {node}: {started.stderr.strip()[-200:]}"

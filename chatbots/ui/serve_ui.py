@@ -31,7 +31,7 @@ import os
 import re
 import secrets
 import socket
-import subprocess
+import subprocess  # nosec B404 - fixed argument lists only, never a shell
 import sys
 import threading
 import time
@@ -88,9 +88,10 @@ def normalize_host(value: str) -> str:
     if not raw or len(raw) > 300:
         raise ValueError("enter a host name or URL")
     netloc = urlsplit(raw if "://" in raw else f"//{raw}").netloc
-    if "@" in netloc or not HOST_RE.match(netloc):
+    match = HOST_RE.match(netloc)
+    if "@" in netloc or not match:
         raise ValueError(f"not a valid host name: {value!r}")
-    port = HOST_RE.match(netloc).group(1)
+    port = match.group(1)
     if port and not 0 < int(port) < 65536:
         raise ValueError(f"invalid port in {value!r}")
     return netloc
@@ -116,7 +117,9 @@ def free_port() -> int:
 
 def healthy(base: str) -> bool:
     try:
-        with urllib.request.urlopen(f"{base}/healthz", timeout=2) as r:
+        if urlsplit(base).scheme not in ("http", "https"):
+            return False
+        with urllib.request.urlopen(f"{base}/healthz", timeout=2) as r:  # nosec B310 - http(s) scheme checked above
             return r.status == 200
     except OSError:
         return False
@@ -134,11 +137,17 @@ POPEN_GROUP = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name
                else {"start_new_session": True})
 
 
+def _taskkill() -> str:
+    """Full path of Windows' taskkill.exe (never looked up through PATH)."""
+    return os.path.join(os.environ.get("SystemRoot", "C:\\Windows"), "System32", "taskkill.exe")
+
+
 def stop(proc: subprocess.Popen | None) -> None:
     if not proc or proc.poll() is not None:
         return
-    if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, check=False)
+    if sys.platform == "win32":
+        subprocess.run([_taskkill(), "/PID", str(proc.pid), "/T", "/F"], capture_output=True,  # nosec B603
+                       check=False)
     else:
         import signal
 
@@ -180,7 +189,7 @@ class Scanner:
         log = (LOGS / "chatbot-scanner.log").open("a", encoding="utf-8")
         cmd = ["uv", "run", "--project", str(REPO), "python", "-m", "pentest_agent.main",
                "--no-browser", "--no-target", "--host", "127.0.0.1", "--port", str(self.port)]
-        self.proc = subprocess.Popen(cmd, cwd=REPO, env=child_env(env), stdout=log, stderr=subprocess.STDOUT,
+        self.proc = subprocess.Popen(cmd, cwd=REPO, env=child_env(env), stdout=log, stderr=subprocess.STDOUT,  # nosec B603 - our own interpreter and module, no shell
                                      **POPEN_GROUP)
         deadline = time.monotonic() + 180
         while not healthy(self.base):
@@ -248,7 +257,7 @@ def start_backend(state: State, scanner_url: str, roles: str | None,
         cmd += ["--disable-tool", tool]
     LOGS.mkdir(parents=True, exist_ok=True)
     log = (LOGS / "chatbot-mcp-api.log").open("w", encoding="utf-8")
-    return subprocess.Popen(cmd, cwd=BACKEND_DIR, env=child_env({"CHATBOT_API_KEY": state.api_key}),
+    return subprocess.Popen(cmd, cwd=BACKEND_DIR, env=child_env({"CHATBOT_API_KEY": state.api_key}),  # nosec B603 - our own interpreter and module, no shell
                             stdout=log, stderr=subprocess.STDOUT, **POPEN_GROUP)
 
 
@@ -257,7 +266,7 @@ def backend_call(state: State, method: str, path: str, body: bytes | None = None
     req = urllib.request.Request(f"http://127.0.0.1:{state.backend_port}{path}", data=body, method=method,
                                  headers={"X-Chatbot-Key": state.api_key, "Content-Type": content_type})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310 - fixed http://127.0.0.1 URL
             return r.status, json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as exc:
         with contextlib.suppress(ValueError):
@@ -272,7 +281,7 @@ def backend_raw(state: State, path: str, timeout: float = 60) -> tuple[int, byte
     req = urllib.request.Request(f"http://127.0.0.1:{state.backend_port}{path}",
                                  headers={"X-Chatbot-Key": state.api_key})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:  # nosec B310 - fixed http://127.0.0.1 URL
             return r.status, r.read(), r.headers.get("Content-Type", "application/octet-stream")
     except urllib.error.HTTPError as exc:
         return exc.code, b"", "text/plain"

@@ -44,6 +44,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import anyio
@@ -64,7 +65,7 @@ from mcp.client.stdio import StdioServerParameters, stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
 
-def payload(result) -> dict | list:
+def payload(result) -> Any:  # parsed JSON: a dict, or a list for list tools
     text = result.content[0].text if result.content else ""
     try:
         return json.loads(text)
@@ -129,127 +130,158 @@ async def http_session(a: argparse.Namespace, ev: Events, env: dict, token: str,
             return await session(a, ev, Client(streamable_http_client(f"{base}/mcp", http_client=http)))
 
 
+async def _handshake(client, ev: Events, a: argparse.Namespace) -> dict:
+    """Server info, instructions, tools and the caller's scan_policy."""
+    info = client.server_info
+    await ev.emit("connect", "Handshake done (initialize)", {
+        "server": getattr(info, "name", None), "title": getattr(info, "title", None),
+        "protocol_version": client.protocol_version, "transport": "http" if a.http else "stdio"})
+    await ev.emit("instructions", "What the server tells every assistant", client.instructions or "")
+
+    tools = (await client.list_tools()).tools
+    await ev.emit("tools", f"{len(tools)} tools available",
+                  "\n".join(f"- {t.name}: {short(t.description, 110)}" for t in tools))
+
+    policy = payload(await client.call_tool("scan_policy", {}))
+    auth_info = policy.get("authenticated_scans", {})
+    await ev.emit("policy", "scan_policy: what this caller may do", {
+        "principal": policy.get("principal", {}).get("sub"),
+        "roles": policy.get("principal", {}).get("roles"),
+        "allowed_targets": policy.get("allowed_targets"),
+        "profiles_allowed": [p["profile"] for p in policy.get("profiles", []) if p.get("allowed")],
+        "llm_available": policy.get("llm_available"),
+        "authenticated_scans": auth_info.get("allowed"),
+        "credential_profiles": [p.get("name") for p in auth_info.get("credential_profiles", [])]})
+    return policy
+
+
+async def _setup_problem(a: argparse.Namespace, ev: Events, policy: dict) -> int | None:
+    """Exit code when the target or the credential profile is not set up (None = fine)."""
+    auth_info = policy.get("authenticated_scans", {})
+    if a.target and not allowlisted(a.target, policy.get("allowed_targets") or []):
+        if a.http and not getattr(a, "server_started", True):
+            await ev.emit("switch", f"{urlparse(a.target).netloc} is not on the running agent's allowlist",
+                          "Starting a private pentest-agent for this run (free port, only this host "
+                          "allowlisted, stopped afterwards). To scan it on the shared agent:\n"
+                          + allowlist_hint(a.target, "MCP_ALLOWED_TARGETS", False).split("\nOr ")[0])
+            return NEED_PRIVATE
+        await ev.emit("setup", f"{urlparse(a.target).netloc} is not on this server's allowlist",
+                      allowlist_hint(a.target, "MCP_ALLOWED_TARGETS", getattr(a, "server_started", True)))
+        return 2
+
+    known = [p.get("name") for p in auth_info.get("credential_profiles", [])]
+    if a.credentials and a.credentials not in known:
+        host = urlparse(a.target).netloc
+        await ev.emit("setup", f"Credential profile {a.credentials!r} does not exist yet",
+                      "Store it once (the password/token is asked for in a hidden prompt), then run again:\n"
+                      f"  uv run scopeguard-mcp credentials add {a.credentials} --target {host} "
+                      f"--login-url {a.target.rstrip('/')}/login --username YOUR_USER "
+                      "--username-field username --password-field password\n"
+                      "Field names = the name=\"...\" of the login form's inputs. "
+                      "For a bearer-token API, leave out --login-url/--username.\n"
+                      f"Existing profiles: {', '.join(known) or 'none'}")
+        return 2
+    return None
+
+
+async def _start(client, ev: Events, a: argparse.Namespace) -> dict | int:
+    """Start the scan (and show the idempotent repeat); the started scan or an exit code."""
+    if a.show_refusal:
+        res = await client.call_tool("start_scan", {"target_url": "https://example.com/",
+                                                    "authorization_confirmed": True, "profile": "quick"})
+        await ev.emit("guardrail", "Trying a host that is NOT allowlisted (expected refusal)",
+                      short(res.content[0].text if res.content else "", 400))
+
+    # One fresh idempotency key per scan: a retry of this call (timeout, lost answer) would get
+    # the same scan back instead of starting a second one.
+    key = f"mcp-client-{uuid.uuid4()}"
+    if a.target:
+        args = {"target_url": a.target, "authorization_confirmed": True, "profile": a.profile,
+                "idempotency_key": key}
+        if a.credentials:
+            args["credentials"] = a.credentials  # only the name; the secret stays on the server
+        start = await client.call_tool("start_scan", args)
+    else:
+        args = {"profile": a.profile, "sign_in": a.sign_in, "idempotency_key": key}
+        start = await client.call_tool("start_demo_scan", args)
+    started = payload(start)
+    if not start.is_error:
+        again = payload(await client.call_tool("start_scan" if a.target else "start_demo_scan", args))
+        await ev.emit("idempotency", "Same call retried with the same idempotency_key",
+                      {"idempotency_key": key, "scan_id": again.get("scan_id"),
+                       "idempotent_replay": again.get("idempotent_replay"),
+                       "same_scan": again.get("scan_id") == started.get("scan_id")})
+    if start.is_error:
+        await ev.emit("refused", "The server refused the scan",
+                      started.get("text") if isinstance(started, dict) else started)
+        return 1
+    if a.sign_in or a.credentials:
+        await ev.emit("auth", "Authenticated scan requested",
+                      "demo account (public, fake): the server signs in, the client never sees a secret"
+                      if a.sign_in else f"credential profile {a.credentials!r}: only its name was sent")
+    scan_id = started["scan_id"]
+    await ev.emit("scan", f"Scan started: {scan_id}", {
+        "target": started["target_url"], "profile": started["profile"], "status": started["status"]})
+    return started
+
+
+async def _follow(client, ev: Events, a: argparse.Namespace, scan_id: str) -> dict | None:
+    """Poll get_scan and print each finished step; the final status (None after a timeout)."""
+    seen, last_phase, deadline = 0, None, time.monotonic() + a.timeout
+    while True:
+        status = payload(await client.call_tool(
+            "get_scan", {"scan_id": scan_id, "wait_seconds": a.poll, "max_findings": a.findings}))
+        for step in status["steps_completed"][seen:]:
+            seen += 1
+            note = NODE_NOTES.get(step["node"], "")
+            if step["phase"] != last_phase:
+                note += f"\nphase -> {step['phase']}"
+            last_phase = step["phase"]
+            await ev.emit("step", f"{step['node']}  (scan time {step['at_seconds']}s)", note.strip() or None)
+        if status["status"] != "running":
+            break
+        if time.monotonic() > deadline:
+            await ev.emit("timeout", f"Still running after {a.timeout}s: cancelling",
+                          payload(await client.call_tool("cancel_scan", {"scan_id": scan_id})))
+            return None
+    return status
+
+
+async def _show_result(ev: Events, status: dict) -> None:
+    await ev.emit("done", f"Scan {status['status']} in {status['elapsed_seconds']}s", {
+        "signed_in": status.get("signed_in"), "credentials": status.get("credentials"),
+        "pages_crawled": status.get("pages_crawled"), "severity_counts": status.get("severity_counts"),
+        "findings_total": status.get("findings_total"), "error": status.get("error")})
+    findings = status.get("findings") or []
+    for i, f in enumerate(findings, 1):
+        await ev.finding(i, len(findings), f)
+    if status.get("findings_omitted"):
+        await ev.emit("more", f"{status['findings_omitted']} more finding(s) not returned",
+                      "See the full list in the report files below.")
+    for flag in status.get("red_flags") or []:
+        await ev.emit("red flag", short(flag, 300))
+    if status.get("executive_summary"):
+        await ev.emit("summary", "Executive summary (wrapped as untrusted target content)",
+                      short(status["executive_summary"], 900))
+    if status.get("report_files"):
+        await ev.emit("report", "Report files", status["report_files"])
+    if status.get("audit"):
+        await ev.emit("audit", "Tamper-evident audit record written", status["audit"])
+
+
 async def session(a: argparse.Namespace, ev: Events, client_cm) -> int:
     async with client_cm as client:
-        info = client.server_info
-        await ev.emit("connect", "Handshake done (initialize)", {
-            "server": getattr(info, "name", None), "title": getattr(info, "title", None),
-            "protocol_version": client.protocol_version, "transport": "http" if a.http else "stdio"})
-        await ev.emit("instructions", "What the server tells every assistant", client.instructions or "")
-
-        tools = (await client.list_tools()).tools
-        await ev.emit("tools", f"{len(tools)} tools available",
-                      "\n".join(f"- {t.name}: {short(t.description, 110)}" for t in tools))
-
-        policy = payload(await client.call_tool("scan_policy", {}))
-        auth_info = policy.get("authenticated_scans", {})
-        await ev.emit("policy", "scan_policy: what this caller may do", {
-            "principal": policy.get("principal", {}).get("sub"),
-            "roles": policy.get("principal", {}).get("roles"),
-            "allowed_targets": policy.get("allowed_targets"),
-            "profiles_allowed": [p["profile"] for p in policy.get("profiles", []) if p.get("allowed")],
-            "llm_available": policy.get("llm_available"),
-            "authenticated_scans": auth_info.get("allowed"),
-            "credential_profiles": [p.get("name") for p in auth_info.get("credential_profiles", [])]})
-
-        if a.target and not allowlisted(a.target, policy.get("allowed_targets") or []):
-            if a.http and not getattr(a, "server_started", True):
-                await ev.emit("switch", f"{urlparse(a.target).netloc} is not on the running agent's allowlist",
-                              "Starting a private pentest-agent for this run (free port, only this host "
-                              "allowlisted, stopped afterwards). To scan it on the shared agent:\n"
-                              + allowlist_hint(a.target, "MCP_ALLOWED_TARGETS", False).split("\nOr ")[0])
-                return NEED_PRIVATE
-            await ev.emit("setup", f"{urlparse(a.target).netloc} is not on this server's allowlist",
-                          allowlist_hint(a.target, "MCP_ALLOWED_TARGETS", getattr(a, "server_started", True)))
-            return 2
-
-        known = [p.get("name") for p in auth_info.get("credential_profiles", [])]
-        if a.credentials and a.credentials not in known:
-            host = urlparse(a.target).netloc
-            await ev.emit("setup", f"Credential profile {a.credentials!r} does not exist yet",
-                          "Store it once (the password/token is asked for in a hidden prompt), then run again:\n"
-                          f"  uv run scopeguard-mcp credentials add {a.credentials} --target {host} "
-                          f"--login-url {a.target.rstrip('/')}/login --username YOUR_USER "
-                          "--username-field username --password-field password\n"
-                          "Field names = the name=\"...\" of the login form's inputs. "
-                          "For a bearer-token API, leave out --login-url/--username.\n"
-                          f"Existing profiles: {', '.join(known) or 'none'}")
-            return 2
-
-        if a.show_refusal:
-            res = await client.call_tool("start_scan", {"target_url": "https://example.com/",
-                                                        "authorization_confirmed": True, "profile": "quick"})
-            await ev.emit("guardrail", "Trying a host that is NOT allowlisted (expected refusal)",
-                          short(res.content[0].text if res.content else "", 400))
-
-        # One fresh idempotency key per scan: a retry of this call (timeout, lost answer) would get
-        # the same scan back instead of starting a second one.
-        key = f"mcp-client-{uuid.uuid4()}"
-        if a.target:
-            args = {"target_url": a.target, "authorization_confirmed": True, "profile": a.profile,
-                    "idempotency_key": key}
-            if a.credentials:
-                args["credentials"] = a.credentials  # only the name; the secret stays on the server
-            start = await client.call_tool("start_scan", args)
-        else:
-            args = {"profile": a.profile, "sign_in": a.sign_in, "idempotency_key": key}
-            start = await client.call_tool("start_demo_scan", args)
-        started = payload(start)
-        if not start.is_error:
-            again = payload(await client.call_tool("start_scan" if a.target else "start_demo_scan", args))
-            await ev.emit("idempotency", "Same call retried with the same idempotency_key",
-                          {"idempotency_key": key, "scan_id": again.get("scan_id"),
-                           "idempotent_replay": again.get("idempotent_replay"),
-                           "same_scan": again.get("scan_id") == started.get("scan_id")})
-        if start.is_error:
-            await ev.emit("refused", "The server refused the scan",
-                          started.get("text") if isinstance(started, dict) else started)
+        policy = await _handshake(client, ev, a)
+        problem = await _setup_problem(a, ev, policy)
+        if problem is not None:
+            return problem
+        started = await _start(client, ev, a)
+        if isinstance(started, int):
+            return started
+        status = await _follow(client, ev, a, started["scan_id"])
+        if status is None:
             return 1
-        if a.sign_in or a.credentials:
-            await ev.emit("auth", "Authenticated scan requested",
-                          "demo account (public, fake): the server signs in, the client never sees a secret"
-                          if a.sign_in else f"credential profile {a.credentials!r}: only its name was sent")
-        scan_id = started["scan_id"]
-        await ev.emit("scan", f"Scan started: {scan_id}", {
-            "target": started["target_url"], "profile": started["profile"], "status": started["status"]})
-
-        seen, last_phase, deadline = 0, None, time.monotonic() + a.timeout
-        while True:
-            status = payload(await client.call_tool(
-                "get_scan", {"scan_id": scan_id, "wait_seconds": a.poll, "max_findings": a.findings}))
-            for step in status["steps_completed"][seen:]:
-                seen += 1
-                note = NODE_NOTES.get(step["node"], "")
-                if step["phase"] != last_phase:
-                    note += f"\nphase -> {step['phase']}"
-                last_phase = step["phase"]
-                await ev.emit("step", f"{step['node']}  (scan time {step['at_seconds']}s)", note.strip() or None)
-            if status["status"] != "running":
-                break
-            if time.monotonic() > deadline:
-                await ev.emit("timeout", f"Still running after {a.timeout}s: cancelling",
-                              payload(await client.call_tool("cancel_scan", {"scan_id": scan_id})))
-                return 1
-
-        await ev.emit("done", f"Scan {status['status']} in {status['elapsed_seconds']}s", {
-            "signed_in": status.get("signed_in"), "credentials": status.get("credentials"),
-            "pages_crawled": status.get("pages_crawled"), "severity_counts": status.get("severity_counts"),
-            "findings_total": status.get("findings_total"), "error": status.get("error")})
-        findings = status.get("findings") or []
-        for i, f in enumerate(findings, 1):
-            await ev.finding(i, len(findings), f)
-        if status.get("findings_omitted"):
-            await ev.emit("more", f"{status['findings_omitted']} more finding(s) not returned",
-                          "See the full list in the report files below.")
-        for flag in status.get("red_flags") or []:
-            await ev.emit("red flag", short(flag, 300))
-        if status.get("executive_summary"):
-            await ev.emit("summary", "Executive summary (wrapped as untrusted target content)",
-                          short(status["executive_summary"], 900))
-        if status.get("report_files"):
-            await ev.emit("report", "Report files", status["report_files"])
-        if status.get("audit"):
-            await ev.emit("audit", "Tamper-evident audit record written", status["audit"])
+        await _show_result(ev, status)
     await ev.emit("exit", "MCP session closed")
     return 0 if status["status"] == "completed" else 1
 

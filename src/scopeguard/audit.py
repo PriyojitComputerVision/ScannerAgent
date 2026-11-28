@@ -110,7 +110,7 @@ def _file_lock(lock_path: Path):
     with _thread_lock:
         fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
         try:
-            if os.name == "nt":
+            if sys.platform == "win32":
                 import msvcrt
 
                 while True:
@@ -126,7 +126,7 @@ def _file_lock(lock_path: Path):
             yield
         finally:
             try:
-                if os.name == "nt":
+                if sys.platform == "win32":
                     import msvcrt
 
                     os.lseek(fd, 0, os.SEEK_SET)

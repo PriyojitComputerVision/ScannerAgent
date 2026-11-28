@@ -12,14 +12,15 @@ from __future__ import annotations
 
 import ast
 import sys
+from collections.abc import Sequence
 from pathlib import Path
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT / "src"))
 
 from pentest_agent import code_tools
 from pentest_agent.tools.probe_models import PARAMETER_PROBES, ProbeType
 from scopeguard import codecheck, codestyle, engine
+
+ROOT = Path(__file__).resolve().parent.parent
+
 
 OUT = ROOT / "docs" / "SECURITY_CHECKS.md"
 
@@ -105,7 +106,7 @@ def _cell(text: object) -> str:
     return str(text).replace("|", "\\|").replace("\n", " ")
 
 
-def _table(header: list[str], rows: list[list[object]]) -> list[str]:
+def _table(header: list[str], rows: Sequence[Sequence[object]]) -> list[str]:
     out = ["| " + " | ".join(header) + " |", "|" + "---|" * len(header)]
     out += ["| " + " | ".join(_cell(c) for c in row) + " |" for row in rows]
     return out
@@ -226,7 +227,8 @@ def build() -> str:
              "ERROR high, WARNING medium", "`--config <local file> --metrics=off`; optional install"],
             ["pip-audit", "known vulnerabilities (OSV or PyPI) in exactly pinned versions",
              "`VULNERABLE_DEPENDENCY` (one per package version)", "medium (pip-audit gives no CVSS)",
-             "`--disable-pip --no-deps`, our own `name==version` file; `PIP_AUDIT_SERVICE`"],
+             ("`--disable-pip --no-deps`, our own `name==version` files (a package pinned at two versions: one run "
+             "per batch); `PIP_AUDIT_SERVICE`")],
         ]),
         "",
         ("Requirements-type files (`scopeguard.deps.is_requirements_file`): `requirements*.txt` / `*.in` (also "

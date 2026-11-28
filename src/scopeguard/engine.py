@@ -10,6 +10,7 @@ Safety properties
 """
 from __future__ import annotations
 
+import contextlib
 import http.client
 import json
 import re
@@ -224,16 +225,16 @@ JS_RECOMMENDATIONS = {
     "JS_POSTMESSAGE_WILDCARD": "Pass the exact target origin to postMessage instead of '*', and verify "
                                "event.origin in message listeners.",
     "JS_WEAK_RANDOM": "Use crypto.getRandomValues()/crypto.randomUUID() for anything security-relevant.",
-    "JS_STORAGE_TOKEN": "Keep session tokens in HttpOnly, Secure, SameSite cookies rather than "
+    "JS_STORAGE_TOKEN": "Keep session tokens in HttpOnly, Secure, SameSite cookies rather than "  # nosec B105 - remediation advice text
                         "localStorage/sessionStorage.",
     "JS_HTTP_URL": "Load resources and call APIs over HTTPS only.",
     "AWS_ACCESS_KEY": "Revoke and rotate the key now, remove it from client code, and sign requests server-side.",
     "PRIVATE_KEY": "Revoke the key pair, remove it from client code and history, and keep keys server-side.",
-    "HARDCODED_SECRET": "Rotate the secret, remove it from client code, and proxy the call through your backend.",
+    "HARDCODED_SECRET": "Rotate the secret, remove it from client code, and proxy the call through your backend.",  # nosec B105 - remediation advice text
     "JS_DOM_XSS": "Treat location.hash/search, document.referrer and window.name as untrusted: write them with "
                   "textContent, or sanitize with DOMPurify before any HTML sink; never eval them.",
     "JS_STRING_TIMER": "Pass a function instead of a string: setTimeout(() => doWork(value), ms).",
-    "JS_API_TOKEN": "Revoke the token now, remove it from client code (and git history), and call the API "
+    "JS_API_TOKEN": "Revoke the token now, remove it from client code (and git history), and call the API "  # nosec B105 - remediation advice text
                     "from your backend.",
     "GOOGLE_API_KEY": "Restrict the key to your HTTP referrers and the APIs you use in Google Cloud Console; "
                       "move server-side keys to the backend.",
@@ -384,7 +385,7 @@ class ScopedClient:
                         raw, dropped = b"", f"binary body ({why or 'file signature'})"
             headers_lc = {k.lower(): v for k, v in h.items()}
             cookies = h.get_all("Set-Cookie") or []
-            status = getattr(resp_obj, "status", None) or resp_obj.getcode()
+            status = int(getattr(resp_obj, "status", None) or resp_obj.getcode() or 0)
             charset = h.get_content_charset() or "utf-8"
             try:
                 body = raw.decode(charset, errors="replace")
@@ -444,7 +445,7 @@ class ScopedClient:
         try:
             raw = resp_obj.read(self.max_bytes + 1)[: self.max_bytes]
             h = resp_obj.headers
-            status = getattr(resp_obj, "status", None) or resp_obj.getcode()
+            status = int(getattr(resp_obj, "status", None) or resp_obj.getcode() or 0)
             body_text = raw.decode(h.get_content_charset() or "utf-8", errors="replace")
         except (OSError, http.client.HTTPException, ValueError) as e:
             self.log.append(("POST", url, 0))
@@ -636,10 +637,8 @@ class Scanner:
                     self.blocked.add(nxt)
             if resp.is_html:
                 p = _PageParser()
-                try:
+                with contextlib.suppress(Exception):  # malformed html must never crash a scan
                     p.feed(resp.body)
-                except Exception:  # noqa: BLE001, S110 - malformed html must never crash a scan
-                    pass
                 page.scripts = [_norm(up.urljoin(url, s)) for s in p.script_src]
                 page.inline_scripts = p.inline_scripts
                 for href in p.links:
@@ -684,20 +683,8 @@ class Scanner:
             r = pg.resp
             if not r.is_html:
                 continue
-            for h in required:
-                if h not in r.headers:
-                    if h == "x-frame-options" and "frame-ancestors" in r.headers.get(
-                            "content-security-policy", ""):
-                        continue
-                    missing.setdefault(h, []).append(pg.url)
-            csp = r.headers.get("content-security-policy", "")
-            weak = [w for w in ("'unsafe-inline'", "'unsafe-eval'") if w in csp]
-            if csp and (weak or re.search(r"(?:script-src|default-src)[^;]*\s\*(?:\s|;|$)", csp)):
-                self.f.add(source="dast_native", category=A05, severity="low",
-                           title="Weak Content-Security-Policy",
-                           description="The CSP allows " + (", ".join(weak) or "any script source (*)") + ".",
-                           url=pg.url, evidence=csp[:300], cwe="CWE-693", confidence="high",
-                           recommendation="Remove unsafe-inline/unsafe-eval and wildcards; use nonces or hashes.")
+            self._missing_headers(pg, r, required, missing)
+            self._weak_csp(pg, r)
             if not server_seen and r.headers.get("server"):
                 server_seen = True
                 self.f.add(source="recon", category=A05, severity="info",
@@ -708,47 +695,8 @@ class Scanner:
             for ck in r.set_cookies:
                 self._cookie(ck, pg.url)
             self._passive_extras(pg, r)
-            for rx, label in INFO_LEAKS:
-                m = rx.search(r.body)
-                if m:
-                    self.f.add(source="dast_native", category=A05, severity="medium",
-                               title=f"Verbose error disclosure: {label}",
-                               description="Response contains internal error details.", url=pg.url,
-                               evidence=m.group(0)[:200], cwe="CWE-209", confidence="medium",
-                               recommendation="Return generic errors; keep diagnostics in server logs.")
-                    break
-            mi = PROMPT_INJECTION_RX.search(r.body)
-            if mi:
-                self.f.add(source="dast_native", category=OTHER, severity="medium",
-                           title="Page content attempts prompt injection / jailbreak",
-                           description="The page contains text written to hijack an AI agent or scanner "
-                                       "(prompt injection / jailbreak). It was treated as data and not followed.",
-                           url=pg.url, evidence=re.sub(r"\s+", " ", mi.group(0))[:200], cwe="CWE-1427",
-                           confidence="medium",
-                           recommendation="Investigate the source of this text (user content or a compromised page).")
-            if re.search(r"<title>\s*Index of /", r.body, re.IGNORECASE) or "Parent Directory" in r.body:
-                self.f.add(source="dast_native", category=A05, severity="medium",
-                           title="Directory listing enabled",
-                           description="The server returns an automatic directory index.", url=pg.url,
-                           cwe="CWE-548", confidence="high",
-                           recommendation="Disable directory indexing.")
-            for form in pg.forms:
-                names = [i["type"] for i in form["inputs"]]
-                has_pw = "password" in names
-                if has_pw and pg.url.startswith("http://"):
-                    self.f.add(source="dast_native", category=A02, severity="medium",
-                               title="Password form served over plaintext HTTP",
-                               description="Credentials would be sent without TLS.", url=pg.url,
-                               cwe="CWE-319", confidence="high", recommendation="Serve over HTTPS only.")
-                if form["method"] == "post":
-                    tokens = [i["name"].lower() for i in form["inputs"] if i["type"] == "hidden"]
-                    if not any(k in n for n in tokens for k in ("csrf", "token", "nonce", "authenticity")):
-                        self.f.add(source="dast_native", category=A01, severity="low",
-                                   title="POST form without apparent anti-CSRF token",
-                                   description="No hidden CSRF-like field found (heuristic; verify manually).",
-                                   url=pg.url, evidence=f"action={form['action'] or '(self)'}",
-                                   cwe="CWE-352", confidence="low",
-                                   recommendation="Add per-session anti-CSRF tokens / SameSite cookies.")
+            self._page_content_checks(pg, r)
+            self._form_checks(pg)
         self._cov("Security & cross-origin policy headers", tested=len(required) * max(1, len(self.pages)),
                   found=len(missing), note="missing: " + (", ".join(sorted(missing)) or "none"))
         for h, urls in missing.items():
@@ -756,6 +704,71 @@ class Scanner:
             self.f.add(source="dast_native", category=A05, severity=sev, title=title,
                        description=f"`{h}` absent on {len(urls)} page(s).", url=urls[0],
                        evidence="; ".join(urls[:3]), cwe="CWE-693", confidence="high", recommendation=rec)
+
+    def _missing_headers(self, pg, r, required, missing):
+        for h in required:
+            if h not in r.headers:
+                if h == "x-frame-options" and "frame-ancestors" in r.headers.get(
+                        "content-security-policy", ""):
+                    continue
+                missing.setdefault(h, []).append(pg.url)
+
+    def _weak_csp(self, pg, r):
+        csp = r.headers.get("content-security-policy", "")
+        weak = [w for w in ("'unsafe-inline'", "'unsafe-eval'") if w in csp]
+        if csp and (weak or re.search(r"(?:script-src|default-src)[^;]*\s\*(?:\s|;|$)", csp)):
+            self.f.add(source="dast_native", category=A05, severity="low",
+                       title="Weak Content-Security-Policy",
+                       description="The CSP allows " + (", ".join(weak) or "any script source (*)") + ".",
+                       url=pg.url, evidence=csp[:300], cwe="CWE-693", confidence="high",
+                       recommendation="Remove unsafe-inline/unsafe-eval and wildcards; use nonces or hashes.")
+
+    def _page_content_checks(self, pg, r):
+        """Verbose errors, prompt injection aimed at agents, directory listings."""
+        for rx, label in INFO_LEAKS:
+            m = rx.search(r.body)
+            if m:
+                self.f.add(source="dast_native", category=A05, severity="medium",
+                           title=f"Verbose error disclosure: {label}",
+                           description="Response contains internal error details.", url=pg.url,
+                           evidence=m.group(0)[:200], cwe="CWE-209", confidence="medium",
+                           recommendation="Return generic errors; keep diagnostics in server logs.")
+                break
+        mi = PROMPT_INJECTION_RX.search(r.body)
+        if mi:
+            self.f.add(source="dast_native", category=OTHER, severity="medium",
+                       title="Page content attempts prompt injection / jailbreak",
+                       description="The page contains text written to hijack an AI agent or scanner "
+                                   "(prompt injection / jailbreak). It was treated as data and not followed.",
+                       url=pg.url, evidence=re.sub(r"\s+", " ", mi.group(0))[:200], cwe="CWE-1427",
+                       confidence="medium",
+                       recommendation="Investigate the source of this text (user content or a compromised page).")
+        if re.search(r"<title>\s*Index of /", r.body, re.IGNORECASE) or "Parent Directory" in r.body:
+            self.f.add(source="dast_native", category=A05, severity="medium",
+                       title="Directory listing enabled",
+                       description="The server returns an automatic directory index.", url=pg.url,
+                       cwe="CWE-548", confidence="high",
+                       recommendation="Disable directory indexing.")
+
+    def _form_checks(self, pg):
+        """Password forms over plain HTTP, POST forms without an anti-CSRF token."""
+        for form in pg.forms:
+            names = [i["type"] for i in form["inputs"]]
+            has_pw = "password" in names
+            if has_pw and pg.url.startswith("http://"):
+                self.f.add(source="dast_native", category=A02, severity="medium",
+                           title="Password form served over plaintext HTTP",
+                           description="Credentials would be sent without TLS.", url=pg.url,
+                           cwe="CWE-319", confidence="high", recommendation="Serve over HTTPS only.")
+            if form["method"] == "post":
+                tokens = [i["name"].lower() for i in form["inputs"] if i["type"] == "hidden"]
+                if not any(k in n for n in tokens for k in ("csrf", "token", "nonce", "authenticity")):
+                    self.f.add(source="dast_native", category=A01, severity="low",
+                               title="POST form without apparent anti-CSRF token",
+                               description="No hidden CSRF-like field found (heuristic; verify manually).",
+                               url=pg.url, evidence=f"action={form['action'] or '(self)'}",
+                               cwe="CWE-352", confidence="low",
+                               recommendation="Add per-session anti-CSRF tokens / SameSite cookies.")
 
     def _passive_extras(self, pg, r):
         """Checks on the response already fetched (no extra request): third-party scripts without
@@ -831,6 +844,18 @@ class Scanner:
 
     def http_checks(self):
         root = self.origin + "/"
+        self._check_methods(root)
+        self._check_cors(root)
+        self._check_host_header(root)
+        # sensitive paths, with soft-404 protection: a random path shows what "not found" looks like
+        junk = self._safe(self.client.get, f"{self.origin}/sg-{uuid.uuid4().hex[:10]}")
+        junk_body = junk.body if junk else None
+        junk_ok = bool(junk and junk.status == 200)
+        self._check_api_docs(junk_ok, junk_body)
+        self._check_graphql()
+        self._check_sensitive_files(junk_ok, junk_body)
+
+    def _check_methods(self, root):
         r = self._safe(self.client.request, "OPTIONS", root)
         if r and r.headers.get("allow"):
             risky = [m for m in ("PUT", "DELETE", "TRACE", "PATCH") if m in r.headers["allow"].upper()]
@@ -847,6 +872,9 @@ class Scanner:
                        url=root, cwe="CWE-693", confidence="high",
                        recommendation="Disable TRACE.")
         self._cov("HTTP methods / TRACE", tested=2)
+
+    def _check_cors(self, root):
+        """CORS on root + api-looking pages: arbitrary, null and prefix/suffix-bypass origins, preflight."""
         # CORS on root + api-looking pages: arbitrary, null and prefix/suffix-bypass origins, preflight
         host = up.urlparse(self.origin).hostname or ""
         bypass = {"null": ("CORS trusts the 'null' origin", "Sandboxed iframes and local files send Origin: null."),
@@ -858,50 +886,55 @@ class Scanner:
                                                                "with the target host."))}
         cands = [root] + [p.url for p in self.pages if "/api" in p.url or p.url in self.endpoints][:6]
         for u in dict.fromkeys(cands):
-            for origin, (title, why) in bypass.items():
-                c = self._safe(self.client.get, u, {"Origin": origin})
-                self._cov("CORS (null / prefix / suffix origins)", tested=1)
-                if c and c.headers.get("access-control-allow-origin", "") == origin:
-                    cred = c.headers.get("access-control-allow-credentials", "").lower() == "true"
-                    self._cov("CORS (null / prefix / suffix origins)", found=1, note=f"{title} at {u}")
-                    self.f.add(source="dast_native", category=A05, severity="high" if cred else "medium",
-                               title=title + (" with credentials" if cred else ""), description=why, url=u,
-                               evidence=f"Origin: {origin} -> ACAO: {origin}; ACAC: {cred}", cwe="CWE-942",
-                               confidence="high", recommendation="Compare the full Origin against an exact allowlist.")
-            pre = self._safe(self.client.request, "OPTIONS", u, {
-                "Origin": TEST_ORIGIN, "Access-Control-Request-Method": "DELETE",
-                "Access-Control-Request-Headers": "authorization"})
-            self._cov("CORS preflight", tested=1)
-            if pre and pre.headers.get("access-control-allow-origin", "") in (TEST_ORIGIN, "*") and \
-                    "DELETE" in pre.headers.get("access-control-allow-methods", "").upper():
-                self._cov("CORS preflight", found=1, note=f"DELETE allowed for any origin at {u}")
-                self.f.add(source="dast_native", category=A05, severity="medium",
-                           title="CORS preflight allows untrusted origins to send DELETE",
-                           description="A preflight from an untrusted origin was approved for DELETE.",
-                           url=u, evidence=f"ACAM: {pre.headers.get('access-control-allow-methods', '')}",
-                           cwe="CWE-942", confidence="medium",
-                           recommendation="Only approve preflights from trusted origins and needed methods.")
-            c = self._safe(self.client.get, u, {"Origin": TEST_ORIGIN})
-            self._cov("CORS (arbitrary origin)", tested=1)
-            if not c:
-                continue
-            ao = c.headers.get("access-control-allow-origin", "")
-            cred = c.headers.get("access-control-allow-credentials", "").lower() == "true"
-            if ao in (TEST_ORIGIN, "*"):
-                self._cov("CORS (arbitrary origin)", found=1 if ao == TEST_ORIGIN or cred else 0,
-                          note=f"ACAO {ao} at {u}")
-            if ao == TEST_ORIGIN:
+            self._cors_url(u, bypass)
+
+    def _cors_url(self, u, bypass):
+        for origin, (title, why) in bypass.items():
+            c = self._safe(self.client.get, u, {"Origin": origin})
+            self._cov("CORS (null / prefix / suffix origins)", tested=1)
+            if c and c.headers.get("access-control-allow-origin", "") == origin:
+                cred = c.headers.get("access-control-allow-credentials", "").lower() == "true"
+                self._cov("CORS (null / prefix / suffix origins)", found=1, note=f"{title} at {u}")
                 self.f.add(source="dast_native", category=A05, severity="high" if cred else "medium",
-                           title="CORS reflects arbitrary Origin" + (" with credentials" if cred else ""),
-                           description="Server reflected an untrusted Origin in Access-Control-Allow-Origin.",
-                           url=u, evidence=f"ACAO: {ao}; ACAC: {cred}", cwe="CWE-942", confidence="high",
-                           recommendation="Validate Origin against a strict allowlist.")
-            elif ao == "*" and cred:
-                self.f.add(source="dast_native", category=A05, severity="medium",
-                           title="CORS wildcard combined with credentials",
-                           description="Invalid/misconfigured CORS policy.", url=u,
-                           evidence="ACAO: *; ACAC: true", cwe="CWE-942", confidence="medium",
-                           recommendation="Use an explicit origin allowlist.")
+                           title=title + (" with credentials" if cred else ""), description=why, url=u,
+                           evidence=f"Origin: {origin} -> ACAO: {origin}; ACAC: {cred}", cwe="CWE-942",
+                           confidence="high", recommendation="Compare the full Origin against an exact allowlist.")
+        pre = self._safe(self.client.request, "OPTIONS", u, {
+            "Origin": TEST_ORIGIN, "Access-Control-Request-Method": "DELETE",
+            "Access-Control-Request-Headers": "authorization"})
+        self._cov("CORS preflight", tested=1)
+        if pre and pre.headers.get("access-control-allow-origin", "") in (TEST_ORIGIN, "*") and \
+                "DELETE" in pre.headers.get("access-control-allow-methods", "").upper():
+            self._cov("CORS preflight", found=1, note=f"DELETE allowed for any origin at {u}")
+            self.f.add(source="dast_native", category=A05, severity="medium",
+                       title="CORS preflight allows untrusted origins to send DELETE",
+                       description="A preflight from an untrusted origin was approved for DELETE.",
+                       url=u, evidence=f"ACAM: {pre.headers.get('access-control-allow-methods', '')}",
+                       cwe="CWE-942", confidence="medium",
+                       recommendation="Only approve preflights from trusted origins and needed methods.")
+        c = self._safe(self.client.get, u, {"Origin": TEST_ORIGIN})
+        self._cov("CORS (arbitrary origin)", tested=1)
+        if not c:
+            return
+        ao = c.headers.get("access-control-allow-origin", "")
+        cred = c.headers.get("access-control-allow-credentials", "").lower() == "true"
+        if ao in (TEST_ORIGIN, "*"):
+            self._cov("CORS (arbitrary origin)", found=1 if ao == TEST_ORIGIN or cred else 0,
+                      note=f"ACAO {ao} at {u}")
+        if ao == TEST_ORIGIN:
+            self.f.add(source="dast_native", category=A05, severity="high" if cred else "medium",
+                       title="CORS reflects arbitrary Origin" + (" with credentials" if cred else ""),
+                       description="Server reflected an untrusted Origin in Access-Control-Allow-Origin.",
+                       url=u, evidence=f"ACAO: {ao}; ACAC: {cred}", cwe="CWE-942", confidence="high",
+                       recommendation="Validate Origin against a strict allowlist.")
+        elif ao == "*" and cred:
+            self.f.add(source="dast_native", category=A05, severity="medium",
+                       title="CORS wildcard combined with credentials",
+                       description="Invalid/misconfigured CORS policy.", url=u,
+                       evidence="ACAO: *; ACAC: true", cwe="CWE-942", confidence="medium",
+                       recommendation="Use an explicit origin allowlist.")
+
+    def _check_host_header(self, root):
         # Host header injection via X-Forwarded-Host (request still goes to the target)
         hh = self._safe(self.client.get, root, {"X-Forwarded-Host": TEST_HOST})
         self._cov("Host header injection", tested=1)
@@ -913,10 +946,8 @@ class Scanner:
                                    "poisoning and cache poisoning.", url=root,
                        evidence=f"X-Forwarded-Host: {TEST_HOST} reflected", cwe="CWE-644", confidence="medium",
                        recommendation="Build absolute URLs from a configured host, not request headers.")
-        # sensitive paths, with soft-404 protection
-        junk = self._safe(self.client.get, f"{self.origin}/sg-{uuid.uuid4().hex[:10]}")
-        junk_body = junk.body if junk else None
-        junk_ok = bool(junk and junk.status == 200)
+
+    def _check_api_docs(self, junk_ok, junk_body):
         # API documentation (/docs, swagger, openapi, graphql consoles): accessible or not
         for path in API_DOC_PATHS:
             r = self._safe(self.client.get, self.origin + path)
@@ -934,6 +965,8 @@ class Scanner:
                            url=self.origin + path, evidence=f"GET {path} -> {r.status}", cwe="CWE-200",
                            confidence="high", recommendation="Disable API docs in production or put them "
                                                              "behind authentication.")
+
+    def _check_graphql(self):
         for path in GRAPHQL_PATHS:
             g = self._safe(self.client.get, self.origin + path + "?" + up.urlencode({"query": GRAPHQL_INTROSPECTION}))
             self._cov("GraphQL introspection", tested=1)
@@ -948,6 +981,8 @@ class Scanner:
                            recommendation="Disable introspection in production (or allow it only for signed-in "
                                           "developers).")
                 break
+
+    def _check_sensitive_files(self, junk_ok, junk_body):
         for path, sig, sev, title, cwe in SENSITIVE_PATHS:
             r = self._safe(self.client.get, self.origin + path)
             self._cov("Sensitive files (.env, .git, backups)", tested=1)
@@ -1057,120 +1092,135 @@ class Scanner:
         timed_left = 15 if self.cfg["variants"] else 0  # time-based checks are slow: cap them
         for base, params, name in targets:
             lname = name.lower()
-            # reflected XSS (unencoded reflection of dangerous chars)
-            r = self._safe(self.client.get, self._inject(base, params, name, xss_payload))
-            self._cov("Cross-site scripting (reflected)", tested=1)
-            if r and r.is_html and xss_payload in r.body:
-                self._cov("Cross-site scripting (reflected)", found=1, note=f"param {name} at {base}")
+            self._xss_checks(base, params, name, lname, xss_payload)
+            self._ssti_crlf_checks(base, params, name)
+            timed_left = self._sqli_checks(base, params, name, timed_left)
+            self._redirect_traversal_checks(base, params, name, lname)
+
+    def _xss_checks(self, base, params, name, lname, xss_payload):
+        # reflected XSS (unencoded reflection of dangerous chars)
+        r = self._safe(self.client.get, self._inject(base, params, name, xss_payload))
+        self._cov("Cross-site scripting (reflected)", tested=1)
+        if r and r.is_html and xss_payload in r.body:
+            self._cov("Cross-site scripting (reflected)", found=1, note=f"param {name} at {base}")
+            self.f.add(source="dast_native", category=XSS, severity="medium",
+                       title="Reflected input without output encoding (possible XSS)",
+                       description=f"Parameter '{name}' is reflected with <, \" and ' unencoded. "
+                                   "No script was executed; confirm manually.",
+                       url=self._inject(base, params, name, "<marker>"),
+                       evidence=f"param={name}", cwe="CWE-79", confidence="medium",
+                       recommendation="Context-aware output encoding and a strict CSP.")
+        # XSS inside a <script> block (quote breaks out of a JS string)
+        js_marker = f"sg{uuid.uuid4().hex[:6]}';sgq//"
+        r = self._safe(self.client.get, self._inject(base, params, name, js_marker))
+        self._cov("Cross-site scripting (script context)", tested=1)
+        if r and r.is_html and self._in_script(r.body, js_marker):
+            self._cov("Cross-site scripting (script context)", found=1, note=f"param {name} at {base}")
+            self.f.add(source="dast_native", category=XSS, severity="high",
+                       title="Reflected input inside a <script> block (possible XSS)",
+                       description=f"'{name}' is written into JavaScript with the quote unescaped.",
+                       url=base, evidence=f"param={name}", cwe="CWE-79", confidence="medium",
+                       recommendation="Encode for the JavaScript context or pass data via JSON.")
+        # javascript: URL injected into a link/src attribute
+        if lname in URL_PARAMS:
+            js_url = f"javascript:sg{uuid.uuid4().hex[:6]}()"
+            r = self._safe(self.client.get, self._inject(base, params, name, js_url))
+            self._cov("Cross-site scripting (javascript: URL)", tested=1)
+            if r and r.is_html and re.search(r"(?:href|src|action)\s*=\s*[\"']?" + re.escape(js_url), r.body):
+                self._cov("Cross-site scripting (javascript: URL)", found=1, note=f"param {name} at {base}")
                 self.f.add(source="dast_native", category=XSS, severity="medium",
-                           title="Reflected input without output encoding (possible XSS)",
-                           description=f"Parameter '{name}' is reflected with <, \" and ' unencoded. "
-                                       "No script was executed; confirm manually.",
-                           url=self._inject(base, params, name, "<marker>"),
-                           evidence=f"param={name}", cwe="CWE-79", confidence="medium",
-                           recommendation="Context-aware output encoding and a strict CSP.")
-            # XSS inside a <script> block (quote breaks out of a JS string)
-            js_marker = f"sg{uuid.uuid4().hex[:6]}';sgq//"
-            r = self._safe(self.client.get, self._inject(base, params, name, js_marker))
-            self._cov("Cross-site scripting (script context)", tested=1)
-            if r and r.is_html and self._in_script(r.body, js_marker):
-                self._cov("Cross-site scripting (script context)", found=1, note=f"param {name} at {base}")
-                self.f.add(source="dast_native", category=XSS, severity="high",
-                           title="Reflected input inside a <script> block (possible XSS)",
-                           description=f"'{name}' is written into JavaScript with the quote unescaped.",
+                           title="javascript: URL accepted in a link (possible XSS)",
+                           description=f"'{name}' is placed in an href/src without a scheme check.",
                            url=base, evidence=f"param={name}", cwe="CWE-79", confidence="medium",
-                           recommendation="Encode for the JavaScript context or pass data via JSON.")
-            # javascript: URL injected into a link/src attribute
-            if lname in URL_PARAMS:
-                js_url = f"javascript:sg{uuid.uuid4().hex[:6]}()"
-                r = self._safe(self.client.get, self._inject(base, params, name, js_url))
-                self._cov("Cross-site scripting (javascript: URL)", tested=1)
-                if r and r.is_html and re.search(r"(?:href|src|action)\s*=\s*[\"']?" + re.escape(js_url), r.body):
-                    self._cov("Cross-site scripting (javascript: URL)", found=1, note=f"param {name} at {base}")
-                    self.f.add(source="dast_native", category=XSS, severity="medium",
-                               title="javascript: URL accepted in a link (possible XSS)",
-                               description=f"'{name}' is placed in an href/src without a scheme check.",
-                               url=base, evidence=f"param={name}", cwe="CWE-79", confidence="medium",
-                               recommendation="Allow only http(s) URLs in links.")
-            # server-side template injection
-            r = self._safe(self.client.get, self._inject(base, params, name, SSTI_PAYLOAD))
-            self._cov("Server-side template injection", tested=1)
-            if r and SSTI_HIT.search(r.body) and SSTI_PAYLOAD not in r.body:
-                self._cov("Server-side template injection", found=1, note=f"param {name} at {base}")
+                           recommendation="Allow only http(s) URLs in links.")
+
+    def _ssti_crlf_checks(self, base, params, name):
+        # server-side template injection
+        r = self._safe(self.client.get, self._inject(base, params, name, SSTI_PAYLOAD))
+        self._cov("Server-side template injection", tested=1)
+        if r and SSTI_HIT.search(r.body) and SSTI_PAYLOAD not in r.body:
+            self._cov("Server-side template injection", found=1, note=f"param {name} at {base}")
+            self.f.add(source="dast_native", category=A03, severity="high",
+                       title="Server-side template injection",
+                       description=f"'{name}': the expression 7*7 was evaluated to 49 by a template engine.",
+                       url=base, evidence=f"param={name}; 7*7 -> 49", cwe="CWE-1336", confidence="high",
+                       recommendation="Never build templates from user input; pass it as data.")
+        # CRLF / response header injection
+        r = self._safe(self.client.get, self._inject(base, params, name, f"sg\r\n{CRLF_HEADER}: sg1"))
+        self._cov("CRLF / header injection", tested=1)
+        if r and CRLF_HEADER in r.headers:
+            self._cov("CRLF / header injection", found=1, note=f"param {name} at {base}")
+            self.f.add(source="dast_native", category=A03, severity="high",
+                       title="CRLF injection (response header injection)",
+                       description=f"'{name}' can add response headers (cookies, redirects, cache poisoning).",
+                       url=base, evidence=f"param={name}; injected header {CRLF_HEADER} returned",
+                       cwe="CWE-113", confidence="high",
+                       recommendation="Strip CR/LF from values written to headers.")
+
+    def _sqli_checks(self, base, params, name, timed_left):
+        """Error-based, boolean and (within the time budget) time-based SQL / command injection.
+        Returns the time-based checks still allowed."""
+        # error-based SQLi
+        base_r = self._safe(self.client.get, self._inject(base, params, name, params.get(name) or "1"))
+        r = self._safe(self.client.get, self._inject(base, params, name,
+                                                     (params.get(name) or "1") + "'"))
+        self._cov("SQL injection (error-based)", tested=1)
+        sqli_found = False
+        if r and base_r:
+            hit = next((s for s in SQL_ERRORS if s in r.body.lower() and s not in base_r.body.lower()), None)
+            if hit:
+                sqli_found = True
+                self._cov("SQL injection (error-based)", found=1, note=f"param {name} at {base}")
                 self.f.add(source="dast_native", category=A03, severity="high",
-                           title="Server-side template injection",
-                           description=f"'{name}': the expression 7*7 was evaluated to 49 by a template engine.",
-                           url=base, evidence=f"param={name}; 7*7 -> 49", cwe="CWE-1336", confidence="high",
-                           recommendation="Never build templates from user input; pass it as data.")
-            # CRLF / response header injection
-            r = self._safe(self.client.get, self._inject(base, params, name, f"sg\r\n{CRLF_HEADER}: sg1"))
-            self._cov("CRLF / header injection", tested=1)
-            if r and CRLF_HEADER in r.headers:
-                self._cov("CRLF / header injection", found=1, note=f"param {name} at {base}")
-                self.f.add(source="dast_native", category=A03, severity="high",
-                           title="CRLF injection (response header injection)",
-                           description=f"'{name}' can add response headers (cookies, redirects, cache poisoning).",
-                           url=base, evidence=f"param={name}; injected header {CRLF_HEADER} returned",
-                           cwe="CWE-113", confidence="high",
-                           recommendation="Strip CR/LF from values written to headers.")
-            # error-based SQLi
-            base_r = self._safe(self.client.get, self._inject(base, params, name, params.get(name) or "1"))
-            r = self._safe(self.client.get, self._inject(base, params, name,
-                                                         (params.get(name) or "1") + "'"))
-            self._cov("SQL injection (error-based)", tested=1)
-            sqli_found = False
-            if r and base_r:
-                hit = next((s for s in SQL_ERRORS if s in r.body.lower() and s not in base_r.body.lower()), None)
-                if hit:
-                    sqli_found = True
-                    self._cov("SQL injection (error-based)", found=1, note=f"param {name} at {base}")
-                    self.f.add(source="dast_native", category=A03, severity="high",
-                               title="Possible SQL injection (database error on quote)",
-                               description=f"A single quote in '{name}' produced a database error message.",
-                               url=base, evidence=f"param={name}; signature='{hit}'", cwe="CWE-89",
-                               confidence="medium",
-                               recommendation="Use parameterized queries; suppress DB errors.")
+                           title="Possible SQL injection (database error on quote)",
+                           description=f"A single quote in '{name}' produced a database error message.",
+                           url=base, evidence=f"param={name}; signature='{hit}'", cwe="CWE-89",
+                           confidence="medium",
+                           recommendation="Use parameterized queries; suppress DB errors.")
+        if not sqli_found:
+            sqli_found = self._sqli_boolean(base, params, name, base_r)
+        if timed_left > 0:
+            timed_left -= 1
             if not sqli_found:
-                sqli_found = self._sqli_boolean(base, params, name, base_r)
-            if timed_left > 0:
-                timed_left -= 1
-                if not sqli_found:
-                    self._time_based(base, params, name, SQL_TIME_PAYLOADS, "SQL injection (time-based)",
-                                     "Possible SQL injection (time-based)", "CWE-89",
-                                     "Use parameterized queries.")
-                self._time_based(base, params, name, CMD_TIME_PAYLOADS, "OS command injection (time-based)",
-                                 "Possible OS command injection (time-based)", "CWE-78",
-                                 "Never pass input to a shell; use argument lists.")
-            # open redirect
-            if lname in REDIRECT_PARAMS:
-                r = self._safe(self.client.get, self._inject(base, params, name, TEST_ORIGIN + "/x"))
-                self._cov("Open redirect", tested=1)
-                if r and 300 <= r.status < 400 and up.urlparse(
-                        r.headers.get("location", "")).hostname == "scopeguard.invalid":
-                    self._cov("Open redirect", found=1, note=f"param {name} at {base}")
-                    self.f.add(source="dast_native", category=A01, severity="medium",
-                               title="Open redirect", description=f"'{name}' controls the redirect target "
-                               "without validation (redirect was not followed).",
-                               url=base, evidence=f"param={name}; Location={r.headers['location']}",
-                               cwe="CWE-601", confidence="high",
-                               recommendation="Allowlist redirect destinations.")
-            # path traversal
-            if lname in FILE_PARAMS:
-                payloads = ["../../../../../../etc/passwd"]
-                if self.cfg["variants"]:
-                    payloads += ["..%2f..%2f..%2f..%2f..%2fetc%2fpasswd", "....//....//....//....//etc/passwd"]
-                for pl in payloads:
-                    r = self._safe(self.client.get, base + "?" + up.urlencode({**params, name: pl}, safe="%/."))
-                    self._cov("Path traversal", tested=1)
-                    if r and re.search(r"root:[x*]:0:0:", r.body):
-                        self._cov("Path traversal", found=1, note=f"param {name} at {base}")
-                        self.f.add(source="dast_native", category=A01, severity="high",
-                                   title="Path traversal (local file disclosure)",
-                                   description=f"'{name}' allowed reading a file outside the intended directory.",
-                                   url=base, evidence=f"param={name}; /etc/passwd signature matched",
-                                   cwe="CWE-22", confidence="high",
-                                   recommendation="Canonicalize and allowlist file names.")
-                        break
+                self._time_based(base, params, name, SQL_TIME_PAYLOADS, "SQL injection (time-based)",
+                                 "Possible SQL injection (time-based)", "CWE-89",
+                                 "Use parameterized queries.")
+            self._time_based(base, params, name, CMD_TIME_PAYLOADS, "OS command injection (time-based)",
+                             "Possible OS command injection (time-based)", "CWE-78",
+                             "Never pass input to a shell; use argument lists.")
+        return timed_left
+
+    def _redirect_traversal_checks(self, base, params, name, lname):
+        # open redirect
+        if lname in REDIRECT_PARAMS:
+            r = self._safe(self.client.get, self._inject(base, params, name, TEST_ORIGIN + "/x"))
+            self._cov("Open redirect", tested=1)
+            if r and 300 <= r.status < 400 and up.urlparse(
+                    r.headers.get("location", "")).hostname == "scopeguard.invalid":
+                self._cov("Open redirect", found=1, note=f"param {name} at {base}")
+                self.f.add(source="dast_native", category=A01, severity="medium",
+                           title="Open redirect", description=f"'{name}' controls the redirect target "
+                           "without validation (redirect was not followed).",
+                           url=base, evidence=f"param={name}; Location={r.headers['location']}",
+                           cwe="CWE-601", confidence="high",
+                           recommendation="Allowlist redirect destinations.")
+        # path traversal
+        if lname in FILE_PARAMS:
+            payloads = ["../../../../../../etc/passwd"]
+            if self.cfg["variants"]:
+                payloads += ["..%2f..%2f..%2f..%2f..%2fetc%2fpasswd", "....//....//....//....//etc/passwd"]
+            for pl in payloads:
+                r = self._safe(self.client.get, base + "?" + up.urlencode({**params, name: pl}, safe="%/."))
+                self._cov("Path traversal", tested=1)
+                if r and re.search(r"root:[x*]:0:0:", r.body):
+                    self._cov("Path traversal", found=1, note=f"param {name} at {base}")
+                    self.f.add(source="dast_native", category=A01, severity="high",
+                               title="Path traversal (local file disclosure)",
+                               description=f"'{name}' allowed reading a file outside the intended directory.",
+                               url=base, evidence=f"param={name}; /etc/passwd signature matched",
+                               cwe="CWE-22", confidence="high",
+                               recommendation="Canonicalize and allowlist file names.")
+                    break
 
     # ---- JS SAST ---------------------------------------------------------
     def sast(self):
@@ -1239,6 +1289,87 @@ class Scanner:
                 out.append((action, file_inputs[0].get("name") or "file", fields, accept, max_declared))
         return out
 
+    def _served_and_executed(self, action, name, m, r) -> bool:
+        """Where might the uploaded file be served from? A path in the response (or Location) that
+        names the file, plus a few common upload folders: True when one returns the exec marker."""
+        cands = [c for c in re.findall(r"[/\w.\-]*" + re.escape(name), r.body)]
+        loc = r.headers.get("location", "")
+        if loc:
+            cands.append(loc)
+        cands += [d + name for d in ("", "uploads/", "upload/", "files/", "file/", "media/",
+                                     "images/", "img/", "static/", "tmp/", "data/")]
+        tried = set()
+        for cand in cands:
+            g_url = up.urljoin(action, cand)
+            if g_url in tried or not self.client.in_scope(g_url):
+                continue
+            tried.add(g_url)
+            g = self._safe(self.client.get, g_url)
+            if g and EXEC_MARKER + m in g.body:
+                return True
+        return False
+
+    def _upload_probes(self, action, fields, file_field, marker_root) -> tuple[list[str], list[str]]:
+        """Benign disguised files: (accepted extensions, names that were executed)."""
+        accepted, executed = [], []
+        for name_tpl, content_tpl, ctype, _executable in UPLOAD_PROBES:
+            m = f"{marker_root}{uuid.uuid4().hex[:4]}"
+            name, content = name_tpl.format(m=m), content_tpl.format(m=m).encode()
+            self._cov("File upload bypass", tested=1)
+            r = self._safe(self.client.post_multipart, action, fields, file_field, name, content, ctype)
+            if not r or r.error or r.status >= 400:
+                continue
+            accepted.append(name.split(".", 1)[-1])
+            # If the response (or the stored file) echoes the exec marker, it ran.
+            if EXEC_MARKER + m in r.body or self._served_and_executed(action, name, m, r):
+                executed.append(name)
+        return accepted, executed
+
+    def _report_upload_bypass(self, action, accepted, executed):
+        dangerous = [e for e in accepted if e.lower() not in ("txt",)]
+        if executed:
+            self._cov("File upload bypass", found=1, note=f"executed: {', '.join(executed)}")
+            self.f.add(source="dast_native", category=A03, severity="critical",
+                       title="Unrestricted file upload leads to code execution",
+                       description="An uploaded file with a server-executable extension was executed; the "
+                                   "benign marker it printed was returned. A real attacker could upload a web shell.",
+                       url=action, evidence="executed: " + ", ".join(executed[:5]), cwe="CWE-434",
+                       confidence="high", recommendation="Reject executable extensions, validate content, store "
+                                                        "uploads outside the web root, and serve them non-executable.")
+        elif dangerous:
+            self._cov("File upload bypass", found=1, note=f"accepted: {', '.join(dangerous)}")
+            self.f.add(source="dast_native", category=A05, severity="high",
+                       title="File upload accepts dangerous/disguised file types",
+                       description="The server accepted uploads with dangerous or disguised extensions "
+                                   "(" + ", ".join(sorted(set(dangerous))[:8]) + "). Execution was not confirmed, "
+                                   "but client-side type checks are being bypassed.",
+                       url=action, evidence="accepted extensions: " + ", ".join(sorted(set(dangerous))[:8]),
+                       cwe="CWE-434", confidence="medium",
+                       recommendation="Enforce a server-side allowlist of extensions and content types.")
+
+    def _upload_size_probe(self, action, fields, file_field, marker_root, max_declared):
+        """Size limit probe (benign, compressible): (response, note) or (None, "")."""
+        big = self._safe(self.client.post_multipart, action, fields, file_field,
+                         f"scopeguard-{marker_root}-big.txt", b"A" * (UPLOAD_OVERSIZE_MB * 1024 * 1024),
+                         "text/plain")
+        if not big or big.error:
+            return None, ""
+        size_note = (f"a {UPLOAD_OVERSIZE_MB} MB file was " +
+                     ("rejected" if big.status >= 400 else f"accepted (HTTP {big.status})") +
+                     (f"; client declares max {max_declared} bytes" if max_declared else ""))
+        self._cov("File upload size limit", tested=1, note=size_note)
+        return big, size_note
+
+    def _report_upload_size(self, action, big, size_note, max_declared):
+        if big is not None and big.status < 400 and (
+                not max_declared or UPLOAD_OVERSIZE_MB * 1024 * 1024 > (max_declared or 0)):
+            self.f.add(source="dast_native", category=A05, severity="low",
+                       title="File upload has no effective size limit",
+                       description=f"A {UPLOAD_OVERSIZE_MB} MB upload was accepted (HTTP {big.status}); large "
+                                   "uploads enable denial of service.", url=action, evidence=size_note,
+                       cwe="CWE-400", confidence="medium",
+                       recommendation="Enforce a server-side maximum upload size.")
+
     def upload_tests(self, enable_active: bool):
         """Report upload controls (accepted types, declared max size) and, when
         active uploads are enabled, try benign disguised files and note the result."""
@@ -1258,73 +1389,10 @@ class Scanner:
                                                          "outside the web root and never execute them.")
             if not enable_active:
                 continue
-            accepted, executed, size_note = [], [], ""
-            for name_tpl, content_tpl, ctype, executable in UPLOAD_PROBES:
-                m = f"{marker_root}{uuid.uuid4().hex[:4]}"
-                name, content = name_tpl.format(m=m), content_tpl.format(m=m).encode()
-                self._cov("File upload bypass", tested=1)
-                r = self._safe(self.client.post_multipart, action, fields, file_field, name, content, ctype)
-                if not r or r.error or r.status >= 400:
-                    continue
-                accepted.append(name.split(".", 1)[-1])
-                # If the response (or the stored file) echoes the exec marker, it ran.
-                if EXEC_MARKER + m in r.body:
-                    executed.append(name)
-                    continue
-                # Where might the file be served from? A path in the response (or
-                # Location) that names the file, plus a few common upload folders.
-                cands = [c for c in re.findall(r"[/\w.\-]*" + re.escape(name), r.body)]
-                loc = r.headers.get("location", "")
-                if loc:
-                    cands.append(loc)
-                cands += [d + name for d in ("", "uploads/", "upload/", "files/", "file/", "media/",
-                                             "images/", "img/", "static/", "tmp/", "data/")]
-                tried = set()
-                for cand in cands:
-                    g_url = up.urljoin(action, cand)
-                    if g_url in tried or not self.client.in_scope(g_url):
-                        continue
-                    tried.add(g_url)
-                    g = self._safe(self.client.get, g_url)
-                    if g and EXEC_MARKER + m in g.body:
-                        executed.append(name)
-                        break
-            # size limit probe (benign, compressible)
-            big = self._safe(self.client.post_multipart, action, fields, file_field,
-                             f"scopeguard-{marker_root}-big.txt", b"A" * (UPLOAD_OVERSIZE_MB * 1024 * 1024),
-                             "text/plain")
-            if big and not big.error:
-                size_note = (f"a {UPLOAD_OVERSIZE_MB} MB file was " +
-                             ("rejected" if big.status >= 400 else f"accepted (HTTP {big.status})") +
-                             (f"; client declares max {max_declared} bytes" if max_declared else ""))
-                self._cov("File upload size limit", tested=1, note=size_note)
-            dangerous = [e for e in accepted if e.lower() not in ("txt",)]
-            if executed:
-                self._cov("File upload bypass", found=1, note=f"executed: {', '.join(executed)}")
-                self.f.add(source="dast_native", category=A03, severity="critical",
-                           title="Unrestricted file upload leads to code execution",
-                           description="An uploaded file with a server-executable extension was executed; the "
-                                       "benign marker it printed was returned. A real attacker could upload a web shell.",
-                           url=action, evidence="executed: " + ", ".join(executed[:5]), cwe="CWE-434",
-                           confidence="high", recommendation="Reject executable extensions, validate content, store "
-                                                            "uploads outside the web root, and serve them non-executable.")
-            elif dangerous:
-                self._cov("File upload bypass", found=1, note=f"accepted: {', '.join(dangerous)}")
-                self.f.add(source="dast_native", category=A05, severity="high",
-                           title="File upload accepts dangerous/disguised file types",
-                           description="The server accepted uploads with dangerous or disguised extensions "
-                                       "(" + ", ".join(sorted(set(dangerous))[:8]) + "). Execution was not confirmed, "
-                                       "but client-side type checks are being bypassed.",
-                           url=action, evidence="accepted extensions: " + ", ".join(sorted(set(dangerous))[:8]),
-                           cwe="CWE-434", confidence="medium",
-                           recommendation="Enforce a server-side allowlist of extensions and content types.")
-            if big and not big.error and big.status < 400 and (not max_declared or UPLOAD_OVERSIZE_MB * 1024 * 1024 > (max_declared or 0)):
-                self.f.add(source="dast_native", category=A05, severity="low",
-                           title="File upload has no effective size limit",
-                           description=f"A {UPLOAD_OVERSIZE_MB} MB upload was accepted (HTTP {big.status}); large "
-                                       "uploads enable denial of service.", url=action, evidence=size_note,
-                           cwe="CWE-400", confidence="medium",
-                           recommendation="Enforce a server-side maximum upload size.")
+            accepted, executed = self._upload_probes(action, fields, file_field, marker_root)
+            big, size_note = self._upload_size_probe(action, fields, file_field, marker_root, max_declared)
+            self._report_upload_bypass(action, accepted, executed)
+            self._report_upload_size(action, big, size_note, max_declared)
 
     def probe_endpoints(self, limit: int = 40):
         """GET in-scope backend endpoints found in HTML/JS (others recorded, never fetched).

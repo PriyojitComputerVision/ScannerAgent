@@ -238,7 +238,9 @@ def collect(root: str) -> dict:
     """Every requirements-type file under ``root`` (already extracted by the archive checks):
     {"files": [{file, kind, packages, pinned, error?}], "packages": [{name, version, pinned, spec,
     file, line}], "truncated": bool}."""
-    files, packages, truncated = [], [], False
+    files: list[dict] = []
+    packages: list[dict] = []
+    truncated = False
     for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
         dirnames.sort()
         for name in sorted(filenames):

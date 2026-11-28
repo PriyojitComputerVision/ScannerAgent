@@ -13,6 +13,7 @@ resumes from the checkpoint lines the crashed run printed (scopeguard.checkpoint
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -244,7 +245,5 @@ def run_codecheck(*, source_dir: str | None, site_dir: str | None, allowed_hosts
 def _notify(attempt_cb, attempt: dict) -> None:
     """Report one attempt (audit trail); a broken listener never breaks the check."""
     if attempt_cb:
-        try:
+        with contextlib.suppress(Exception):  # a broken listener must not break the scan
             attempt_cb(dict(attempt), process_info(int(attempt.get("memory_mb") or 0)))
-        except Exception:  # noqa: BLE001, S110
-            pass
